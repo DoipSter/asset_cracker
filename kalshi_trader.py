@@ -44,6 +44,9 @@ SLIPPAGE = 0.01  # we pay one cent worse than the displayed price, buying or sel
 KELLY = 0.25  # bet this fraction of the Kelly-optimal stake
 MAX_STAKE = 0.20  # never put more than this share of cash into one bet
 WINDOW_CAP = 0.35  # ...or more than this share of the account into one window
+# One balance now funds every coin, so five coins betting at once could commit five times
+# WINDOW_CAP. This caps what can be at risk across all open bets, whatever the coin.
+TOTAL_CAP = 0.50
 MIN_GAP = 20  # seconds between bets in the same window
 EXIT_MARGIN = 0.02  # an early sale must beat our estimate of the hold value by this
 MIN_TAU = 8  # stop trading when this few seconds remain (orders take time)
@@ -97,7 +100,7 @@ STRATEGIES = [
      "tau": (LOTTERY["min_tau"], 900), "band": (0.0, LOTTERY["max_ask"])},
 ]
 
-CSV_FIELDS = ["time", "strategy", "event", "ticker", "side", "contracts", "price",
+CSV_FIELDS = ["time", "strategy", "coin", "event", "ticker", "side", "contracts", "price",
               "multiplier", "fee", "cost", "payout", "pnl", "result", "strike",
               "btc_price", "final_value", "balance_after", "model_prob", "edge"]
 
@@ -111,6 +114,14 @@ def parse_amount(value):
         return float(str(value).replace(",", "").strip())
     except (TypeError, ValueError):
         return None
+
+
+def coin_from_ticker(ticker):
+    """"KXETH15M-26SEP..." -> "ETH". Used to place bets saved before coins were tracked."""
+    head = (ticker or "").split("-")[0]
+    if head.startswith("KX") and head.endswith("15M"):
+        return head[2:-3] or None
+    return None
 
 
 def kalshi_fee(contracts, price):
@@ -157,7 +168,7 @@ class Account:
         self.bets = self.wins = self.losses = 0
         self.realized_pnl = 0.0
         self.next_id = 1
-        self.view = None  # what the model thinks right now, for the display
+        self.views = {}  # coin -> what the model thinks right now, for the display
 
     # ---- persistence ------------------------------------------------------
 
@@ -169,6 +180,8 @@ class Account:
         self.losses = int(d.get("losses", 0))
         self.realized_pnl = float(d.get("realized_pnl", 0.0))
         self.next_id = 1 + max([lot["id"] for lot in self.log], default=0)
+        for lot in self.log:  # bets saved before coins were tracked: infer from the ticker
+            lot.setdefault("coin", coin_from_ticker(lot.get("ticker", "")))
 
     def to_dict(self, equity):
         return {
@@ -188,14 +201,19 @@ class Account:
         return [lot for lot in self.log
                 if lot["status"] == "open" and (ticker is None or lot["ticker"] == ticker)]
 
-    def equity(self, market):
+    def committed(self):
+        """What every open bet cost, across all coins. One balance funds them all."""
+        return sum(lot["cost"] for lot in self.open_lots())
+
+    def equity(self, markets):
         """Cash plus what open bets could be sold for right now, after the selling fee
-        (or their cost, if there's no bid to price them by)."""
+        (or their cost, if there's no bid to price them by). `markets` maps coin -> quotes."""
         total = self.cash
         for lot in self.open_lots():
+            m = (markets or {}).get(lot.get("coin"))
             bid = 0.0
-            if market and market["ticker"] == lot["ticker"]:
-                bid = market["yes_bid"] if lot["side"] == "UP" else market["no_bid"]
+            if m and m.get("ticker") == lot["ticker"]:
+                bid = m["yes_bid"] if lot["side"] == "UP" else m["no_bid"]
             if bid > 0:
                 total += lot["contracts"] * bid - kalshi_fee(lot["contracts"], bid)
             else:
@@ -210,7 +228,7 @@ class Account:
         tau = market["close"] - now
         ya, na, yb = market["yes_ask"], market["no_ask"], market["yes_bid"]
         if not price or ya <= 0 or na <= 0:
-            self.view = None
+            self.views[market.get("coin")] = None
             return []
         if prm.get("kind") == "lottery":
             return self._lottery(market, price, now, p_model, paused, ctx or {})
@@ -232,7 +250,8 @@ class Account:
         held = {lot["side"] for lot in self.open_lots(market["ticker"])}
         best = max((o for o in options if not held or o["side"] in held),
                    key=lambda o: o["edge"])
-        self.view = {"p_up": p_up, "p_model": p_model, "mid": mid, "best": best, "tau": tau,
+        self.views[market.get("coin")] = {"p_up": p_up, "p_model": p_model, "mid": mid,
+                                          "best": best, "tau": tau,
                      "signal": self._signal(market, now, best, tau, paused)}
         if paused or tau < MIN_TAU:
             return events
@@ -273,7 +292,8 @@ class Account:
         elif cheap["mult"] < L["min_mult"]:
             why = f"only {cheap['mult']:.1f}x likelier (needs {L['min_mult']:.0f}x)"
         mid = (yb + ya) / 2 if yb > 0 else ya
-        self.view = {"p_up": p_up, "p_model": p_model, "mid": mid, "best": cheap, "tau": tau,
+        self.views[market.get("coin")] = {"p_up": p_up, "p_model": p_model, "mid": mid,
+                                          "best": cheap, "tau": tau,
                      "signal": {"side": cheap["side"], "conf": cheap["p"] * 100,
                                 "edge": cheap["edge"] * 100, "need": 0.0, "bet": why is None,
                                 "why": why or "will bet"}}
@@ -335,6 +355,9 @@ class Account:
             return []
         committed = sum(lot["cost"] for lot in here)
         room = WINDOW_CAP * (self.cash + committed) - committed
+        # ...and with every coin drawing on the same balance, cap the overall exposure
+        at_risk = self.committed()
+        room = min(room, TOTAL_CAP * (self.cash + at_risk) - at_risk)
         unit = c + FEE_RATE * c * (1 - c)  # cost of one contract, fee included
         kelly = (best["p"] - unit) / (1 - unit)
         stake = min(min(KELLY * kelly, MAX_STAKE) * self.cash, room)
@@ -351,6 +374,7 @@ class Account:
         cost = round(n * c + fee, 2)
         self.cash -= cost
         lot = {"id": self.next_id, "t": now, "time": _iso(now), "ticker": market["ticker"],
+               "coin": market.get("coin"),
                "side": option["side"], "contracts": n, "price": round(c, 2),
                "multiplier": round(1 / c, 2), "fee": fee, "cost": cost,
                "strike": market["strike"], "close": market["close"], "btc_price": price,
@@ -396,86 +420,40 @@ class Account:
             events.append(dict(lot, kind="settled", strategy=self.name, won=won))
         return events
 
+class CoinState:
+    """Everything specific to one coin: how its price behaves, how far Kalshi's settlement
+    index sits above our exchange price, and the round currently open. No money lives here --
+    the strategy accounts share a single balance across every coin."""
 
-class KalshiTrader:
-    """All the strategy accounts, plus the shared price/volatility tracking."""
-
-    def __init__(self, folder, suffix="", offset_pct=INDEX_OFFSET_PCT, sd_pct=INDEX_SD_PCT,
+    def __init__(self, coin, offset_pct=INDEX_OFFSET_PCT, sd_pct=INDEX_SD_PCT,
                  default_sigma=DEFAULT_SIGMA):
-        """`suffix` keeps each coin's files apart (e.g. "_eth"); the rest calibrate the model
-        to that coin: how far Kalshi's index runs above Coinbase's price, how uncertain that
-        gap is, and the coin's typical volatility."""
-        self.json_path = os.path.join(folder, f"kalshi_balance{suffix}.json")
-        self.csv_path = os.path.join(folder, f"kalshi_trades{suffix}.csv")
+        self.coin = coin
         self.base_offset_pct, self.sd_pct, self.default_sigma = offset_pct, sd_pct, default_sigma
         # (time, measured offset) for recent rounds: 24 rounds is about six hours
         self.offset_obs = deque(maxlen=24)
-        self.accounts = {p["name"]: Account(p) for p in STRATEGIES}
-        self.selected = STRATEGIES[0]["name"]
-        self.paused = False
-        self.started_at = time.time()
-        self.rounds_monitored = 0  # 15-minute rounds the bots have watched
-        self._round_ticker = None  # the round being watched, so each is counted once
-        self._load()
-        self._reset_signals()
-        self._last_save = 0.0
+        self.rounds_monitored = 0  # 15-minute rounds watched for this coin
+        self.round_ticker = None  # so each round is counted once
+        self.reset_signals()
 
-    def _reset_signals(self):
+    def reset_signals(self):
         self.sigma2 = self.default_sigma ** 2
         self._ring = deque(maxlen=150)  # (second, price), for the settlement average
         self._vol_ref = None
         self._min_closes = deque(maxlen=60)  # the price at the end of each finished minute
         self._min_last = None  # (minute number, latest price in it), the minute in progress
-        self.market = None  # the latest quotes for the open window
-
-    def _load(self):
-        try:
-            with open(self.json_path) as f:
-                d = json.load(f)
-            for name, acct in d["accounts"].items():
-                if name in self.accounts:
-                    self.accounts[name].load(acct)
-            self.selected = d.get("selected", self.selected)
-            self._round_ticker = d.get("last_round_ticker")
-            if "rounds_monitored" in d:
-                self.rounds_monitored = int(d["rounds_monitored"])
-            else:  # a save from before we counted rounds: estimate from how long it's run
-                joined = max((a.participated() for a in self.accounts.values()), default=0)
-                span = time.time() - float(d.get("started_at", time.time()))
-                self.rounds_monitored = max(joined, int(span // 900))
-            self.paused = bool(d.get("paused", False))
-            self.started_at = float(d.get("started_at", self.started_at))
-            for row in d.get("index_offsets", []):
-                self.offset_obs.append((float(row[0]), float(row[1])))
-        except Exception:
-            # No file yet, or an older format: start every account fresh.
-            self.accounts = {p["name"]: Account(p) for p in STRATEGIES}
-
-    def account(self, name=None):
-        return self.accounts[name or self.selected]
-
-    def select(self, name):
-        if name in self.accounts:
-            self.selected = name
-            self.save(force=True)
-
-    def pending_tickers(self):
-        seen = {}
-        for acct in self.accounts.values():
-            for lot in acct.open_lots():
-                seen[lot["ticker"]] = lot["close"]
-        return list(seen.items())
+        self.market = None  # the latest quotes for the open round
+        self.price = None  # the latest exchange price
+        self.hourly = None  # the hourly bracket market, when the feed supplies it
 
     # ---- how far the index sits above our exchange price -------------------
 
     @property
     def offset_pct(self):
         """Kalshi settles on an index built from several exchanges' order books, which sits a
-        little above our exchange's last trade -- and that gap drifts by a few dollars within
-        minutes, so a fixed number goes stale. Every settled round hands us a free measurement
-        (see note_settlement), and the median of the recent ones shrugs off the odd outlier.
-        Until a few have come in, fall back to the constant measured over a month."""
-        cutoff = time.time() - 6 * 3600  # older than this and the market has moved on
+        little above our exchange's last trade -- and that gap drifts within minutes, so a
+        fixed number goes stale. Every settled round is a free measurement (see
+        note_settlement); the median of the recent ones shrugs off the odd outlier."""
+        cutoff = time.time() - 6 * 3600
         recent = [o for t, o in self.offset_obs if t >= cutoff]
         return statistics.median(recent) if len(recent) >= 3 else self.base_offset_pct
 
@@ -484,41 +462,28 @@ class KalshiTrader:
         cutoff = time.time() - 6 * 3600
         return self.offset_pct, sum(1 for t, _ in self.offset_obs if t >= cutoff)
 
-    def _add_offset(self, when, offset):
+    def add_offset(self, when, offset):
         if abs(offset) <= 0.002:  # anything wilder than 0.2% is bad data, not a real gap
             self.offset_obs.append((when, round(offset, 8)))
             return True
         return False
 
     def note_settlement(self, close, final_value):
-        """A round settled. Kalshi's settled value IS the index averaged over that round's
-        final minute, so comparing it with our own average over the same minute measures the
-        gap exactly, with no guessing."""
+        """Kalshi's settled value IS the index averaged over that round's final minute, so
+        comparing it with our own average over the same minute measures the gap exactly."""
         index_avg = parse_amount(final_value)
         if index_avg is None:
-            return
+            return False
         ours = [p for s, p in self._ring if close - 60 <= s < close]
-        if len(ours) < 40 or index_avg <= 0:  # too few ticks in that minute to average fairly
-            return
-        if self._add_offset(close, index_avg / (sum(ours) / len(ours)) - 1):
-            self.save(force=True)
+        if len(ours) < 40 or index_avg <= 0:  # too few ticks that minute to average fairly
+            return False
+        return self.add_offset(close, index_avg / (sum(ours) / len(ours)) - 1)
 
-    def seed_offsets(self, measurements):
-        """Prime the estimate from rounds that settled before we started, so it is useful at
-        launch instead of 45 minutes later. `measurements` is [(close time, offset), ...]."""
-        for when, offset in sorted(measurements):
-            self._add_offset(when, offset)
-        self.save(force=True)
+    # ---- price history and volatility --------------------------------------
 
-    # ---- volatility -------------------------------------------------------
-
-    def seed_vol(self, closes):
-        """Start from real recent volatility using 1-minute closes (oldest first)."""
-        rets = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
-        if len(rets) >= 5:
-            self.sigma2 = self._clamp(sum(r * r for r in rets) / len(rets) / 60)
-        # Older minutes go in front of any we've already collected live.
-        self._min_closes.extendleft(reversed(closes))
+    @staticmethod
+    def _clamp(sigma2):
+        return min(max(sigma2, (2e-5) ** 2), (3e-4) ** 2)
 
     @staticmethod
     def _var(closes):
@@ -526,29 +491,16 @@ class KalshiTrader:
         rets = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
         return sum(r * r for r in rets) / len(rets) / 60 if rets else None
 
-    def _tail_context(self, market, price, tau):
-        """What the Lottery strategy needs: how much volatility has just spiked (last ~5
-        minutes vs the last 45), and the chance of UP from a model that respects the spike."""
-        closes = list(self._min_closes)
-        c45, c6 = closes[-46:], closes[-7:]
-        if len(c45) < 15 or len(c6) < 4:
-            return {"p_tail": None, "spike": None}  # not enough history yet
-        s45, s5 = self._var(c45), self._var(c6)
-        if not s45 or s5 is None:
-            return {"p_tail": None, "spike": None}
-        s45 = self._clamp(s45)
-        s2 = max(s45, s5) * LOTTERY["fatten"] ** 2  # widen the tails a little
-        p_tail = prob_yes(price, market["strike"], tau, s2,
-                          self._known_avg(market["close"]) if tau < 60 else None,
-                          self.offset_pct, self.sd_pct)
-        return {"p_tail": p_tail, "spike": math.sqrt(s5 / s45)}
-
-    @staticmethod
-    def _clamp(sigma2):
-        return min(max(sigma2, (2e-5) ** 2), (3e-4) ** 2)
+    def seed_vol(self, closes):
+        """Start from real recent volatility using 1-minute closes (oldest first)."""
+        rets = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
+        if len(rets) >= 5:
+            self.sigma2 = self._clamp(sum(r * r for r in rets) / len(rets) / 60)
+        self._min_closes.extendleft(reversed(closes))  # older minutes go in front
 
     def observe(self, price, ts):
         """Feed every live price. Keeps a per-second record and updates volatility."""
+        self.price = price
         sec = int(ts)
         minute = sec // 60  # keep the last price of each minute, for the volatility windows
         if self._min_last is not None and minute != self._min_last[0]:
@@ -567,32 +519,152 @@ class KalshiTrader:
             self.sigma2 = self._clamp(self.sigma2 + weight * (inst - self.sigma2))
             self._vol_ref = (sec, price)
 
-    def _known_avg(self, close):
+    def known_avg(self, close):
         vals = [p for s, p in self._ring if s >= close - 60]
         return sum(vals) / len(vals) if vals else None
 
+    def late_volume_share(self):
+        """How much of the open round's volume has landed in its final minute. A week of data
+        says a confident price is least trustworthy when this runs high -- see research/.
+        None until the feed supplies per-minute volume."""
+        m = self.market or {}
+        bars = m.get("bars")
+        if not bars:
+            return None
+        total = sum(b.get("volume", 0) for b in bars)
+        if total <= 0:
+            return None
+        late = sum(b.get("volume", 0) for b in bars if m["close"] - b.get("t", 0) <= 60)
+        return late / total
+
+    def tail_context(self, market, price, tau):
+        """What the Lottery strategy needs: how much volatility has just spiked (last ~5
+        minutes vs the last 45), and the chance of UP from a model that respects the spike."""
+        closes = list(self._min_closes)
+        c45, c6 = closes[-46:], closes[-7:]
+        if len(c45) < 15 or len(c6) < 4:
+            return {"p_tail": None, "spike": None}  # not enough history yet
+        s45, s5 = self._var(c45), self._var(c6)
+        if not s45 or s5 is None:
+            return {"p_tail": None, "spike": None}
+        s45 = self._clamp(s45)
+        s2 = max(s45, s5) * LOTTERY["fatten"] ** 2  # widen the tails a little
+        p_tail = prob_yes(price, market["strike"], tau, s2,
+                          self.known_avg(market["close"]) if tau < 60 else None,
+                          self.offset_pct, self.sd_pct)
+        return {"p_tail": p_tail, "spike": math.sqrt(s5 / s45)}
+
+
+class KalshiTrader:
+    """The strategy accounts -- one balance each, shared across every coin -- plus a CoinState
+    per coin holding that coin's prices, volatility and index calibration.
+
+    A strategy that bets on Bitcoin and Ethereum in the same quarter hour spends the same
+    balance twice, so TOTAL_CAP limits how much of an account can be committed at once."""
+
+    def __init__(self, folder, coins):
+        """`coins` maps a coin name to its calibration, e.g.
+        {"BTC": {"index_offset_pct": ..., "index_sd_pct": ..., "default_sigma": ...}, ...}"""
+        self.json_path = os.path.join(folder, "kalshi_balance.json")
+        self.csv_path = os.path.join(folder, "kalshi_trades.csv")
+        self.coins = {
+            name: CoinState(name, cfg.get("index_offset_pct", INDEX_OFFSET_PCT),
+                            cfg.get("index_sd_pct", INDEX_SD_PCT),
+                            cfg.get("default_sigma", DEFAULT_SIGMA))
+            for name, cfg in coins.items()
+        }
+        self.accounts = {p["name"]: Account(p) for p in STRATEGIES}
+        self.selected = STRATEGIES[0]["name"]
+        self.selected_coin = next(iter(self.coins))
+        self.paused = False
+        self.started_at = time.time()
+        self._load()
+        self._last_save = 0.0
+
+    # ---- lookups ----------------------------------------------------------
+
+    def coin(self, name=None):
+        return self.coins[name or self.selected_coin]
+
+    def account(self, name=None):
+        return self.accounts[name or self.selected]
+
+    def markets(self):
+        """Every coin's live quotes, keyed by coin, for valuing open bets."""
+        return {name: c.market for name, c in self.coins.items() if c.market}
+
+    @property
+    def rounds_monitored(self):
+        """Rounds watched across every coin."""
+        return sum(c.rounds_monitored for c in self.coins.values())
+
+    def select(self, name):
+        if name in self.accounts:
+            self.selected = name
+            self.save(force=True)
+
+    def select_coin(self, name):
+        if name in self.coins:
+            self.selected_coin = name
+            self.save(force=True)
+
+    def pending_tickers(self, coin=None):
+        """Open bets still awaiting settlement, optionally just one coin's."""
+        seen = {}
+        for acct in self.accounts.values():
+            for lot in acct.open_lots():
+                if coin is None or lot.get("coin") == coin:
+                    seen[lot["ticker"]] = lot["close"]
+        return list(seen.items())
+
+    # ---- per-coin work, delegated to that coin's state ---------------------
+
+    def seed_vol(self, coin, closes):
+        self.coins[coin].seed_vol(closes)
+
+    def observe(self, coin, price, ts):
+        self.coins[coin].observe(price, ts)
+
+    def note_settlement(self, coin, close, final_value):
+        if self.coins[coin].note_settlement(close, final_value):
+            self.save(force=True)
+
+    def seed_offsets(self, coin, measurements):
+        """Prime the index-gap estimate from rounds that settled before we started."""
+        c = self.coins[coin]
+        for when, offset in sorted(measurements):
+            c.add_offset(when, offset)
+        self.save(force=True)
+
+    def set_hourly(self, coin, brackets):
+        """The hourly bracket market for this coin, as the side panel shows it."""
+        self.coins[coin].hourly = brackets
+
     # ---- trading ----------------------------------------------------------
 
-    def step(self, market, price, now):
-        """Give every strategy a look at the open window. Returns all their events."""
-        self.market = market
+    def step(self, coin, market, price, now):
+        """Give every strategy a look at this coin's open round. The accounts are shared, so
+        a bet here spends the same balance as a bet on any other coin."""
+        c = self.coins[coin]
+        c.market = dict(market, coin=coin)
         if not price:
             return []
-        if market["ticker"] != self._round_ticker:  # a new round started: count it once
-            self._round_ticker = market["ticker"]
-            self.rounds_monitored += 1
+        if market["ticker"] != c.round_ticker:  # a new round started: count it once
+            c.round_ticker = market["ticker"]
+            c.rounds_monitored += 1
         tau = market["close"] - now
-        p_model = prob_yes(price, market["strike"], tau, self.sigma2,
-                           self._known_avg(market["close"]) if tau < 60 else None,
-                           self.offset_pct, self.sd_pct)
-        ctx = self._tail_context(market, price, tau)
+        p_model = prob_yes(price, market["strike"], tau, c.sigma2,
+                           c.known_avg(market["close"]) if tau < 60 else None,
+                           c.offset_pct, c.sd_pct)
+        ctx = c.tail_context(market, price, tau)
         events = []
         for acct in self.accounts.values():
-            events += acct.step(market, price, now, p_model, self.paused, ctx)
+            events += acct.step(c.market, price, now, p_model, self.paused, ctx)
         return self._record(events, now)
 
     def on_settled(self, ticker, result, final_value, now, price):
-        """A window closed and Kalshi reported the real result. Pay out or write off."""
+        """A round closed and Kalshi reported the real result. Pay out or write off.
+        Tickers are unique across coins, so the ticker alone identifies the bets."""
         if result not in ("yes", "no"):
             return []
         events = []
@@ -611,22 +683,31 @@ class KalshiTrader:
 
     def standings(self):
         """Every strategy, best balance first."""
+        mk = self.markets()
         rows = []
         for a in self.accounts.values():
-            eq = a.equity(self.market)
+            eq = a.equity(mk)
             rows.append({"name": a.name, "blurb": a.params["blurb"], "equity": eq,
                          "pnl_pct": (eq / START_BALANCE - 1) * 100, "bets": a.bets,
                          "wins": a.wins, "losses": a.losses, "joined": a.participated()})
         return sorted(rows, key=lambda r: -r["equity"])
 
-    def snapshot(self, name=None):
+    def snapshot(self, name=None, coin=None):
+        """One strategy's state. `coin` scopes the live-market view and its open bets to a
+        single coin; the balance is always the shared one."""
         a = self.account(name)
-        eq = a.equity(self.market)
+        c = self.coin(coin)
+        mk = self.markets()
+        eq = a.equity(mk)
         return {
             "name": a.name, "blurb": a.params["blurb"], "equity": eq,
             "pnl": eq - START_BALANCE, "pnl_pct": (eq / START_BALANCE - 1) * 100,
-            "cash": a.cash, "open": a.open_lots(), "log": a.log, "market": self.market,
-            "view": a.view, "bets": a.bets, "wins": a.wins, "losses": a.losses,
+            "cash": a.cash, "open": a.open_lots(), "log": a.log,
+            "coin": c.coin, "market": c.market, "hourly": c.hourly,
+            "late_share": c.late_volume_share(),
+            "coin_open": [l for l in a.open_lots() if l.get("coin") == c.coin],
+            "coin_log": [l for l in a.log if l.get("coin") == c.coin],
+            "view": a.views.get(c.coin), "bets": a.bets, "wins": a.wins, "losses": a.losses,
             "paused": self.paused, "rounds_monitored": self.rounds_monitored,
             "rounds_joined": a.participated(),
         }
@@ -636,7 +717,7 @@ class KalshiTrader:
     def _append_csv(self, e, now):
         acct = self.accounts[e["strategy"]]
         row = {
-            "time": _iso(now), "strategy": e["strategy"],
+            "time": _iso(now), "strategy": e["strategy"], "coin": e.get("coin", ""),
             "event": {"bet": "BET", "sold": "SOLD", "settled": "SETTLED"}[e["kind"]],
             "ticker": e["ticker"], "side": e["side"], "contracts": e["contracts"],
             "price": e["exit_price"] if e["kind"] == "sold" else e["price"],
@@ -645,7 +726,7 @@ class KalshiTrader:
             "result": e.get("result", ""), "strike": e["strike"],
             "btc_price": e.get("exit_btc", e["btc_price"]),
             "final_value": e.get("final_value", ""),
-            "balance_after": round(acct.equity(self.market), 2),
+            "balance_after": round(acct.equity(self.markets()), 2),
             "model_prob": e.get("model_prob", ""), "edge": e.get("edge", ""),
         }
         try:
@@ -658,31 +739,64 @@ class KalshiTrader:
         except OSError:
             pass  # a locked file (say, open in Excel) shouldn't stop the simulation
 
+    def _load(self):
+        try:
+            with open(self.json_path) as f:
+                d = json.load(f)
+            for name, acct in d["accounts"].items():
+                if name in self.accounts:
+                    self.accounts[name].load(acct)
+            self.selected = d.get("selected", self.selected)
+            self.selected_coin = d.get("selected_coin", self.selected_coin)
+            self.paused = bool(d.get("paused", False))
+            self.started_at = float(d.get("started_at", self.started_at))
+            for name, saved in (d.get("coins") or {}).items():
+                c = self.coins.get(name)
+                if not c:
+                    continue
+                c.rounds_monitored = int(saved.get("rounds_monitored", 0))
+                c.round_ticker = saved.get("last_round_ticker")
+                for row in saved.get("index_offsets", []):
+                    c.offset_obs.append((float(row[0]), float(row[1])))
+        except Exception:
+            # No file yet, or a format we don't recognise: start every account fresh.
+            self.accounts = {p["name"]: Account(p) for p in STRATEGIES}
+
     def save(self, force=False):
         """Write kalshi_balance.json. Throttled to every few seconds unless forced."""
         if not force and time.monotonic() - self._last_save < 5:
             return
         self._last_save = time.monotonic()
         standings = self.standings()
+        mk = self.markets()
         data = {
-            "note": "Simulation only. No real money. Uses Kalshi's real 15-minute BTC prices.",
+            "note": "Simulation only. No real money. One balance per strategy, shared across coins.",
             "updated": datetime.now().isoformat(timespec="seconds"),
             "starting_balance_each": START_BALANCE,
             "selected": self.selected,
+            "selected_coin": self.selected_coin,
             "leader": standings[0]["name"],
             "paused": self.paused,
             "started_at": self.started_at,
             "rounds_monitored": self.rounds_monitored,
-            "last_round_ticker": self._round_ticker,
-            "index_offset_pct": round(self.offset_pct, 8),
-            "index_offset_note": "how far Kalshi's index sits above our exchange price, "
-                                 "learned from recent settlements",
-            "index_offsets": [[round(t, 3), o] for t, o in self.offset_obs],
             "leaderboard": [{"strategy": r["name"], "balance": round(r["equity"], 2),
                              "return_pct": round(r["pnl_pct"], 2), "bets": r["bets"],
                              "rounds_joined": r["joined"]}
                             for r in standings],
-            "accounts": {n: a.to_dict(a.equity(self.market)) | {"cash": round(a.cash, 2)}
+            "coins": {
+                name: {
+                    "rounds_monitored": c.rounds_monitored,
+                    "last_round_ticker": c.round_ticker,
+                    "index_offset_pct": round(c.offset_pct, 8),
+                    "index_offsets": [[round(t, 3), o] for t, o in c.offset_obs],
+                    "open_bets": sum(1 for a in self.accounts.values()
+                                     for l in a.open_lots() if l.get("coin") == name),
+                }
+                for name, c in self.coins.items()
+            },
+            "index_offset_note": "how far Kalshi's index sits above our exchange price, "
+                                 "learned from recent settlements, per coin",
+            "accounts": {n: a.to_dict(a.equity(mk)) | {"cash": round(a.cash, 2)}
                          for n, a in self.accounts.items()},
         }
         tmp = self.json_path + ".tmp"
@@ -709,6 +823,7 @@ class KalshiTrader:
                     pass
         self.accounts = {p["name"]: Account(p) for p in STRATEGIES}
         self.started_at = time.time()
-        self.rounds_monitored = 0
-        self._round_ticker = None
-        self.save(force=True)  # the learned index offset is about the market, so it stays
+        for c in self.coins.values():
+            c.rounds_monitored = 0
+            c.round_ticker = None
+        self.save(force=True)  # the learned index offsets are about the market, so they stay
