@@ -32,6 +32,7 @@ set -euo pipefail
 PG_VERSION="${PG_VERSION:-17}"
 SERVICE_USER="assetcracker"
 DEV_ROLE="${USER}"
+DB_LOCALE="en_US.UTF-8"  # named, so a rebuild never inherits whatever the system locale is
 
 say() { printf '\n==> %s\n' "$*"; }
 # Never stop to ask for a password: if a command is not one this user may run with sudo,
@@ -39,6 +40,11 @@ say() { printf '\n==> %s\n' "$*"; }
 sudo() { command sudo -n "$@" || { echo "sudo refused: $*" >&2; return 1; }; }
 
 [ "$(uname -m)" = "aarch64" ] || { echo "expected a 64-bit ARM system, found $(uname -m)"; exit 1; }
+locale -a | grep -qix "$(echo "${DB_LOCALE}" | sed 's/UTF-8/utf8/')" || {
+  echo "The ${DB_LOCALE} locale is not generated on this machine. As an admin user, run:"
+  echo "  sudo sed -i 's/^# *${DB_LOCALE} UTF-8/${DB_LOCALE} UTF-8/' /etc/locale.gen && sudo locale-gen"
+  exit 1
+}
 [ "$(id -u)" -ne 0 ] || { echo "run this as your normal user, not as root"; exit 1; }
 
 say "Installing PostgreSQL ${PG_VERSION}"
@@ -76,7 +82,7 @@ role() {  # role NAME : create a login role with no password if it is missing
 }
 database() {  # database NAME OWNER
   sudo -u postgres psql -Atc "select 1 from pg_database where datname='$1'" | grep -q 1 \
-    || sudo -u postgres createdb --owner="$2" --encoding=UTF8 "$1"
+    || sudo -u postgres createdb --owner="$2" --encoding=UTF8 --locale="${DB_LOCALE}" --template=template0 "$1"
 }
 
 say "Creating roles and databases"

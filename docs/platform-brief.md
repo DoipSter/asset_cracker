@@ -201,7 +201,8 @@ commands, including `sudo bash`, are refused). `setup.sh`, run as `acdeploy`, in
 PostgreSQL 17.11 and created `assetcracker` (owner role `assetcracker`, for the service) and
 `assetcracker_dev` (owner role `acdeploy`). Verified: Postgres listens on 127.0.0.1 and ::1
 only, the memory settings and UTC took effect, and `acdeploy` cannot connect to the real
-database. Reach the dev database from the Mac with
+database. Both databases use the `en_US.UTF-8` locale (Brad generated it on the Pi; the
+empty databases were recreated with it). Reach the dev database from the Mac with
 `ssh -L 5433:/var/run/postgresql/.s.PGSQL.5432 acdeploy@rpi-v5-1.local`.
 
 Not yet done: a backup target; power-loss behaviour; data checksums are off (the installer's
