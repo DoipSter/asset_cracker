@@ -6,3 +6,7 @@ __pycache__/
 # results, not source, and the app recreates them from scratch on first launch.
 kalshi_balance*.json
 kalshi_trades*.csv
+
+# Parity harness: raw live recordings are large and machine-specific. A recording chosen as
+# a test fixture is copied to tools/parity/fixtures/ (force-added past the kalshi_* rules).
+tools/parity/recordings/
