@@ -52,7 +52,10 @@ KELLY = 0.25  # bet this fraction of the Kelly-optimal stake
 MAX_STAKE = 0.20  # default share of cash for one bet; a strategy may override
 WINDOW_CAP = 0.35  # ...or more than this share of the account into one window
 # One balance now funds every coin, so five coins betting at once could commit five times
-# WINDOW_CAP. This caps what can be at risk across all open bets, whatever the coin.
+# WINDOW_CAP. This caps what can be at risk across all open bets, whatever the coin --
+# as a share of the STARTING balance, not the current one. A winning run would otherwise
+# keep raising the ceiling on its own stakes, so a bad round costs more the better things
+# have been going. Half of $150 is $75 at risk, and it stays $75 at any balance.
 TOTAL_CAP = 0.50
 MIN_GAP = 20  # default seconds between bets in the same round; a strategy may override
 MIN_HOLD = 15  # default seconds before a bet may be sold again
@@ -385,9 +388,10 @@ class Account:
             return []
         committed = sum(lot["cost"] for lot in here)
         room = WINDOW_CAP * (self.cash + committed) - committed
-        # ...and with every coin drawing on the same balance, cap the overall exposure
+        # ...and with every coin drawing on the same balance, cap the overall exposure at a
+        # fixed number of dollars rather than a share of a balance that grows as it wins
         at_risk = self.committed()
-        room = min(room, TOTAL_CAP * (self.cash + at_risk) - at_risk)
+        room = min(room, TOTAL_CAP * START_BALANCE - at_risk)
         unit = c + FEE_RATE * c * (1 - c)  # cost of one contract, fee included
         kelly = (best["p"] - unit) / (1 - unit)
         cap = prm.get("max_stake", MAX_STAKE)
@@ -475,9 +479,12 @@ class CoinState:
     the strategy accounts share a single balance across every coin."""
 
     def __init__(self, coin, offset_pct=INDEX_OFFSET_PCT, sd_pct=INDEX_SD_PCT,
-                 default_sigma=DEFAULT_SIGMA):
+                 default_sigma=DEFAULT_SIGMA, decimals=2):
         self.coin = coin
         self.base_offset_pct, self.sd_pct, self.default_sigma = offset_pct, sd_pct, default_sigma
+        # How many decimals this coin's price is quoted to. DOGE moves in the sixth, so a
+        # log rounded to a fixed four would throw away the whole move.
+        self.decimals = decimals
         # (time, measured offset) for recent rounds: 24 rounds is about six hours
         self.offset_obs = deque(maxlen=24)
         self.rounds_monitored = 0  # 15-minute rounds watched for this coin
@@ -624,7 +631,8 @@ class KalshiTrader:
         self.coins = {
             name: CoinState(name, cfg.get("index_offset_pct", INDEX_OFFSET_PCT),
                             cfg.get("index_sd_pct", INDEX_SD_PCT),
-                            cfg.get("default_sigma", DEFAULT_SIGMA))
+                            cfg.get("default_sigma", DEFAULT_SIGMA),
+                            cfg.get("decimals", 2))
             for name, cfg in coins.items()
         }
         self.accounts = {p["name"]: Account(p) for p in STRATEGIES}
@@ -791,13 +799,16 @@ class KalshiTrader:
         # we have calibrated. Comparing the two each round is how we see the offset drift.
         est = r["last_price"] * (1 + r["offset_pct"])
         final = parse_amount(final_value)
+        dec = self.coins[r["coin"]].decimals if r["coin"] in self.coins else 2
         bets = [l for a in self.accounts.values() for l in a.log if l["ticker"] == ticker]
         scalp = [l for l in self.accounts["Scalper"].log if l["ticker"] == ticker]
         self._append(self.round_path, ROUND_FIELDS, {
             "time": _iso(now), "coin": r["coin"], "ticker": ticker, "close": _iso(r["close"]),
             "strike": r["strike"], "final_value": final if final is not None else "",
-            "result": result, "last_price": round(r["last_price"], 4),
-            "index_est": round(est, 4),
+            "result": result, "last_price": round(r["last_price"], dec),
+            # two digits finer than the coin is quoted to: the gap we are measuring is
+            # around 0.01%, which for DOGE lands past the sixth decimal
+            "index_est": round(est, dec + 2),
             "index_gap_pct": round((final / est - 1) * 100, 5) if final and est else "",
             # the move a full 15-minute round is expected to make, as a percentage
             "sigma_pct": round(math.sqrt(max(0.0, r["sigma2"]) * 900) * 100, 4),

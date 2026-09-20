@@ -517,23 +517,25 @@ def save_muted(coin, value):
 # The index gap and volatility were measured from a week of Kalshi settlements (Sep 2026).
 # Up to five coins, all funded from one balance per strategy. Index offset and volatility
 # are per coin; BTC and ETH are measured (see research/), the rest start from BTC's numbers
-# and self-calibrate from their own settlements within the hour.
+# and self-calibrate from their own settlements within the hour. `decimals` is how many
+# Kalshi quotes that coin's strikes to, which is the precision a price has to be shown
+# at for a 15-minute move to be visible at all: DOGE moves in the sixth decimal.
 ASSETS = {
     "BTC": dict(coin="BTC", name="Bitcoin", product="BTC-USD", series="KXBTC15M",
                 icon="btc.ico", index_offset_pct=0.000057,
-                index_sd_pct=0.000144, default_sigma=8e-5, min_pad_pct=0.000187, decimals=0),
+                index_sd_pct=0.000144, default_sigma=8e-5, min_pad_pct=0.000187, decimals=2),
     "ETH": dict(coin="ETH", name="Ethereum", product="ETH-USD", series="KXETH15M",
                 icon="eth.ico", index_offset_pct=0.0000713,
                 index_sd_pct=0.0002156, default_sigma=9.4e-5, min_pad_pct=0.000187, decimals=2),
     "SOL": dict(coin="SOL", name="Solana", product="SOL-USD", series="KXSOL15M",
                 icon="eth.ico", index_offset_pct=0.000057,
-                index_sd_pct=0.000216, default_sigma=1.1e-4, min_pad_pct=0.00025, decimals=2),
+                index_sd_pct=0.000216, default_sigma=1.1e-4, min_pad_pct=0.00025, decimals=4),
     "XRP": dict(coin="XRP", name="XRP", product="XRP-USD", series="KXXRP15M",
                 icon="eth.ico", index_offset_pct=0.000057,
                 index_sd_pct=0.000216, default_sigma=1.1e-4, min_pad_pct=0.00025, decimals=4),
     "DOGE": dict(coin="DOGE", name="Dogecoin", product="DOGE-USD", series="KXDOGE15M",
                  icon="eth.ico", index_offset_pct=0.000057,
-                 index_sd_pct=0.000216, default_sigma=1.2e-4, min_pad_pct=0.00025, decimals=5),
+                 index_sd_pct=0.000216, default_sigma=1.2e-4, min_pad_pct=0.00025, decimals=6),
 }
 
 
@@ -882,7 +884,8 @@ class Monitor(Drawing, tk.Toplevel):
             self.text(W / 2, 168, "$ ———", 44, MUTED, tags="price")
             return
         shown = self.price * (1 + self.state.offset_pct)
-        self.text(W / 2, 168, f"${shown:,.2f}", 44, TEXT, tags="price")
+        dec = self.asset["decimals"]
+        self.text(W / 2, 168, f"${shown:,.{dec}f}", 44, TEXT, tags="price")
 
         if len(self.history) >= 2 and self.history[0]:
             change = (self.price - self.history[0]) / self.history[0] * 100
@@ -911,7 +914,8 @@ class Monitor(Drawing, tk.Toplevel):
         state = MUTED if est is None else (UP if est >= self.ptb else DOWN)
         self.circle(42, mid, 4, fill=state, width=0, tags="ptb")
         self.text(54, mid, "Price to beat", 11, MUTED, weight="", anchor="w", tags="ptb")
-        self.text(W / 2 + 34, mid, f"${self.ptb:,.2f}", 14, TEXT, tags="ptb")
+        self.text(W / 2 + 34, mid, f"${self.ptb:,.{self.asset['decimals']}f}", 14, TEXT,
+                  tags="ptb")
         left = int(self.ptb_close - self.now())
         clock = f"{left // 60}:{left % 60:02d}" if left > 0 else "settling"
         self.text(W - 40, mid, clock, 12, MUTED, anchor="e", tags="ptb")
@@ -982,7 +986,9 @@ class Monitor(Drawing, tk.Toplevel):
         y = Yi(self.ptb)  # the price to beat
         c.create_line(*self.pts([left, y, right, y]), fill=TEXT, width=self.px(1.5),
                       dash=(self.px(5), self.px(4)), tags="chart")
-        self.text(right, y - 8, f"Price to beat  ${self.ptb:,.2f}", 10, MUTED, weight="",
+        self.text(right, y - 8,
+                  f"Price to beat  ${self.ptb:,.{self.asset['decimals']}f}", 10, MUTED,
+                  weight="",
                   anchor="e", tags="chart")
         ex, ey = X(pts[-1][0]), Y(pts[-1][1])
         self.circle(ex, ey, 6.5, fill=CARD, width=0, tags="chart")
@@ -1117,7 +1123,8 @@ class Monitor(Drawing, tk.Toplevel):
 
         def worker():
             try:
-                send_toast(self.app_id, title, f"Now ${price:,.2f}")
+                send_toast(self.app_id, title,
+                           f"Now ${price:,.{self.asset['decimals']}f}")
             except Exception:
                 pass  # a missed toast shouldn't disturb the display
 
@@ -1246,14 +1253,15 @@ class Monitor(Drawing, tk.Toplevel):
         if e["kind"] == "bet":
             title = f"{who}: bet {e['side']}, {e['contracts']} × {e['price'] * 100:.0f}¢ ({e['multiplier']:.2f}x)"
             body = (f"{e['model_prob'] * 100:.0f}% confident  ·  ${e['cost']:.2f} incl. fee  ·  "
-                    f"price to beat ${e['strike']:,.2f}")
+                    f"price to beat ${e['strike']:,.{self.asset['decimals']}f}")
         elif e["kind"] == "sold":
             title = f"{who}: sold early {'+' if e['pnl'] >= 0 else '−'}${abs(e['pnl']):.2f}"
             body = f"{e['side']} × {e['contracts']} at {e['exit_price'] * 100:.0f}¢"
         else:
             title = f"{who}: {'won +' if e['won'] else 'lost −'}${abs(e['pnl']):.2f}"
             final = parse_amount(e.get("final_value")) or 0.0
-            body = f"{e['side']} bet {'paid out' if e['won'] else 'missed'}  ·  final ${final:,.2f}"
+            body = (f"{e['side']} bet {'paid out' if e['won'] else 'missed'}  ·  "
+                    f"final ${final:,.{self.asset['decimals']}f}")
 
         def worker():
             try:
