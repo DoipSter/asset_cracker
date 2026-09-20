@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prepare the Raspberry Pi to host the Asset Cracker service's database.
 #
-# Read this before running it. Run it on the Pi, as your normal user (it calls sudo itself):
+# Read this before running it. Run it on the Pi as "acdeploy" (see create-deploy-user.sh), whose
+# sudo rights are limited to exactly the commands used here:
 #
 #     bash setup.sh
 #
@@ -22,7 +23,7 @@
 #     Postgres trusts the operating-system user. There is no database password to leak.
 #   - Open Postgres to the network. It keeps Debian's default of listening on localhost only,
 #     and the script stops if that is not the case. From the Mac, reach the dev database through
-#     SSH:  ssh -L 5433:/var/run/postgresql/.s.PGSQL.5432 bradl@rpi-v5-1.local
+#     SSH:  ssh -L 5433:/var/run/postgresql/.s.PGSQL.5432 acdeploy@rpi-v5-1.local
 #   - Touch time sync. systemd-timesyncd was measured active and synchronized on 2026-09-20.
 #   - Install the service itself, Go, or anything else.
 
@@ -33,6 +34,9 @@ SERVICE_USER="assetcracker"
 DEV_ROLE="${USER}"
 
 say() { printf '\n==> %s\n' "$*"; }
+# Never stop to ask for a password: if a command is not one this user may run with sudo,
+# fail at once and say which. (Written to work under the restricted "acdeploy" account.)
+sudo() { command sudo -n "$@" || { echo "sudo refused: $*" >&2; return 1; }; }
 
 [ "$(uname -m)" = "aarch64" ] || { echo "expected a 64-bit ARM system, found $(uname -m)"; exit 1; }
 [ "$(id -u)" -ne 0 ] || { echo "run this as your normal user, not as root"; exit 1; }
