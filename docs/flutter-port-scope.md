@@ -1,5 +1,9 @@
 # Scope: morphing Asset Cracker into a cross-platform Flutter/Dart app
 
+> **Superseded on 2026-09-20 by `platform-brief.md`.** The goal widened from "the same widget,
+> cross-platform" to a trading platform with a Go service, Postgres and a Flutter client. The
+> measurements and the Python findings below still hold; the phase plan does not.
+
 Status: **draft for discussion**, branch `flutter-scope`. Tracks Agora intent INT-9.
 Nothing here changes the Python.
 
