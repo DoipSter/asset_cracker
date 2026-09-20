@@ -38,6 +38,16 @@ Smaller things found on the way:
 - `kalshi_trader.py:685` uses the `dict | dict` operator, which needs Python 3.9. The README
   says 3.8+.
 - There are no tests, and the backtests the README cites are not in the repo.
+- **Settlements reach the engine more than once** (measured in the 40-minute recording,
+  2026-09-20). In `stream_kalshi`, once a round's result arrives `just_closed` is cleared, but
+  the block at `asset_cracker.py:366-371` sets it again on the next pass for as long as the
+  next round has not been found, so the result is reported again every second. One ETH round
+  was delivered 7 times, one BTC round twice. Payouts are not doubled (the lots are already
+  closed), but `note_settlement` stores the index-offset measurement again each time: the BTC
+  state ended with 14 stored offsets for 13 distinct rounds. Repeats pull the 24-sample median
+  toward that round and push older rounds out early. The Dart feed should report each
+  settlement once; the Dart engine must still behave like the Python when given repeats, so
+  the parity gate holds.
 - Runtime state is written next to the script (`data_dir()`), which will not work for an
   installed or sandboxed app.
 

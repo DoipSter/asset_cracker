@@ -42,6 +42,19 @@ That is the only patch, and it is applied from outside.
 Passes (`PARITY OK`, exit 0) when each coin's trade CSV is identical line for line and every
 account ends with the same cash. On failure it prints the first differing line from each side.
 
+## Fixture
+
+`fixtures/2026-09-20_40min/` is a 40-minute live recording of both coins, stored with
+`calls.jsonl` gzipped (replay.py reads either form): 12,562 engine calls, three full rounds per
+coin, producing 32 bets, 2 early sales and 26 settlements (60 CSV rows). The Python replays it
+identically. This is the first recording the Dart engine has to match.
+
+    python tools/parity/replay.py tools/parity/fixtures/2026-09-20_40min
+
+All six strategies traded in it (Model 26 rows, Scalper 10, Late 10, Value 6, Favorite 6,
+Lottery 2). Lottery fired on ETH only, so its path is covered thinly; add a longer recording
+when there is one with more.
+
 ## Known limit
 
 In the live run the wall clock advances by microseconds during a call; in the replay it is

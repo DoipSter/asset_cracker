@@ -15,6 +15,7 @@ Run it:
 
 import argparse
 import collections
+import gzip
 import json
 import os
 import shutil
@@ -66,7 +67,11 @@ def main():
     ap.add_argument("--keep", help="copy the replayed files here instead of discarding them")
     args = ap.parse_args()
 
-    with open(os.path.join(args.folder, "calls.jsonl")) as f:
+    path = os.path.join(args.folder, "calls.jsonl")
+    opener = open
+    if not os.path.exists(path):  # fixtures are stored compressed
+        path, opener = path + ".gz", gzip.open
+    with opener(path, "rt") as f:
         rows = [json.loads(line) for line in f if line.strip()]
     meta = rows[0]["meta"]
     calls = rows[1:]
