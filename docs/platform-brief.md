@@ -63,7 +63,11 @@ Consequences to accept:
   harness (`tools/parity/`) is language-neutral and becomes the check for that port, then the
   regression suite.
 - Doipster writes Python. Go puts the engine out of his day-to-day reach unless he picks it
-  up. His path in is research against Postgres and strategy design. **Open: is he on board?**
+  up. His path in is research against Postgres and strategy design. **Decided (Brad):** he
+  will adapt.
+- **Decided (Brad): the two run in parallel, in this repo.** The Python widget and `research/`
+  stay where they are and keep working; nothing in the platform work edits or removes them.
+  The platform lives in its own top-level folders (`service/`, `app/`, `db/`).
 
 ## 4. Concepts
 
@@ -207,9 +211,8 @@ tick tables by time and set a retention policy.
 
 ## 14. Open questions
 
-1. Is Doipster on board with Go, with this repo becoming the platform, and with his role?
-2. Does this stay in `doipster/asset_cracker`? It may one day hold real-money code, and Brad's
-   standing rule puts new tools under `OctoByter`. Brad has leaned towards staying.
+1. ~~Is Doipster on board?~~ Decided by Brad: he will adapt. He still has not seen this.
+2. ~~Which repo?~~ Decided by Brad: this one, in parallel with the Python.
 3. Section 8: is that what was meant by commentary and weight?
 4. Which sources and instrument types come after Kalshi and Coinbase?
 5. Position netting across buckets on one real account.
