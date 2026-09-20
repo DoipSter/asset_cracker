@@ -193,8 +193,19 @@ Measured over SSH on 2026-09-20 (`rpi-v5-1`, 10.0.0.172 by DHCP, also answers as
 Plus) with 862 GB free, Debian 12 bookworm 64-bit, kernel 6.12. Clock synchronized by
 systemd-timesyncd. 37 C idle, no throttling. Nothing installed beyond the desktop: no
 Postgres, Go or Docker; only SSH listens on the network. Debian's Postgres is 15;
-`deploy/pi/setup.sh` installs 17 from apt.postgresql.org instead. Not yet done: a DHCP
-reservation (the address is dynamic), power-loss behaviour, a backup target.
+`deploy/pi/setup.sh` installs 17 from apt.postgresql.org instead.
+
+Set up on 2026-09-20: Brad reserved 10.0.0.172 on his router. `create-deploy-user.sh` made
+`acdeploy`, a key-only account whose passwordless sudo is an allowlist (verified: off-list
+commands, including `sudo bash`, are refused). `setup.sh`, run as `acdeploy`, installed
+PostgreSQL 17.11 and created `assetcracker` (owner role `assetcracker`, for the service) and
+`assetcracker_dev` (owner role `acdeploy`). Verified: Postgres listens on 127.0.0.1 and ::1
+only, the memory settings and UTC took effect, and `acdeploy` cannot connect to the real
+database. Reach the dev database from the Mac with
+`ssh -L 5433:/var/run/postgresql/.s.PGSQL.5432 acdeploy@rpi-v5-1.local`.
+
+Not yet done: a backup target; power-loss behaviour; data checksums are off (the installer's
+default for 17), worth turning on before real records accumulate.
 
 The service needs outbound internet to the exchanges. Postgres backups go to a second machine:
 these are tax records. Tick data volume, measured today: about 57 KB a minute of raw input for
