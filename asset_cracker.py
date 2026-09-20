@@ -44,8 +44,12 @@ TICKER_EVERY_MS = 500  # Coinbase allows ~10 requests/sec per IP, so this is wel
 CANDLES_EVERY_MS = 60_000
 ALERT_PCT = 1.0  # notify when the price moves this much since the last alert
 
-# name -> (candle size in seconds, how many candles to show)
-RANGES = {"15M": (60, 15), "1H": (60, 60), "24H": (300, 288), "7D": (3600, 168)}
+# name -> (point size in seconds, how many points to show)
+RANGES = {"1M": (1, 60), "15M": (60, 15), "1H": (60, 60), "24H": (300, 288), "7D": (3600, 168)}
+# 1M is drawn from the live feed rather than Coinbase's candles: the smallest candle they
+# serve is a minute, which would be a single point. The feed is already kept per second for
+# the window chart, so a minute of it is free.
+LIVE_RANGES = {"1M"}
 DEFAULT_RANGE = "24H"
 
 # Dark theme
@@ -863,7 +867,8 @@ class Monitor(Drawing, tk.Toplevel):
 
     def _draw_range_pills(self):
         self.canvas.delete("pills")
-        w, gap, top, bottom = 62, 8, 596, 632
+        # sized so the whole row still fits the phone's width as ranges are added
+        w, gap, top, bottom = 56, 6, 596, 632
         x = (W - (w * len(RANGES) + gap * (len(RANGES) - 1))) / 2
         for key in RANGES:
             active = key == self.range_key
@@ -887,10 +892,18 @@ class Monitor(Drawing, tk.Toplevel):
         dec = self.asset["decimals"]
         self.text(W / 2, 168, f"${shown:,.{dec}f}", 44, TEXT, tags="price")
 
-        if len(self.history) >= 2 and self.history[0]:
-            change = (self.price - self.history[0]) / self.history[0] * 100
+        # 1M has no candle history behind it, so its change comes from the live points
+        if self.range_key in LIVE_RANGES:
+            window = [p for t, p in self.window_pts if t >= self.now() - 60]
+            base = window[0] if len(window) >= 2 else None
+        else:
+            base = self.history[0] if len(self.history) >= 2 else None
+        if base:
+            change = (self.price - base) / base * 100
             good = change >= 0
-            label = f"{'▲' if good else '▼'} {abs(change):.2f}%  ·  {self.range_key}"
+            # a minute's move is a hundredth of a percent or so, and would round to 0.00
+            places = 3 if self.range_key in LIVE_RANGES else 2
+            label = f"{'▲' if good else '▼'} {abs(change):.{places}f}%  ·  {self.range_key}"
             width = tkfont.Font(family="Segoe UI Semibold", size=-self.px(13)).measure(label)
             half = width / self.k / 2 + 16
             self.rrect(W / 2 - half, 200, W / 2 + half, 228, 14,
@@ -1028,11 +1041,77 @@ class Monitor(Drawing, tk.Toplevel):
         self.text(46, 552, f"Low  ${min(ps):,.{dec}f}", 11, MUTED, anchor="w", tags="chart")
         self.text(W - 46, 552, f"High  ${max(ps):,.{dec}f}", 11, MUTED, anchor="e", tags="chart")
 
+    def _draw_minute_chart(self):
+        """The 1M view: the last sixty seconds, one point per second, straight off the feed.
+
+        At this zoom the price barely moves, so the scale has to fit the data rather than
+        the price to beat -- a target far away would flatten a whole minute into a
+        straight line. The target is still drawn when it happens to fall inside the band.
+        """
+        c = self.canvas
+        left, right, top, bottom = 46, W - 46, 322, 518
+        start = self.now() - 60
+        pts = [(t, p) for t, p in self.window_pts if t >= start]
+        if len(pts) < 2:
+            self.text(W / 2, 420, "Listening…", 14, MUTED, weight="", tags="chart")
+            return
+
+        lift = 1 + self.state.offset_pct
+        dec = self.asset["decimals"]
+        levels = [p * lift for _, p in pts]
+        lo, hi = min(levels), max(levels)
+        # a minute can be genuinely flat, so fall back to the coin's own minimum padding
+        pad = max((hi - lo) * 0.18, hi * self.asset["min_pad_pct"] * 0.5)
+        lo, hi = lo - pad, hi + pad
+
+        def X(t):
+            return left + (right - left) * (t - start) / 60
+
+        def Yi(p):
+            return bottom - (bottom - top) * (p - lo) / (hi - lo)
+
+        good = levels[-1] >= levels[0]
+        line, tint = (UP, UP_TINT) if good else (DOWN, DOWN_TINT)
+        for i in range(4):  # faint gridlines
+            y = top + (bottom - top) * i / 3
+            c.create_line(*self.pts([left, y, right, y]), fill=GRID, width=self.px(1),
+                          tags="chart")
+
+        coords = [v for (t, _), p in zip(pts, levels) for v in (X(t), Yi(p))]
+        c.create_polygon(self.pts(coords + [coords[-2], bottom, coords[0], bottom]),
+                         fill=tint, outline="", tags="chart")
+        c.create_line(*self.pts(coords), fill=line, width=self.px(2.5),
+                      capstyle="round", joinstyle="round", tags="chart")
+
+        # One dot per second. At this zoom they are individually visible, so a gap in the
+        # dots is a gap in the feed -- which is worth being able to see at a glance.
+        for x, y in zip(coords[::2], coords[1::2]):
+            self.circle(x, y, 1.8, fill=line, width=0, tags="chart")
+        self.circle(coords[-2], coords[-1], 7, fill=CARD, width=0, tags="chart")
+        self.circle(coords[-2], coords[-1], 4.5, fill=line, width=0, tags="chart")
+
+        if self.ptb is not None and lo <= self.ptb <= hi:  # only when it is actually in view
+            y = Yi(self.ptb)
+            c.create_line(*self.pts([left, y, right, y]), fill=TEXT, width=self.px(1.5),
+                          dash=(self.px(5), self.px(4)), tags="chart")
+            self.text(right, y - 8, f"Price to beat  ${self.ptb:,.{dec}f}", 10, MUTED,
+                      weight="", anchor="e", tags="chart")
+
+        self.text(46, 552, f"Low  ${min(levels):,.{dec}f}", 11, MUTED, anchor="w",
+                  tags="chart")
+        self.text(W - 46, 552, f"High  ${max(levels):,.{dec}f}", 11, MUTED, anchor="e",
+                  tags="chart")
+        # 60 would be a full minute with no missed seconds; fewer means a quiet or laggy feed
+        self.text(W / 2, 552, f"{len(pts)}/60 ticks", 11, MUTED, weight="", tags="chart")
+
     def _draw_chart(self):
         c = self.canvas
         c.delete("chart")
         if self.range_key == "15M":
             self._draw_window_chart()
+            return
+        if self.range_key == "1M":
+            self._draw_minute_chart()
             return
         left, right, top, bottom = 46, W - 46, 322, 518
         pts = list(self.history)
@@ -1145,6 +1224,8 @@ class Monitor(Drawing, tk.Toplevel):
         ).start()
 
     def _poll_history(self):
+        if self.range_key in LIVE_RANGES:
+            return  # nothing to fetch: this range is drawn from the feed we already have
         if self._history_busy:
             return
         self._history_busy = True
@@ -1296,7 +1377,7 @@ class Monitor(Drawing, tk.Toplevel):
                 self.window_pts[-1] = (sec, self.price)
             elif not self.window_pts or sec > self.window_pts[-1][0]:
                 self.window_pts.append((sec, self.price))
-            if self.range_key == "15M":
+            if self.range_key in ("15M", "1M"):  # both are drawn from the live points
                 self._chart_dirty = True
         elif kind == "seed":
             candles = msg[1]  # [(time, close), ...] one per minute, oldest first
