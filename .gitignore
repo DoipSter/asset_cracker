@@ -6,3 +6,7 @@ __pycache__/
 # results, not source, and the app recreates them from scratch on first launch.
 kalshi_balance*.json
 kalshi_trades*.csv
+
+# Scraped market data: ~8 MB, regenerate with research/scrape_week.py
+research/week_data.json
+research/week_partial.json
