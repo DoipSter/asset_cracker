@@ -345,8 +345,9 @@ class Account:
         return sig
 
     def participated(self):
-        """How many different rounds this strategy has bet in."""
-        return len({lot["ticker"] for lot in self.log})
+        """How many 15-minute rounds this strategy has bet in. Betting on three coins in
+        the same quarter hour is one round, not three -- they all settle together."""
+        return len({lot["close"] for lot in self.log})
 
     def _entries(self, market, now, price, best, tau):
         prm = self.params
@@ -584,6 +585,10 @@ class KalshiTrader:
         self.selected_coin = next(iter(self.coins))
         self.paused = False
         self.started_at = time.time()
+        # A round is one 15-minute window across every coin, so it is counted once no
+        # matter how many coins are trading it.
+        self.rounds_monitored = 0
+        self._round_close = None
         self._load()
         self._last_save = 0.0
 
@@ -599,10 +604,9 @@ class KalshiTrader:
         """Every coin's live quotes, keyed by coin, for valuing open bets."""
         return {name: c.market for name, c in self.coins.items() if c.market}
 
-    @property
-    def rounds_monitored(self):
-        """Rounds watched across every coin."""
-        return sum(c.rounds_monitored for c in self.coins.values())
+    def coin_rounds(self):
+        """Rounds watched per coin, which is what each CoinState counts."""
+        return {name: c.rounds_monitored for name, c in self.coins.items()}
 
     def select(self, name):
         if name in self.accounts:
@@ -655,9 +659,12 @@ class KalshiTrader:
         c.market = dict(market, coin=coin)
         if not price:
             return []
-        if market["ticker"] != c.round_ticker:  # a new round started: count it once
+        if market["ticker"] != c.round_ticker:  # this coin moved to a new round
             c.round_ticker = market["ticker"]
             c.rounds_monitored += 1
+        if market["close"] != self._round_close:  # a new 15-minute window, for all coins
+            self._round_close = market["close"]
+            self.rounds_monitored += 1
         tau = market["close"] - now
         p_model = prob_yes(price, market["strike"], tau, c.sigma2,
                            c.known_avg(market["close"]) if tau < 60 else None,
@@ -756,6 +763,13 @@ class KalshiTrader:
             self.selected_coin = d.get("selected_coin", self.selected_coin)
             self.paused = bool(d.get("paused", False))
             self.started_at = float(d.get("started_at", self.started_at))
+            saved_rounds = int(d.get("rounds_monitored", 0))
+            self._round_close = d.get("last_round_close")
+            if self._round_close is None and saved_rounds:
+                # Written before a round meant one window: it counted each coin separately,
+                # so scale it back down to windows.
+                saved_rounds = round(saved_rounds / max(1, len(self.coins)))
+            self.rounds_monitored = saved_rounds
             for name, saved in (d.get("coins") or {}).items():
                 c = self.coins.get(name)
                 if not c:
@@ -785,6 +799,9 @@ class KalshiTrader:
             "paused": self.paused,
             "started_at": self.started_at,
             "rounds_monitored": self.rounds_monitored,
+            "rounds_note": "a round is one 15-minute window across every coin, counted once",
+            "last_round_close": self._round_close,
+            "rounds_monitored_per_coin": self.coin_rounds(),
             "leaderboard": [{"strategy": r["name"], "balance": round(r["equity"], 2),
                              "return_pct": round(r["pnl_pct"], 2), "bets": r["bets"],
                              "rounds_joined": r["joined"]}
@@ -829,6 +846,8 @@ class KalshiTrader:
                     pass
         self.accounts = {p["name"]: Account(p) for p in STRATEGIES}
         self.started_at = time.time()
+        self.rounds_monitored = 0
+        self._round_close = None
         for c in self.coins.values():
             c.rounds_monitored = 0
             c.round_ticker = None
