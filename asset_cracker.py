@@ -1546,12 +1546,12 @@ class SidePanel(Drawing, tk.Toplevel):
             return
         self.log_offset = max(0, min(self.log_offset, len(lots) - self.LOG_ROWS))
         page = lots[self.log_offset:self.log_offset + self.LOG_ROWS]
-        # Every coin's round closes on the same quarter hour, so the close time alone would
-        # light up other coins' bets too. Match the coin as well.
-        current, live_coin = self.app.ptb_close, self.app.coin
+        # Anything still running is worth flagging, whichever coin it is on -- every coin's
+        # round closes on the same quarter hour, so this catches the whole live slate.
+        now = self.app.now()
         for i, lot in enumerate(page):
             y = top + 22 + i * self.ROW_H
-            if lot["close"] == current and lot.get("coin") == live_coin:
+            if lot["close"] > now:  # this round has not settled yet
                 self.rrect(24, y - 11, SIDE - 24, y + 11, 8, fill=HILITE, tags=tag)
             c.create_line(*self.pts([28, y - 12, SIDE - 28, y - 12]), fill=GRID,
                           width=self.px(1), tags=tag)
@@ -1577,8 +1577,8 @@ class SidePanel(Drawing, tk.Toplevel):
         self.text(34, 338, f"{self.log_offset + 1}–{last} of {len(lots)}  ·  net "
                   f"{'+' if net >= 0 else '−'}${abs(net):.2f}", 10, MUTED, weight="",
                   anchor="w", tags=tag)
-        self.rrect(172, 333, 184, 343, 3, fill=HILITE, tags=tag)  # legend for the band
-        self.text(190, 338, "current window", 10, MUTED, weight="", anchor="w", tags=tag)
+        self.rrect(176, 333, 188, 343, 3, fill=HILITE, tags=tag)  # legend for the band
+        self.text(194, 338, "live round", 10, MUTED, weight="", anchor="w", tags=tag)
         for name, cx, glyph in (("log_up", SIDE - 62, "▲"), ("log_down", SIDE - 34, "▼")):
             self.circle(cx, 338, 11, fill=BUTTON, width=0, tags=(tag, "btn", name))
             self.text(cx, 338, glyph, 8, TEXT, weight="", tags=(tag, "btn", name))

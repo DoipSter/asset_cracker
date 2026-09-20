@@ -42,12 +42,12 @@ START_BALANCE = 150.0
 FEE_RATE = 0.07  # Kalshi's taker fee: 7% x price x (1 - price) per contract, rounded up
 SLIPPAGE = 0.01  # we pay one cent worse than the displayed price, buying or selling
 KELLY = 0.25  # bet this fraction of the Kelly-optimal stake
-MAX_STAKE = 0.20  # never put more than this share of cash into one bet
+MAX_STAKE = 0.20  # default share of cash for one bet; a strategy may override
 WINDOW_CAP = 0.35  # ...or more than this share of the account into one window
 # One balance now funds every coin, so five coins betting at once could commit five times
 # WINDOW_CAP. This caps what can be at risk across all open bets, whatever the coin.
 TOTAL_CAP = 0.50
-MIN_GAP = 20  # seconds between bets in the same window
+MIN_GAP = 20  # default seconds between bets in the same round; a strategy may override
 EXIT_MARGIN = 0.02  # an early sale must beat our estimate of the hold value by this
 MIN_TAU = 8  # stop trading when this few seconds remain (orders take time)
 
@@ -89,9 +89,14 @@ STRATEGIES = [
     {"name": "Late", "blurb": "Only bets the last 2.5 minutes",
      "shrink": 1.0, "min_edge": 0.03, "max_bets": 2, "exit": "hold",
      "tau": (MIN_TAU, 150), "band": (0.05, 0.95)},
-    {"name": "Scalper", "blurb": "In and out, cuts losers early",
-     "shrink": 0.5, "min_edge": 0.03, "max_bets": 3, "exit": "ev",
-     "tau": (25, 900), "band": (0.05, 0.95)},
+    # Deliberately the busy one: up to 25 open bets in a round, a new one every 8 seconds,
+    # and contracts as cheap as 5c. Each bet is capped at 1.5% of cash rather than the usual
+    # 20%, because otherwise WINDOW_CAP is reached in a handful of trades and the higher bet
+    # count never gets used. Selling early frees a slot, so the round's total can pass 25.
+    # The money at risk is unchanged: WINDOW_CAP and TOTAL_CAP still bound it.
+    {"name": "Scalper", "blurb": "Trades often, cuts losers early",
+     "shrink": 0.5, "min_edge": 0.03, "max_bets": 25, "exit": "ev", "min_gap": 8,
+     "max_stake": 0.015, "tau": (25, 900), "band": (0.05, 0.95)},
     {"name": "Favorite", "blurb": "Backs the favorite late",
      "shrink": 1.0, "min_edge": 0.0, "max_bets": 1, "exit": "hold",
      "tau": (MIN_TAU, 240), "band": (0.62, 0.88)},
@@ -351,7 +356,7 @@ class Account:
                 or best["edge"] < prm["min_edge"]
                 or not prm["band"][0] <= c <= prm["band"][1]
                 or len(here) >= prm["max_bets"]
-                or (here and now - max(lot["t"] for lot in here) < MIN_GAP)):
+                or (here and now - max(lot["t"] for lot in here) < prm.get("min_gap", MIN_GAP))):
             return []
         committed = sum(lot["cost"] for lot in here)
         room = WINDOW_CAP * (self.cash + committed) - committed
@@ -360,7 +365,8 @@ class Account:
         room = min(room, TOTAL_CAP * (self.cash + at_risk) - at_risk)
         unit = c + FEE_RATE * c * (1 - c)  # cost of one contract, fee included
         kelly = (best["p"] - unit) / (1 - unit)
-        stake = min(min(KELLY * kelly, MAX_STAKE) * self.cash, room)
+        cap = prm.get("max_stake", MAX_STAKE)
+        stake = min(min(KELLY * kelly, cap) * self.cash, room)
         n = min(int(stake // unit), int(best["size"]))
         while n > 0 and n * c + kalshi_fee(n, c) > self.cash:
             n -= 1
