@@ -1536,9 +1536,11 @@ class SidePanel(Drawing, tk.Toplevel):
         c, tag = self.canvas, "dyn"
         lots = list(reversed(s["log"]))  # newest first
         top = 96
-        for x, label, anchor in ((34, "TIME", "w"), (86, "COIN", "w"), (122, "BET", "w"),
-                                 (250, "COST", "e"), (SIDE - 34, "RESULT", "e")):
-            self.text(x, top, label, 9, MUTED, anchor=anchor, tags=tag)
+        for x, label, size, anchor in ((34, "TIME", 9, "w"), (74, "COIN", 9, "w"),
+                                       (108, "BET", 9, "w"), (142, "CONTRACTS", 8, "w"),
+                                       (190, "MULT", 8, "w"), (258, "COST", 9, "e"),
+                                       (SIDE - 34, "RESULT", 9, "e")):
+            self.text(x, top, label, size, MUTED, anchor=anchor, tags=tag)
         if not lots:
             self.text(SIDE / 2, 200, "No bets yet", 14, MUTED, weight="", tags=tag)
             self.text(SIDE / 2, 224, "They'll show up here as they're placed", 11, MUTED,
@@ -1555,14 +1557,18 @@ class SidePanel(Drawing, tk.Toplevel):
                 self.rrect(24, y - 11, SIDE - 24, y + 11, 8, fill=HILITE, tags=tag)
             c.create_line(*self.pts([28, y - 12, SIDE - 28, y - 12]), fill=GRID,
                           width=self.px(1), tags=tag)
-            when = datetime.fromisoformat(lot["time"]).strftime("%I:%M %p").lstrip("0")
-            self.text(34, y, when, 10, MUTED, weight="", anchor="w", tags=tag)
-            self.text(86, y, lot.get("coin") or "?", 10, TEXT, anchor="w", tags=tag)
+            when = datetime.fromisoformat(lot["time"]).strftime("%I:%M%p").lstrip("0")
+            self.text(34, y, when[:-1].lower(), 9, MUTED, weight="", anchor="w", tags=tag)
+            self.text(74, y, lot.get("coin") or "?", 10, TEXT, anchor="w", tags=tag)
             col = UP if lot["side"] == "UP" else DOWN
-            self.text(122, y, lot["side"], 10, col, anchor="w", tags=tag)
-            self.text(162, y, f"{lot['contracts']}×{lot['price'] * 100:.0f}¢", 10,
+            self.text(108, y, lot["side"], 10, col, anchor="w", tags=tag)
+            self.text(142, y, f"{lot['contracts']}×{lot['price'] * 100:.0f}¢", 10,
                       TEXT, weight="", anchor="w", tags=tag)
-            self.text(250, y, f"${lot['cost']:.2f}", 10, TEXT, weight="", anchor="e", tags=tag)
+            # a cheap contract pays 70x or more, so drop the decimals once it is big
+            mult = lot["multiplier"]
+            self.text(190, y, f"{mult:.0f}x" if mult >= 10 else f"{mult:.2f}x", 9, MUTED,
+                      weight="", anchor="w", tags=tag)
+            self.text(258, y, f"${lot['cost']:.2f}", 10, TEXT, weight="", anchor="e", tags=tag)
             status = lot["status"]
             if status == "open":
                 res, rcol = "open", MUTED
