@@ -43,7 +43,7 @@ hard-coded strategies, and the engine inside the window.
 |---|---|---|
 | Service | **Go**, one binary | Decided |
 | Database | **PostgreSQL** | Decided |
-| Host | Brad's Raspberry Pi with NVMe | Decided (model, RAM and disk size not yet measured) |
+| Host | Brad's Raspberry Pi 5, 16 GB, 1 TB NVMe (measured, section 12). Postgres lives only here, never on a laptop. | Decided |
 | Client | **Flutter/Dart**: desktop and mobile, a client only | Decided |
 | Client API | HTTP + JSON, with a WebSocket for live updates; described by an OpenAPI file the Dart client is generated from | Proposed |
 | Agent access | MCP server inside the Go service, read-only at first | Proposed |
@@ -188,8 +188,14 @@ to be complete enough for one.
 
 ## 12. Running on the Pi
 
-To measure before relying on it: model, RAM, NVMe size and free space, OS bitness (needs
-64-bit), clock sync (the engine depends on accurate time; run chrony), power-loss behaviour.
+Measured over SSH on 2026-09-20 (`rpi-v5-1`, 10.0.0.172 by DHCP, also answers as
+`rpi-v5-1.local`): Raspberry Pi 5 Model B rev 1.1, 4 cores, 16 GB RAM, 1 TB NVMe (Crucial P3
+Plus) with 862 GB free, Debian 12 bookworm 64-bit, kernel 6.12. Clock synchronized by
+systemd-timesyncd. 37 C idle, no throttling. Nothing installed beyond the desktop: no
+Postgres, Go or Docker; only SSH listens on the network. Debian's Postgres is 15;
+`deploy/pi/setup.sh` installs 17 from apt.postgresql.org instead. Not yet done: a DHCP
+reservation (the address is dynamic), power-loss behaviour, a backup target.
+
 The service needs outbound internet to the exchanges. Postgres backups go to a second machine:
 these are tax records. Tick data volume, measured today: about 57 KB a minute of raw input for
 two coins, so roughly 80 MB a day; dozens of instruments means gigabytes a month. Partition the
@@ -217,4 +223,4 @@ tick tables by time and set a retention policy.
 4. Which sources and instrument types come after Kalshi and Coinbase?
 5. Position netting across buckets on one real account.
 6. Ownership and tax attribution if funds are shared.
-7. The Pi's actual specification.
+7. ~~The Pi's specification.~~ Measured, section 12: more than enough.
