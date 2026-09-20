@@ -48,6 +48,7 @@ WINDOW_CAP = 0.35  # ...or more than this share of the account into one window
 # WINDOW_CAP. This caps what can be at risk across all open bets, whatever the coin.
 TOTAL_CAP = 0.50
 MIN_GAP = 20  # default seconds between bets in the same round; a strategy may override
+MIN_HOLD = 15  # default seconds before a bet may be sold again
 EXIT_MARGIN = 0.02  # an early sale must beat our estimate of the hold value by this
 MIN_TAU = 8  # stop trading when this few seconds remain (orders take time)
 
@@ -94,9 +95,10 @@ STRATEGIES = [
     # 20%, because otherwise WINDOW_CAP is reached in a handful of trades and the higher bet
     # count never gets used. Selling early frees a slot, so the round's total can pass 25.
     # The money at risk is unchanged: WINDOW_CAP and TOTAL_CAP still bound it.
-    {"name": "Scalper", "blurb": "Trades often, cuts losers early",
+    {"name": "Scalper", "blurb": "Trades often, banks small gains",
      "shrink": 0.5, "min_edge": 0.03, "max_bets": 25, "exit": "ev", "min_gap": 8,
-     "max_stake": 0.015, "tau": (25, 900), "band": (0.05, 0.95)},
+     "max_stake": 0.015, "take_capture": 0.80, "min_hold": 5,
+     "tau": (25, 900), "band": (0.05, 0.95)},
     {"name": "Favorite", "blurb": "Backs the favorite late",
      "shrink": 1.0, "min_edge": 0.0, "max_bets": 1, "exit": "hold",
      "tau": (MIN_TAU, 240), "band": (0.62, 0.88)},
@@ -393,21 +395,36 @@ class Account:
         return dict(lot, kind="bet", strategy=self.name)
 
     def _exits(self, market, now, p_up, price):
-        """Sell early when the market's bid beats what we think a bet is worth."""
+        """Sell early, for either of two reasons: the market is paying more than we think
+        the bet is worth, or the position is simply up enough to bank. The second is what
+        scalping mostly is, and a strategy opts into it with take_profit."""
+        prm = self.params
+        capture = prm.get("take_capture")  # None: only sell when the market overpays
+        hold = prm.get("min_hold", MIN_HOLD)
         events = []
         for lot in self.open_lots(market["ticker"]):
             bid = market["yes_bid"] if lot["side"] == "UP" else market["no_bid"]
-            if bid <= 0 or now - lot["t"] < 15:
+            if bid <= 0 or now - lot["t"] < hold:
                 continue
             p_side = p_up if lot["side"] == "UP" else 1 - p_up
             sell_c = max(0.01, bid - SLIPPAGE)
-            if sell_c - FEE_RATE * sell_c * (1 - sell_c) > p_side + EXIT_MARGIN:
-                n = lot["contracts"]
-                fee = kalshi_fee(n, sell_c)
-                proceeds = round(n * sell_c - fee, 2)
+            n = lot["contracts"]
+            fee = kalshi_fee(n, sell_c)
+            proceeds = round(n * sell_c - fee, 2)
+            # what we would net now against what the model says holding is worth
+            overpriced = sell_c - FEE_RATE * sell_c * (1 - sell_c) > p_side + EXIT_MARGIN
+            # Banking a gain is measured against the upside, not as a flat percentage: a 7c
+            # contract pays 100c, so "up 12%" is under a cent and throws away the other 14x.
+            # Sell once the bid has covered this much of the way from entry to a dollar, and
+            # only if proceeds genuinely beat cost -- both fees and slippage are already in
+            # those two numbers, so this can never bank a loss.
+            banking = (capture is not None and proceeds > lot["cost"]
+                       and sell_c >= lot["price"] + capture * (1 - lot["price"]))
+            if overpriced or banking:
                 self._close(lot, "sold", proceeds, now, exit_price=round(sell_c, 2),
                             exit_btc=price)
-                events.append(dict(lot, kind="sold", strategy=self.name, payout=proceeds))
+                events.append(dict(lot, kind="sold", strategy=self.name, payout=proceeds,
+                                   why="profit" if banking and not overpriced else "value"))
         return events
 
     def _close(self, lot, status, payout, now, **extra):
