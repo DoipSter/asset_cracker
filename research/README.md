@@ -14,6 +14,21 @@ python analyse_week.py    # volume, settlement margins, late-money test
 python confound.py        # controls the headline finding for round closeness
 ```
 
+Backtesting the trading engine itself, against a month of recorded rounds:
+
+```bash
+python fetch_rounds.py KXBTC15M BTC-USD bt30_btc.json   # ~20 min, resumable, ~2.6 MB
+python backtest_exits.py                                # compares exit rules
+python backtest_exits.py 672                            # just the last seven days
+```
+
+`backtest_exits.py` drives the real `kalshi_trader` rather than a reimplementation of it,
+so what it measures is what the app does. It produced the numbers in the commit that added
+`take_capture`; they can be reproduced by running it.
+
+The `.json` files are gitignored. They are caches of public APIs, rebuildable with the
+scripts above, not source.
+
 ## What the week showed
 
 ### Volume is overwhelmingly Bitcoin, and overwhelmingly late

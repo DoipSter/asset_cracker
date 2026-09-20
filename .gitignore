@@ -2,11 +2,15 @@
 __pycache__/
 *.py[cod]
 
-# Runtime state: each run's simulated balances and trade history. These are personal
-# results, not source, and the app recreates them from scratch on first launch.
+# Runtime state: each run's simulated balances, trade history and debugging logs. These
+# are personal results, not source, and the app recreates them from scratch on first launch.
 kalshi_balance*.json
 kalshi_trades*.csv
+kalshi_exits*.csv
+kalshi_rounds*.csv
 
-# Scraped market data: ~8 MB, regenerate with research/scrape_week.py
+# Scraped market data: caches of public APIs, not source. Each has a script that rebuilds
+# it, named in research/README.md, so nothing here is lost by not committing it.
 research/week_data.json
 research/week_partial.json
+research/bt30_*.json

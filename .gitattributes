@@ -1,0 +1,10 @@
+# Without this, line endings depend on whoever last checked the file out, and a diff
+# between a Windows machine and the Linux CI runner shows every line as changed. Normalise
+# to LF in the repository; Git still checks out CRLF on Windows where that matters.
+* text=auto eol=lf
+
+# Windows-only, and the icon files are binary
+*.ico binary
+*.png binary
+*.bat text eol=crlf
+*.ps1 text eol=crlf
