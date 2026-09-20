@@ -1,0 +1,8 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Runtime state: each run's simulated balances and trade history. These are personal
+# results, not source, and the app recreates them from scratch on first launch.
+kalshi_balance*.json
+kalshi_trades*.csv
