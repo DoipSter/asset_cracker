@@ -44,6 +44,49 @@ volatility window included the next minute's price, so the "volatility spike" wa
 the move that was about to happen. Corrected, it loses like the rest. It's left in, and labelled,
 because a documented failed idea is worth more than a quietly deleted one.
 
+## When the price is worth trusting
+
+A separate week-long scrape of five coins — 3,324 settled rounds, tooling in [`research/`](research/) —
+turned up the one pattern here that looks structural rather than noise.
+
+**Volume arrives at the end.** 38–48% of a round's entire volume trades in its final minute,
+which is exactly the minute the settlement index averages over. BTC 38.3%, DOGE 48.2%.
+
+**And when it does, the price stops being reliable.** Scoring how well the price *three minutes
+out* predicted the result (Brier score, lower is better), split by how heavy that last minute was:
+
+| | Calm finish | Heavy finish |
+|---|---|---|
+| BTC | 0.0205 | 0.1806 |
+| ETH | 0.0207 | 0.1401 |
+| SOL | 0.0176 | 0.1446 |
+| XRP | 0.0196 | 0.1182 |
+| DOGE | 0.0194 | 0.1428 |
+
+The innocent reading is reverse causation: close rounds are harder to call *and* attract more late
+money. [`research/confound.py`](research/confound.py) tests that by conditioning on what the price
+actually said, and the effect survives — it's **largest where the market looked most certain**.
+BTC rounds priced 10–25¢ three minutes out scored 0.031 on a calm finish and **0.292** on a heavy
+one. Rounds that looked decided, then saw a surge, finished near a coin flip. Same shape on ETH,
+SOL and DOGE.
+
+This does **not** prove manipulation. Late information and late price pressure produce an identical
+signature, and a directional test on toss-up rounds found no consistent tilt. Cells hold 40–68
+rounds. But the practical rule holds either way, and none of the strategies above currently use it:
+
+> A confident price is least trustworthy exactly when the settlement minute is busy.
+
+Two other things worth knowing before building on this market:
+
+- **It's a Bitcoin market.** Weekly volume: BTC 1.64B contracts, ETH 71.8M, XRP 37.3M, SOL 32.7M,
+  DOGE 17.6M. BTC carries ~23x ETH and ~93x DOGE. Outcomes are balanced everywhere (UP won
+  49.9–51.7%), so there's no directional bias to lean on.
+- **The hourly bracket markets are thin.** `KXBTC` lists 188 brackets per hour at $100 wide, but
+  only ~10 ever trade and the top 3 hold 80.7% of the hour's volume — 818K for the week against
+  1.64B in the 15-minute rounds. `KXBTCD` (hourly above/below) is healthier at 46M.
+
+Full numbers and method in [`research/README.md`](research/README.md).
+
 ## The strategies
 
 | Name | Approach |
@@ -105,6 +148,7 @@ of the index, and roughly $8 of round-to-round noise is irreducible.
 | `asset_cracker.py` | The app: feeds, window, charts, side panels |
 | `kalshi_trader.py` | The trading engine: strategies, fees, accounting, settlement |
 | `make_icon.py` | Regenerates `btc.ico` / `eth.ico` (needs Pillow) |
+| `research/` | Scrapes a week of Kalshi markets and tests how they price — see its own README |
 
 Runtime state (`kalshi_balance*.json`, `kalshi_trades*.csv`) is gitignored — it's personal
 results, and the app recreates it at $150 per strategy on first launch.
