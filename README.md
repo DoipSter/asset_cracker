@@ -1,5 +1,7 @@
 # Asset Cracker
 
+[![tests](https://github.com/DoipSter/asset_cracker/actions/workflows/tests.yml/badge.svg)](https://github.com/DoipSter/asset_cracker/actions/workflows/tests.yml)
+
 A phone-shaped desktop widget for Kalshi's 15-minute crypto prediction markets — the ones
 Coinbase Predictions runs on. Live prices, the round's "price to beat", and six paper-trading
 strategies competing on real market data.
@@ -148,7 +150,25 @@ of the index, and roughly $8 of round-to-round noise is irreducible.
 | `asset_cracker.py` | The app: feeds, window, charts, side panels |
 | `kalshi_trader.py` | The trading engine: strategies, fees, accounting, settlement |
 | `make_icon.py` | Regenerates `btc.ico` / `eth.ico` (needs Pillow) |
-| `research/` | Scrapes a week of Kalshi markets and tests how they price — see its own README |
+| `tests/` | The suite — `python tests/run.py` |
+| `research/` | Scrapes Kalshi markets, tests how they price, backtests the engine — see its own README |
+| `CONTRIBUTING.md` | How this repo is worked on: branching, commits, tests |
+
+## Tests
+
+```bash
+python tests/run.py
+```
+
+Stdlib `unittest`, no packages to install, and nothing to configure. They run on every push
+via GitHub Actions on Windows and Linux across Python 3.12 and 3.13.
+
+They never import `asset_cracker` — that would build a Tk window and fail on a headless
+machine — so display logic is checked as geometry and numbers instead. Anything they need
+from the app is read out of its source, which means a test notices if the app's own tables
+change underneath it.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before making changes.
 
 Runtime state (`kalshi_balance*.json`, `kalshi_*.csv`) is gitignored — it's personal
 results, and the app recreates it at $150 per strategy on first launch.

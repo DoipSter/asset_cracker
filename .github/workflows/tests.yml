@@ -1,0 +1,36 @@
+# Runs the suite on every push and every pull request, so a claim that the tests pass is
+# something anyone can check rather than something they have to take on trust.
+#
+# The app needs no third-party packages, and the tests deliberately avoid importing
+# asset_cracker (it would build a Tk window), so this needs no display and no pip install.
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is where it actually runs; Ubuntu catches anything that quietly depends
+        # on Windows path handling or line endings.
+        os: [windows-latest, ubuntu-latest]
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Check the app parses
+        run: python -m compileall -q asset_cracker.py kalshi_trader.py
+
+      - name: Run the suite
+        run: python tests/run.py
