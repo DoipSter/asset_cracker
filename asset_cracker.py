@@ -1536,8 +1536,8 @@ class SidePanel(Drawing, tk.Toplevel):
         c, tag = self.canvas, "dyn"
         lots = list(reversed(s["log"]))  # newest first
         top = 96
-        for x, label, anchor in ((34, "TIME", "w"), (84, "BET", "w"), (252, "COST", "e"),
-                                 (SIDE - 34, "RESULT", "e")):
+        for x, label, anchor in ((34, "TIME", "w"), (86, "COIN", "w"), (122, "BET", "w"),
+                                 (250, "COST", "e"), (SIDE - 34, "RESULT", "e")):
             self.text(x, top, label, 9, MUTED, anchor=anchor, tags=tag)
         if not lots:
             self.text(SIDE / 2, 200, "No bets yet", 14, MUTED, weight="", tags=tag)
@@ -1546,22 +1546,23 @@ class SidePanel(Drawing, tk.Toplevel):
             return
         self.log_offset = max(0, min(self.log_offset, len(lots) - self.LOG_ROWS))
         page = lots[self.log_offset:self.log_offset + self.LOG_ROWS]
-        current = self.app.ptb_close  # the window that's live right now
+        # Every coin's round closes on the same quarter hour, so the close time alone would
+        # light up other coins' bets too. Match the coin as well.
+        current, live_coin = self.app.ptb_close, self.app.coin
         for i, lot in enumerate(page):
             y = top + 22 + i * self.ROW_H
-            if lot["close"] == current:  # orders in the current window get a lighter band
+            if lot["close"] == current and lot.get("coin") == live_coin:
                 self.rrect(24, y - 11, SIDE - 24, y + 11, 8, fill=HILITE, tags=tag)
             c.create_line(*self.pts([28, y - 12, SIDE - 28, y - 12]), fill=GRID,
                           width=self.px(1), tags=tag)
             when = datetime.fromisoformat(lot["time"]).strftime("%I:%M %p").lstrip("0")
-            self.text(34, y, when, 11, MUTED, weight="", anchor="w", tags=tag)
+            self.text(34, y, when, 10, MUTED, weight="", anchor="w", tags=tag)
+            self.text(86, y, lot.get("coin") or "?", 10, TEXT, anchor="w", tags=tag)
             col = UP if lot["side"] == "UP" else DOWN
-            self.text(84, y, lot["side"], 11, col, anchor="w", tags=tag)
-            self.text(132, y, f"{lot['contracts']}×{lot['price'] * 100:.0f}¢", 11, TEXT,
-                      weight="", anchor="w", tags=tag)
-            self.text(174, y, f"{lot['multiplier']:.2f}x", 10, MUTED, weight="", anchor="w",
-                      tags=tag)
-            self.text(252, y, f"${lot['cost']:.2f}", 11, TEXT, weight="", anchor="e", tags=tag)
+            self.text(122, y, lot["side"], 10, col, anchor="w", tags=tag)
+            self.text(162, y, f"{lot['contracts']}×{lot['price'] * 100:.0f}¢", 10,
+                      TEXT, weight="", anchor="w", tags=tag)
+            self.text(250, y, f"${lot['cost']:.2f}", 10, TEXT, weight="", anchor="e", tags=tag)
             status = lot["status"]
             if status == "open":
                 res, rcol = "open", MUTED
@@ -1570,7 +1571,7 @@ class SidePanel(Drawing, tk.Toplevel):
                 sign = "+" if pnl > 0 else "−"
                 res = f"{'sold ' if status == 'sold' else ''}{sign}${abs(pnl):.2f}"
                 rcol = UP if pnl > 0 else DOWN
-            self.text(SIDE - 34, y, res, 11, rcol, anchor="e", tags=tag)
+            self.text(SIDE - 34, y, res, 10, rcol, anchor="e", tags=tag)
         last = min(len(lots), self.log_offset + self.LOG_ROWS)
         net = sum(lot.get("pnl", 0) for lot in lots)
         self.text(34, 338, f"{self.log_offset + 1}–{last} of {len(lots)}  ·  net "
