@@ -150,8 +150,28 @@ of the index, and roughly $8 of round-to-round noise is irreducible.
 | `make_icon.py` | Regenerates `btc.ico` / `eth.ico` (needs Pillow) |
 | `research/` | Scrapes a week of Kalshi markets and tests how they price — see its own README |
 
-Runtime state (`kalshi_balance*.json`, `kalshi_trades*.csv`) is gitignored — it's personal
+Runtime state (`kalshi_balance*.json`, `kalshi_*.csv`) is gitignored — it's personal
 results, and the app recreates it at $150 per strategy on first launch.
+
+## The logs, and what to ask them
+
+The app writes three CSVs next to itself while it runs. The trade log says what happened;
+the other two exist to say whether it should have.
+
+| File | One row per | Read it to ask |
+|---|---|---|
+| `kalshi_trades.csv` | bet, sale, settlement | What did it do, at what price, with how long left (`tau`) and what book (`yes_bid`/`yes_ask`)? `why` separates an entry from a value exit from a capture exit. |
+| `kalshi_exits.csv` | early sale, written when that round settles | **Did selling early cost us?** `gave_up` is what holding would have paid minus what we got. Positive means the sale was a mistake in hindsight. |
+| `kalshi_rounds.csv` | coin per round, *including rounds nobody bet on* | Why didn't it trade? Rows with `bets = 0` are the passed-on rounds. `index_gap_pct` tracks whether the index offset is drifting. |
+
+`gave_up` is the number to tune `take_capture` on. Selling early always costs something in
+hindsight — a position deep enough in the money to trigger a capture exit usually goes on
+to win. The question is whether the reversals it avoids are worth the upside it clips, and
+that is a question only a few hundred graded exits can answer. Summing `gave_up` per `why`
+and comparing with the realised P/L over the same span is the whole experiment.
+
+A round still open when the app closes is carried across the restart, so restarting does
+not punch a hole in the round log.
 
 ## Caveats
 

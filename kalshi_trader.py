@@ -26,6 +26,13 @@ crystal ball: the market is competitive and every strategy can lose money.
 Saved next to the app after every event:
   kalshi_balance.json   - every account, updated as things change
   kalshi_trades.csv     - one row per bet, sale and settlement
+  kalshi_exits.csv      - one row per early sale, with what holding would have paid
+  kalshi_rounds.csv     - one row per coin per round, including rounds nobody bet on
+
+The last two exist to be argued with. The trade log says what happened; those two say
+whether it should have. Between them they answer the questions worth asking: did selling
+early cost us (gave_up), did we skip rounds we should have traded (bets == 0), and is the
+index estimate drifting (index_gap_pct).
 """
 
 import csv
@@ -109,7 +116,22 @@ STRATEGIES = [
 
 CSV_FIELDS = ["time", "strategy", "coin", "event", "ticker", "side", "contracts", "price",
               "multiplier", "fee", "cost", "payout", "pnl", "result", "strike",
-              "btc_price", "final_value", "balance_after", "model_prob", "edge"]
+              "btc_price", "final_value", "balance_after", "model_prob", "edge",
+              # added for tuning: why a sale happened, how much of the round was left, and
+              # the book we actually saw, so a decision can be replayed from the row alone
+              "why", "tau", "yes_bid", "yes_ask", "mkt_prob"]
+
+# One row per early sale, written when that round finally settles, so it can say what
+# holding would have paid. This is the file that says whether take_capture is set right.
+EXIT_FIELDS = ["time", "strategy", "coin", "ticker", "side", "contracts", "why",
+               "entry", "exit", "cost", "sold_for", "booked", "held_would_pay",
+               "gave_up", "held_tau", "result"]
+
+# One row per coin per round, written at settlement -- including rounds nobody bet on,
+# which is where the answer to "why didn't it trade?" lives.
+ROUND_FIELDS = ["time", "coin", "ticker", "close", "strike", "final_value", "result",
+                "last_price", "index_est", "index_gap_pct", "sigma_pct", "spread",
+                "ticks", "bets", "scalper_bets", "scalper_pnl"]
 
 
 def parse_amount(value):
@@ -422,9 +444,12 @@ class Account:
                        and sell_c >= lot["price"] + capture * (1 - lot["price"]))
             if overpriced or banking:
                 self._close(lot, "sold", proceeds, now, exit_price=round(sell_c, 2),
-                            exit_btc=price)
-                events.append(dict(lot, kind="sold", strategy=self.name, payout=proceeds,
-                                   why="profit" if banking and not overpriced else "value"))
+                            exit_btc=price,
+                            # kept on the lot, not just the event: at settlement the exits
+                            # log looks back at this sale and needs to know what drove it
+                            why="capture" if banking and not overpriced else "value",
+                            exit_tau=round(market["close"] - now))
+                events.append(dict(lot, kind="sold", strategy=self.name, payout=proceeds))
         return events
 
     def _close(self, lot, status, payout, now, **extra):
@@ -591,6 +616,11 @@ class KalshiTrader:
         {"BTC": {"index_offset_pct": ..., "index_sd_pct": ..., "default_sigma": ...}, ...}"""
         self.json_path = os.path.join(folder, "kalshi_balance.json")
         self.csv_path = os.path.join(folder, "kalshi_trades.csv")
+        self.exit_path = os.path.join(folder, "kalshi_exits.csv")
+        self.round_path = os.path.join(folder, "kalshi_rounds.csv")
+        # What each live round looked like while it ran, so the round log can be written
+        # when it settles -- including the rounds no strategy touched.
+        self._rounds = {}
         self.coins = {
             name: CoinState(name, cfg.get("index_offset_pct", INDEX_OFFSET_PCT),
                             cfg.get("index_sd_pct", INDEX_SD_PCT),
@@ -682,6 +712,7 @@ class KalshiTrader:
         if market["close"] != self._round_close:  # a new 15-minute window, for all coins
             self._round_close = market["close"]
             self.rounds_monitored += 1
+        self._note_round(coin, c, market, price)
         tau = market["close"] - now
         p_model = prob_yes(price, market["strike"], tau, c.sigma2,
                            c.known_avg(market["close"]) if tau < 60 else None,
@@ -700,7 +731,93 @@ class KalshiTrader:
         events = []
         for acct in self.accounts.values():
             events += acct.on_settled(ticker, result, final_value, now, price)
+        # Only now do we know what the round was worth, so this is the moment to grade the
+        # early sales and to write down the round itself.
+        self._log_exits(ticker, result, now)
+        self._log_round(ticker, result, final_value, now)
         return self._record(events, now)
+
+    # ---- the debugging trail ----------------------------------------------
+
+    def _note_round(self, coin, c, market, price):
+        """Keep the shape of each live round so it can be written down at settlement."""
+        r = self._rounds.get(market["ticker"])
+        if r is None:
+            if len(self._rounds) > 200:  # rounds we never saw settle, e.g. app restarted
+                cutoff = market["close"] - 7200
+                self._rounds = {k: v for k, v in self._rounds.items() if v["close"] > cutoff}
+            r = self._rounds[market["ticker"]] = {"coin": coin, "close": market["close"],
+                                                  "strike": market["strike"], "ticks": 0}
+        r["ticks"] += 1
+        r.update(last_price=price, sigma2=c.sigma2, offset_pct=c.offset_pct,
+                 yes_bid=market["yes_bid"], yes_ask=market["yes_ask"])
+
+    def _log_exits(self, ticker, result, now):
+        """Grade every early sale in this round against holding it to the end. `gave_up` is
+        the whole point: positive means selling cost us, negative means it saved us."""
+        for acct in self.accounts.values():
+            for lot in acct.log:
+                if (lot["ticker"] != ticker or lot["status"] != "sold"
+                        or lot.get("graded")):
+                    continue
+                lot["graded"] = True  # survives a save/reload, so it is never graded twice
+                won = (result == "yes") == (lot["side"] == "UP")
+                held = float(lot["contracts"]) if won else 0.0
+                self._append(self.exit_path, EXIT_FIELDS, {
+                    "time": _iso(now), "strategy": acct.name, "coin": lot.get("coin", ""),
+                    "ticker": ticker, "side": lot["side"], "contracts": lot["contracts"],
+                    "why": lot.get("why", ""), "entry": lot["price"],
+                    "exit": lot.get("exit_price", ""), "cost": lot["cost"],
+                    "sold_for": lot["payout"], "booked": lot["pnl"],
+                    "held_would_pay": round(held, 2),
+                    "gave_up": round(held - lot["payout"], 2),
+                    "held_tau": lot.get("exit_tau", ""), "result": result,
+                })
+
+    def _log_round(self, ticker, result, final_value, now):
+        """One row per round, whether or not anyone bet. A round with bets == 0 is a round
+        the model passed on, and those are as worth reading as the ones it traded."""
+        r = self._rounds.pop(ticker, None)
+        if r is None:
+            return
+        # Kalshi settles on its own index; ours is the exchange price lifted by the offset
+        # we have calibrated. Comparing the two each round is how we see the offset drift.
+        est = r["last_price"] * (1 + r["offset_pct"])
+        final = parse_amount(final_value)
+        bets = [l for a in self.accounts.values() for l in a.log if l["ticker"] == ticker]
+        scalp = [l for l in self.accounts["Scalper"].log if l["ticker"] == ticker]
+        self._append(self.round_path, ROUND_FIELDS, {
+            "time": _iso(now), "coin": r["coin"], "ticker": ticker, "close": _iso(r["close"]),
+            "strike": r["strike"], "final_value": final if final is not None else "",
+            "result": result, "last_price": round(r["last_price"], 4),
+            "index_est": round(est, 4),
+            "index_gap_pct": round((final / est - 1) * 100, 5) if final and est else "",
+            # the move a full 15-minute round is expected to make, as a percentage
+            "sigma_pct": round(math.sqrt(max(0.0, r["sigma2"]) * 900) * 100, 4),
+            "spread": round(r["yes_ask"] - r["yes_bid"], 3),
+            "ticks": r["ticks"], "bets": len(bets), "scalper_bets": len(scalp),
+            "scalper_pnl": round(sum(l.get("pnl", 0.0) or 0.0 for l in scalp), 2),
+        })
+
+    def _append(self, path, fields, row):
+        """Append one row, writing the header for a new file. If an older file has a
+        different header -- because these columns grew -- move it aside rather than write
+        rows that no longer line up with it."""
+        try:
+            if os.path.exists(path):
+                with open(path, newline="") as f:
+                    head = (f.readline() or "").strip()
+                if head and head.split(",") != fields:
+                    os.replace(path, f"{os.path.splitext(path)[0]}"
+                                     f"_cols_{datetime.now():%Y%m%d_%H%M%S}.csv")
+            is_new = not os.path.exists(path)
+            with open(path, "a", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=fields)
+                if is_new:
+                    w.writeheader()
+                w.writerow(row)
+        except OSError:
+            pass  # a locked file (say, open in Excel) shouldn't stop the simulation
 
     def _record(self, events, now):
         for e in events:
@@ -746,6 +863,9 @@ class KalshiTrader:
 
     def _append_csv(self, e, now):
         acct = self.accounts[e["strategy"]]
+        # the book as it stood when this happened, so a row can be read on its own later
+        mkt = (self.coins[e["coin"]].market or {}) if e.get("coin") in self.coins else {}
+        yb, ya = mkt.get("yes_bid", ""), mkt.get("yes_ask", "")
         row = {
             "time": _iso(now), "strategy": e["strategy"], "coin": e.get("coin", ""),
             "event": {"bet": "BET", "sold": "SOLD", "settled": "SETTLED"}[e["kind"]],
@@ -758,16 +878,12 @@ class KalshiTrader:
             "final_value": e.get("final_value", ""),
             "balance_after": round(acct.equity(self.markets()), 2),
             "model_prob": e.get("model_prob", ""), "edge": e.get("edge", ""),
+            "why": e.get("why") or ("entry" if e["kind"] == "bet" else ""),
+            "tau": round(e["close"] - now),
+            "yes_bid": yb, "yes_ask": ya,
+            "mkt_prob": round((yb + ya) / 2, 3) if yb != "" and ya != "" else "",
         }
-        try:
-            is_new = not os.path.exists(self.csv_path)
-            with open(self.csv_path, "a", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-                if is_new:
-                    w.writeheader()
-                w.writerow(row)
-        except OSError:
-            pass  # a locked file (say, open in Excel) shouldn't stop the simulation
+        self._append(self.csv_path, CSV_FIELDS, row)
 
     def _load(self):
         try:
@@ -787,6 +903,10 @@ class KalshiTrader:
                 # so scale it back down to windows.
                 saved_rounds = round(saved_rounds / max(1, len(self.coins)))
             self.rounds_monitored = saved_rounds
+            # Rounds that were still open when the app last closed. Without these, every
+            # restart would punch a hole in the round log exactly where a round was live.
+            self._rounds = {k: v for k, v in (d.get("live_rounds") or {}).items()
+                            if v.get("close", 0) > time.time() - 7200}
             for name, saved in (d.get("coins") or {}).items():
                 c = self.coins.get(name)
                 if not c:
@@ -817,6 +937,7 @@ class KalshiTrader:
             "started_at": self.started_at,
             "rounds_monitored": self.rounds_monitored,
             "rounds_note": "a round is one 15-minute window across every coin, counted once",
+            "live_rounds": self._rounds,  # open rounds, so the round log survives a restart
             "last_round_close": self._round_close,
             "rounds_monitored_per_coin": self.coin_rounds(),
             "leaderboard": [{"strategy": r["name"], "balance": round(r["equity"], 2),
@@ -854,7 +975,7 @@ class KalshiTrader:
     def reset(self):
         """Start every account over with the starting balance. The old files are kept, renamed."""
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        for path in (self.json_path, self.csv_path):
+        for path in (self.json_path, self.csv_path, self.exit_path, self.round_path):
             if os.path.exists(path):
                 root, ext = os.path.splitext(path)
                 try:
@@ -865,6 +986,7 @@ class KalshiTrader:
         self.started_at = time.time()
         self.rounds_monitored = 0
         self._round_close = None
+        self._rounds = {}
         for c in self.coins.values():
             c.rounds_monitored = 0
             c.round_ticker = None
