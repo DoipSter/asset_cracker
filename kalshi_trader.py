@@ -125,7 +125,7 @@ CSV_FIELDS = ["time", "strategy", "coin", "event", "ticker", "side", "contracts"
 # holding would have paid. This is the file that says whether take_capture is set right.
 EXIT_FIELDS = ["time", "strategy", "coin", "ticker", "side", "contracts", "why",
                "entry", "exit", "cost", "sold_for", "booked", "held_would_pay",
-               "gave_up", "held_tau", "result"]
+               "gave_up", "tau_at_exit", "result"]
 
 # One row per coin per round, written at settlement -- including rounds nobody bet on,
 # which is where the answer to "why didn't it trade?" lives.
@@ -712,7 +712,7 @@ class KalshiTrader:
         if market["close"] != self._round_close:  # a new 15-minute window, for all coins
             self._round_close = market["close"]
             self.rounds_monitored += 1
-        self._note_round(coin, c, market, price)
+        self._note_round(coin, c, market, price, now)
         tau = market["close"] - now
         p_model = prob_yes(price, market["strike"], tau, c.sigma2,
                            c.known_avg(market["close"]) if tau < 60 else None,
@@ -739,7 +739,7 @@ class KalshiTrader:
 
     # ---- the debugging trail ----------------------------------------------
 
-    def _note_round(self, coin, c, market, price):
+    def _note_round(self, coin, c, market, price, now):
         """Keep the shape of each live round so it can be written down at settlement."""
         r = self._rounds.get(market["ticker"])
         if r is None:
@@ -747,10 +747,17 @@ class KalshiTrader:
                 cutoff = market["close"] - 7200
                 self._rounds = {k: v for k, v in self._rounds.items() if v["close"] > cutoff}
             r = self._rounds[market["ticker"]] = {"coin": coin, "close": market["close"],
-                                                  "strike": market["strike"], "ticks": 0}
+                                                  "strike": market["strike"], "ticks": 0,
+                                                  "yes_bid": market["yes_bid"],
+                                                  "yes_ask": market["yes_ask"]}
         r["ticks"] += 1
-        r.update(last_price=price, sigma2=c.sigma2, offset_pct=c.offset_pct,
-                 yes_bid=market["yes_bid"], yes_ask=market["yes_ask"])
+        # The price we want is the last one, because the index gap is measured at close.
+        # The book is the opposite: in the final seconds the asks vanish and the bid runs to
+        # a dollar, so a spread taken from the closing book is nonsense. Freeze it a minute
+        # out, while the book is still a real two-sided market.
+        r.update(last_price=price, sigma2=c.sigma2, offset_pct=c.offset_pct)
+        if market["close"] - now > 60:
+            r.update(yes_bid=market["yes_bid"], yes_ask=market["yes_ask"])
 
     def _log_exits(self, ticker, result, now):
         """Grade every early sale in this round against holding it to the end. `gave_up` is
@@ -771,7 +778,7 @@ class KalshiTrader:
                     "sold_for": lot["payout"], "booked": lot["pnl"],
                     "held_would_pay": round(held, 2),
                     "gave_up": round(held - lot["payout"], 2),
-                    "held_tau": lot.get("exit_tau", ""), "result": result,
+                    "tau_at_exit": lot.get("exit_tau", ""), "result": result,
                 })
 
     def _log_round(self, ticker, result, final_value, now):
