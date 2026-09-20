@@ -1,7 +1,10 @@
 # Scope: morphing Asset Cracker into a cross-platform Flutter/Dart app
 
-Status: **draft for discussion**, branch `flutter-scope`. Tracks Agora intent INT-9 and task TSK-31.
-Nothing here changes the Python. No Dart code exists yet.
+Status: **draft for discussion**, branch `flutter-scope`. Tracks Agora intent INT-9.
+Nothing here changes the Python.
+
+Progress (2026-09-20): phase 1 (parity harness, `tools/parity/`) and phase 2 (Dart engine,
+`engine/`) are done and the parity gate passes on the 40-minute fixture. See section 7.
 
 Author: Brad's agent, 2026-09-20. Statements are labelled **measured** (checked against the
 code or the live system on that date) or **assumed** (not checked). Doipster's view is not in
@@ -149,6 +152,14 @@ report counts per event type so the decision is made on data.
 If the gate cannot be met exactly because of `erf` or rounding at a threshold, the fallback is
 to report every divergent decision with both engines' inputs, not to loosen the comparison.
 
+What was measured when the gate first ran (2026-09-20): trade rows and saved state match
+exactly, and volatility and index offset are bit-identical on every step. Probabilities agree to
+2.2e-16, not bit for bit, because CPython's `erf` is the platform C library's and on macOS it
+is less accurate than the Dart one (up to 3 units in the last place against 1). No decision
+differed. One more hazard turned up: Python's `sum` changed in 3.12 to compensate for rounding,
+so a recording made on 3.12+ may differ from one made on 3.9 in the last bit of an average.
+The fixture's first line records the Python version for that reason.
+
 ## 6. Constraints found
 
 ### 6.1 Web target (measured)
@@ -196,8 +207,8 @@ measured yet.
 | Phase | Deliverable | Done when |
 |---|---|---|
 | 0 | This document agreed; INT-9 moved from draft to active | Doipster has answered section 8 |
-| 1 | Parity harness: recorder + Python replay in `tools/` | A recording replays through the Python and reproduces the trades it made live |
-| 2 | `engine/` model, accounts, trader, replay | Parity gate passes on the phase 1 recording |
+| 1 | Parity harness: recorder + Python replay in `tools/` | **Done.** A 40-minute live recording replays through the Python identically |
+| 2 | `engine/` model, accounts, trader, replay | **Done.** All 4,733 steps, 60 trade rows and the saved state match the Python |
 | 3 | `engine/` feeds + `bin/headless.dart` | Headless run on macOS and Windows produces state files the Python app can load |
 | 4 | `app/` on desktop: both coin pages, charts, panels, notifications | Side-by-side run with the Python app on Windows shows the same prices, round and bets |
 | 5 | Mobile layout; decide 6.2 A/B/C | Runs on one iOS and one Android device |

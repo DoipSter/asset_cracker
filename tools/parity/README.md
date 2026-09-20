@@ -42,6 +42,16 @@ That is the only patch, and it is applied from outside.
 Passes (`PARITY OK`, exit 0) when each coin's trade CSV is identical line for line and every
 account ends with the same cash. On failure it prints the first differing line from each side.
 
+## Comparing another engine
+
+`replay.py --trace <file>.jsonl.gz` also writes what the engine thought after every `step`:
+volatility, index offset, and each strategy's probability, favoured side, edge and bet/no-bet
+call. The Dart engine's replay (`engine/bin/replay.dart`) reads `trace.jsonl.gz` from the same
+folder and compares step by step, then compares the trade CSV and the saved state.
+
+    python tools/parity/replay.py <folder> --trace <folder>/trace.jsonl.gz
+    cd engine && dart run bin/replay.dart ../<folder>
+
 ## Fixture
 
 `fixtures/2026-09-20_40min/` is a 40-minute live recording of both coins, stored with

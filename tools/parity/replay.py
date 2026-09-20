@@ -65,6 +65,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("folder")
     ap.add_argument("--keep", help="copy the replayed files here instead of discarding them")
+    ap.add_argument("--trace", help="write what the engine thought after every step to this "
+                                    ".jsonl.gz file, for comparing another engine against")
     args = ap.parse_args()
 
     path = os.path.join(args.folder, "calls.jsonl")
@@ -88,14 +90,25 @@ def main():
             out, suffix=a["suffix"], offset_pct=a["index_offset_pct"],
             sd_pct=a["index_sd_pct"], default_sigma=a["default_sigma"])
 
-    for row in calls:
+    trace = gzip.open(args.trace, "wt") if args.trace else None
+    for i, row in enumerate(calls):
         clock.t = row["t"]
         result = getattr(traders[row["coin"]], row["call"])(*row["args"])
+        if trace and row["call"] == "step":
+            t = traders[row["coin"]]
+            views = {n: None if a.view is None else
+                     [a.view["p_up"], a.view["p_model"], a.view["best"]["side"],
+                      a.view["best"]["edge"], a.view["signal"]["bet"]]
+                     for n, a in t.accounts.items()}
+            trace.write(json.dumps({"i": i, "coin": row["coin"], "sigma2": t.sigma2,
+                                    "offset": t.offset_pct, "views": views}) + "\n")
         counts[row["call"]] += 1
         for e in result or []:
             events[e["kind"]] += 1
     for t in traders.values():
         t.save(force=True)
+    if trace:
+        trace.close()
 
     print(f"replayed {len(calls)} calls: {dict(counts)}")
     print(f"trade events produced: {dict(events) or 'none'}")
