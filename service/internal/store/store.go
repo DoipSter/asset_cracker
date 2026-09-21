@@ -141,25 +141,31 @@ func (s *Store) RecordResult(ctx context.Context, marketID int64, result, settle
 	return tag.RowsAffected() == 1, nil
 }
 
+// UnsettledMarket is a closed round with no result stored yet.
+type UnsettledMarket struct {
+	ID     int64
+	Closes time.Time
+}
+
 // UnsettledMarkets lists markets of an instrument that closed before `before` and have no
 // result yet, so a restart picks up where the last run stopped.
-func (s *Store) UnsettledMarkets(ctx context.Context, instrumentID int64, before time.Time) (map[string]int64, error) {
+func (s *Store) UnsettledMarkets(ctx context.Context, instrumentID int64, before time.Time) (map[string]UnsettledMarket, error) {
 	rows, err := s.pool.Query(ctx, `
-		select ticker, id from market
+		select ticker, id, closes_at from market
 		 where instrument_id = $1 and result is null and closes_at < $2 and closes_at > $2 - interval '1 hour'`,
 		instrumentID, before)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]int64{}
+	out := map[string]UnsettledMarket{}
 	for rows.Next() {
 		var t string
-		var id int64
-		if err := rows.Scan(&t, &id); err != nil {
+		var m UnsettledMarket
+		if err := rows.Scan(&t, &m.ID, &m.Closes); err != nil {
 			return nil, err
 		}
-		out[t] = id
+		out[t] = m
 	}
 	return out, rows.Err()
 }

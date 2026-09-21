@@ -18,3 +18,6 @@ grant update (status, retired_at, retired_reason) on strategy_version to assetcr
 grant update (status, tripped_at, trip_reason, frozen_at, replaced_by_bucket_id, limits) on bucket to assetcracker;
 grant update (status, venue_order_id) on trade_order to assetcracker;
 grant update (status, decided_by, decided_at, decision_note) on proposal to assetcracker;
+
+-- engine_state is a cache the service rewrites; it is not part of the append-only record.
+grant update (saved_at, state) on engine_state to assetcracker;

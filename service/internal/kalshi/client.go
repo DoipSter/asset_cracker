@@ -87,6 +87,16 @@ func (c *Client) OpenMarkets(ctx context.Context, series string) ([]MarketInfo, 
 	return out.Markets, err
 }
 
+// SettledMarkets lists a series' most recently settled markets, for measuring how far Kalshi's
+// index has been sitting above our exchange's price before we started watching.
+func (c *Client) SettledMarkets(ctx context.Context, series string, n int) ([]MarketInfo, error) {
+	var out struct {
+		Markets []MarketInfo `json:"markets"`
+	}
+	err := c.get(ctx, fmt.Sprintf("/markets?series_ticker=%s&status=settled&limit=%d", url.QueryEscape(series), n), &out)
+	return out.Markets, err
+}
+
 // Market fetches one market by ticker.
 func (c *Client) Market(ctx context.Context, ticker string) (MarketInfo, error) {
 	var out struct {

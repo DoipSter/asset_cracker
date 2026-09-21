@@ -13,7 +13,8 @@ type Event struct {
 	Kind     string // bet, sold, settled
 	Strategy string
 	Lot      Lot
-	Won      bool // settled only
+	Won      bool    // settled only
+	SellFee  float64 // sold only: the fee taken out of the proceeds
 }
 
 // Account is one strategy's paper account, with the Python's float-dollar bookkeeping.
@@ -83,7 +84,8 @@ func (a *Account) Step(m Market, price, now, pModel float64, paused bool, ctx Ta
 				exitPrice, exitBTC := round2(ex.SellC), price
 				lot.ExitPrice, lot.ExitBTC = &exitPrice, &exitBTC
 				a.close(lot, "sold", ex.Proceeds, now)
-				events = append(events, Event{Kind: "sold", Strategy: a.Params.Name, Lot: *lot})
+				events = append(events, Event{Kind: "sold", Strategy: a.Params.Name, Lot: *lot,
+					SellFee: KalshiFee(lot.Contracts, ex.SellC)})
 			}
 		}
 	}

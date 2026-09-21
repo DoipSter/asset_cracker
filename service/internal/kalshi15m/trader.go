@@ -358,3 +358,66 @@ func (t *Trader) State() map[string]any {
 	return map[string]any{"rounds_monitored": t.RoundsMonitored, "last_round_ticker": last,
 		"index_offsets": offsets, "leaderboard": board, "accounts": accounts}
 }
+
+// ---- saving and restoring -------------------------------------------------------------------
+
+// SavedAccount and SavedState are what survives a restart. Prices seen and volatility are not
+// saved: they are re-seeded from the exchange at start, as the Python does.
+type SavedAccount struct {
+	Cash        float64 `json:"cash"`
+	Log         []*Lot  `json:"log"`
+	Bets        int     `json:"bets"`
+	Wins        int     `json:"wins"`
+	Losses      int     `json:"losses"`
+	RealizedPnL float64 `json:"realized_pnl"`
+	NextID      int     `json:"next_id"`
+}
+type SavedState struct {
+	Accounts        map[string]SavedAccount `json:"accounts"`
+	Offsets         [][2]float64            `json:"index_offsets"`
+	RoundsMonitored int                     `json:"rounds_monitored"`
+	RoundTicker     string                  `json:"last_round_ticker"`
+	Paused          bool                    `json:"paused"`
+}
+
+// Export captures the state to save.
+func (t *Trader) Export() SavedState {
+	s := SavedState{Accounts: map[string]SavedAccount{}, RoundsMonitored: t.RoundsMonitored,
+		RoundTicker: t.roundTicker, Paused: t.Paused}
+	for _, a := range t.Accounts {
+		s.Accounts[a.Params.Name] = SavedAccount{a.Cash, a.Log, a.Bets, a.Wins, a.Losses, a.RealizedPnL, a.NextID}
+	}
+	for _, o := range t.offsets {
+		s.Offsets = append(s.Offsets, [2]float64{o.at, o.offset})
+	}
+	return s
+}
+
+// Import restores a saved state into a fresh trader.
+func (t *Trader) Import(s SavedState) {
+	for _, a := range t.Accounts {
+		if sa, ok := s.Accounts[a.Params.Name]; ok {
+			a.Cash, a.Log, a.Bets, a.Wins, a.Losses, a.RealizedPnL, a.NextID =
+				sa.Cash, sa.Log, sa.Bets, sa.Wins, sa.Losses, sa.RealizedPnL, max(sa.NextID, 1)
+		}
+	}
+	t.offsets = nil
+	for _, o := range s.Offsets {
+		t.offsets = append(t.offsets, offsetObs{o[0], o[1]})
+	}
+	t.RoundsMonitored, t.roundTicker, t.Paused = s.RoundsMonitored, s.RoundTicker, s.Paused
+}
+
+// HasOffsetAt reports whether a measurement for the round closing at `at` is already held, so
+// that seeding on every start does not count the same round twice.
+func (t *Trader) HasOffsetAt(at float64) bool {
+	for _, o := range t.offsets {
+		if o.at == at {
+			return true
+		}
+	}
+	return false
+}
+
+// OffsetStatus is the index gap in use and how many recent measurements it rests on.
+func (t *Trader) OffsetStatus() (float64, int) { return t.OffsetPct(), len(t.recentOffsets()) }

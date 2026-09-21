@@ -13,12 +13,12 @@ type Sink interface {
 	// SaveMarket records a round and returns its id.
 	SaveMarket(ctx context.Context, m MarketInfo, closes time.Time) (int64, error)
 	// SaveQuotes records the live quotes for a round at one moment.
-	SaveQuotes(ctx context.Context, at time.Time, marketID int64, q Quotes) error
+	SaveQuotes(ctx context.Context, at time.Time, marketID int64, m MarketInfo, closes time.Time, q Quotes) error
 	// SaveResult records how a round settled. It reports true only for the call that stored
 	// it, so whatever acts on a settlement acts once.
-	SaveResult(ctx context.Context, marketID int64, m MarketInfo) (bool, error)
-	// Unsettled lists rounds that closed recently with no result stored: ticker -> id.
-	Unsettled(ctx context.Context, before time.Time) (map[string]int64, error)
+	SaveResult(ctx context.Context, marketID int64, m MarketInfo, closes time.Time) (bool, error)
+	// Unsettled lists rounds that closed recently with no result stored, by ticker.
+	Unsettled(ctx context.Context, before time.Time) (map[string]Pending, error)
 }
 
 // Status is what the health endpoint reports about one series.
@@ -30,6 +30,12 @@ type Status struct {
 	LastQuotesAt time.Time `json:"last_quotes_at"`
 	Awaiting     int       `json:"awaiting_results"`
 	LastError    string    `json:"last_error,omitempty"`
+}
+
+// Pending is a closed round still waiting for its result.
+type Pending struct {
+	ID     int64
+	Closes time.Time
 }
 
 type round struct {
@@ -77,8 +83,8 @@ func (p *Poller) Run(ctx context.Context) {
 	var current *round
 	waiting := map[string]*awaiting{}
 	if old, err := p.Sink.Unsettled(ctx, p.Now()); err == nil {
-		for ticker, id := range old { // rounds a previous run left without a result
-			waiting[ticker] = &awaiting{id: id, closes: p.Now().Add(-time.Minute)}
+		for ticker, pd := range old { // rounds a previous run left without a result
+			waiting[ticker] = &awaiting{id: pd.ID, closes: pd.Closes}
 		}
 	}
 
@@ -143,7 +149,7 @@ func (p *Poller) step(ctx context.Context, current **round, waiting map[string]*
 		if err != nil {
 			return err
 		}
-		if err := p.Sink.SaveQuotes(ctx, now, cur.id, q); err != nil {
+		if err := p.Sink.SaveQuotes(ctx, now, cur.id, cur.info, cur.closes, q); err != nil {
 			return err
 		}
 		p.mu.Lock()
@@ -161,7 +167,7 @@ func (p *Poller) step(ctx context.Context, current **round, waiting map[string]*
 			return err
 		}
 		if err == nil && (m.Result == "yes" || m.Result == "no") {
-			first, err := p.Sink.SaveResult(ctx, w.id, m)
+			first, err := p.Sink.SaveResult(ctx, w.id, m, w.closes)
 			if err != nil {
 				return err
 			}

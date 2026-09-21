@@ -231,7 +231,12 @@ tick tables by time and set a retention policy.
 3. Strategy interface; port Doipster's six as the first family; check with the replay harness.
    **Done 2026-09-20** (`service/internal/kalshi15m`, `cmd/replay`): parity gate passes on the
    Mac and on the Pi; the six are in `strategy_version` as the first trials.
-4. Paper broker, journal, bucket lifecycle, supervisor and breakers.
+4. Paper broker, journal, bucket lifecycle, supervisor and breakers. **Partly done 2026-09-20**
+   (`service/internal/runner`): the six strategies run live in sim in twelve buckets; every
+   decision is journaled with the rule that blocked it; fills, fees and payouts are ledger
+   transfers; state survives a restart and is checked against the ledger. Not yet: human
+   weights applied, success tax, breakers, reaping and replacement, a broker interface a live
+   broker could share.
 5. Metrics and the promotion gate; trials registry.
 6. API and the Flutter client.
 7. MCP, read-only; then proposals.

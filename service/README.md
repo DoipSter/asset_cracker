@@ -2,8 +2,10 @@
 
 The Asset Cracker service, in Go. See `docs/platform-brief.md` for where it is going.
 
-**Today it records market data and nothing else.** No strategies, no ledger writes, no order
-code, no credentials. Every request it makes is an unauthenticated public read.
+**Today it records market data and runs the six kalshi15m strategies live, in simulation.**
+Twelve sim buckets (six per coin, $150 each) bet against Kalshi's real order book with imaginary
+money. There is no order code and there are no credentials: every request is an unauthenticated
+public read, and every ledger account is `sim`.
 
 | Package | |
 |---|---|
@@ -15,6 +17,7 @@ code, no credentials. Every request it makes is an unauthenticated public read.
 | `internal/kalshi15m` | The first strategy family: doipster's six, ported from `kalshi_trader.py`. Pure decisions (`Params.Decide`) separate from bookkeeping (`Account`) |
 | `internal/pyfloat` | CPython's float rounding, repr and floor division, where Go differs |
 | `cmd/replay` | The parity gate: replays a recording through the Go port and compares with the Python |
+| `internal/runner` | Runs a strategy family live for one series: feeds the engine, journals every decision, books every simulated fill and payout in the ledger, saves and restores state. Halts the series if money moved but could not be recorded |
 | `internal/web` | The read-only status page: one embedded HTML file and the JSON it polls. No route changes anything |
 | `internal/health` | `GET /healthz` on localhost: prices, rounds, counts; 503 if anything is stale |
 
@@ -26,8 +29,12 @@ adding a coin is a row, not a code change.
     tools/view.sh          # from the Mac: opens an SSH tunnel to the Pi and the page in a browser
     tools/view.sh stop
 
-Live prices, each open round with its quotes and a price-against-strike chart, recent
-settlements, the strategy registry. The service still listens on the Pi's localhost only; the
+The page is doipster's phone widget, rebuilt in the browser from his drawing code: same
+palette and proportions, coin tabs, the index price, the price-to-beat card with its countdown,
+the 15-minute round chart with a marker for every bet, the 1H/24H/7D ranges, and a side panel per
+coin with Account, Log and Strategies. The bell turns on browser notifications for the tracked
+strategy. Not carried over: Pause all and Reset all (the page is read-only by design), the amber
+glow after a bet, and dragging a frameless window. The service still listens on the Pi's localhost only; the
 tunnel is the way in, so nothing is opened on the network.
 
 ## Settings

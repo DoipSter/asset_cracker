@@ -27,19 +27,19 @@ func (f *fakeSink) SaveMarket(_ context.Context, m MarketInfo, _ time.Time) (int
 	f.ids[id] = m.Ticker
 	return id, nil
 }
-func (f *fakeSink) SaveQuotes(context.Context, time.Time, int64, Quotes) error {
+func (f *fakeSink) SaveQuotes(context.Context, time.Time, int64, MarketInfo, time.Time, Quotes) error {
 	f.mu.Lock()
 	f.quotes++
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeSink) SaveResult(_ context.Context, id int64, _ MarketInfo) (bool, error) {
+func (f *fakeSink) SaveResult(_ context.Context, id int64, _ MarketInfo, _ time.Time) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.results[f.ids[id]]++
 	return f.results[f.ids[id]] == 1, nil
 }
-func (f *fakeSink) Unsettled(context.Context, time.Time) (map[string]int64, error) { return nil, nil }
+func (f *fakeSink) Unsettled(context.Context, time.Time) (map[string]Pending, error) { return nil, nil }
 
 // The scenario that went wrong in the Python poller: a round closes, its result is published
 // five seconds later, and the NEXT round does not appear for twenty seconds. The Python
