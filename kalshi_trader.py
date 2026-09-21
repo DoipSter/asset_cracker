@@ -153,7 +153,14 @@ def strategies(anti=False):
     return ANTI_STRATEGIES if anti else STRATEGIES
 
 
-CSV_FIELDS = ["time", "strategy", "coin", "event", "ticker", "side", "contracts", "price",
+# Every row carries the run it came from, so the logs can be read a session at a time
+# instead of as one undifferentiated stream. kalshi_sessions.csv indexes the runs.
+SESSION_FIELDS = ["session", "started", "last_seen", "minutes", "bank", "round_cap",
+                  "coins", "strategies", "rounds", "bets", "best", "best_balance",
+                  "worst", "worst_balance", "bankruptcies"]
+
+CSV_FIELDS = ["session", "time", "strategy", "coin", "event", "ticker", "side", "contracts",
+              "price",
               "multiplier", "fee", "cost", "payout", "pnl", "result", "strike",
               "btc_price", "final_value", "balance_after", "model_prob", "edge",
               # added for tuning: why a sale happened, how much of the round was left, and
@@ -162,15 +169,35 @@ CSV_FIELDS = ["time", "strategy", "coin", "event", "ticker", "side", "contracts"
 
 # One row per early sale, written when that round finally settles, so it can say what
 # holding would have paid. This is the file that says whether take_capture is set right.
-EXIT_FIELDS = ["time", "strategy", "coin", "ticker", "side", "contracts", "why",
+EXIT_FIELDS = ["session", "time", "strategy", "coin", "ticker", "side", "contracts", "why",
                "entry", "exit", "cost", "sold_for", "booked", "held_would_pay",
                "gave_up", "tau_at_exit", "result"]
 
 # One row per coin per round, written at settlement -- including rounds nobody bet on,
 # which is where the answer to "why didn't it trade?" lives.
-ROUND_FIELDS = ["time", "coin", "ticker", "close", "strike", "final_value", "result",
+ROUND_FIELDS = ["session", "time", "coin", "ticker", "close", "strike", "final_value",
+                "result",
                 "last_price", "index_est", "index_gap_pct", "sigma_pct", "spread",
                 "ticks", "bets", "scalper_bets", "scalper_pnl"]
+
+
+def session_id(previous=None):
+    """An id for one run of the app: the timestamp to the second.
+
+    A reset ends one run and starts another, and can easily land inside the same second as
+    the run it replaces -- which would give two different runs the same id and silently merge
+    their rows. A collision gets a counter.
+    """
+    base = time.strftime("%Y%m%d_%H%M%S")
+    if not previous:
+        return base
+    if previous == base:
+        return f"{base}_2"
+    if previous.startswith(f"{base}_"):
+        tail = previous.rsplit("_", 1)[1]
+        if tail.isdigit():
+            return f"{base}_{int(tail) + 1}"
+    return base
 
 
 def parse_amount(value):
@@ -762,7 +789,16 @@ class KalshiTrader:
         # One line per strategy that ran out. Appended to and never rewritten, so it is cheap
         # to watch with `tail -f` and a reader never has to parse the whole trade log.
         self.bankrupt_path = os.path.join(folder, "kalshi_bankruptcies.log")
+        self.sessions_path = os.path.join(folder, "kalshi_sessions.csv")
         self.folder = folder
+        # This run of the app. Every row written from here carries it, which is what makes
+        # the logs reviewable one session at a time.
+        self.session = session_id()
+        self.session_started = time.time()
+        # Counted for THIS run. The accounts' own totals persist across restarts, so using
+        # them would credit a one-minute session with every bet ever placed.
+        self.session_bets = 0
+        self.session_rounds = 0
         # What each live round looked like while it ran, so the round log can be written
         # when it settles -- including the rounds no strategy touched.
         self._rounds = {}
@@ -868,6 +904,7 @@ class KalshiTrader:
         if market["close"] != self._round_close:  # a new 15-minute window, for all coins
             self._round_close = market["close"]
             self.rounds_monitored += 1
+            self.session_rounds += 1
         self._note_round(coin, c, market, price, now)
         tau = market["close"] - now
         p_model = prob_yes(price, market["strike"], tau, c.sigma2,
@@ -933,6 +970,7 @@ class KalshiTrader:
                 won = (result == "yes") == (lot["side"] == "UP")
                 held = float(lot["contracts"]) if won else 0.0
                 self._append(self.exit_path, EXIT_FIELDS, {
+                    "session": self.session,
                     "time": _iso(now), "strategy": acct.name, "coin": lot.get("coin", ""),
                     "ticker": ticker, "side": lot["side"], "contracts": lot["contracts"],
                     "why": lot.get("why", ""), "entry": lot["price"],
@@ -959,6 +997,7 @@ class KalshiTrader:
         bets = [l for a in self.accounts.values() for l in a.log if l["ticker"] == ticker]
         scalp = [l for l in self.accounts["Scalper"].log if l["ticker"] == ticker]
         self._append(self.round_path, ROUND_FIELDS, {
+            "session": self.session,
             "time": _iso(now), "coin": r["coin"], "ticker": ticker, "close": _iso(r["close"]),
             "strike": r["strike"], "final_value": final if final is not None else "",
             "result": result, "last_price": round(r["last_price"], dec),
@@ -972,6 +1011,53 @@ class KalshiTrader:
             "ticks": r["ticks"], "bets": len(bets), "scalper_bets": len(scalp),
             "scalper_pnl": round(sum(l.get("pnl", 0.0) or 0.0 for l in scalp), 2),
         })
+
+    def _write_session_row(self):
+        """Keep this run's line in kalshi_sessions.csv current.
+
+        Rewritten in place rather than appended to, because a run's length and results are
+        only known as it goes and the app may be closed without warning -- an appended row
+        would be stale from the moment it was written. The file holds one line per run, so
+        rewriting it costs nothing.
+        """
+        standings = self.standings() + self.standings(anti=True)
+        if not standings:
+            return
+        best, worst = standings[0], standings[-1]
+        row = {
+            "session": self.session,
+            "started": _iso(self.session_started),
+            "last_seen": _iso(time.time()),
+            "minutes": round((time.time() - self.session_started) / 60, 1),
+            "bank": START_BALANCE,
+            "round_cap": round(TOTAL_CAP * START_BALANCE, 2),
+            "coins": " ".join(self.coins),
+            "strategies": len(self.accounts),
+            "rounds": self.session_rounds,
+            "bets": self.session_bets,
+            "best": best["name"], "best_balance": round(best["equity"], 2),
+            "worst": worst["name"], "worst_balance": round(worst["equity"], 2),
+            "bankruptcies": sum(a.bankruptcies for a in self.accounts.values()),
+        }
+        try:
+            rows, head = [], None
+            if os.path.exists(self.sessions_path):
+                with open(self.sessions_path, newline="", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    head = reader.fieldnames
+                    rows = [r for r in reader if r.get("session") != self.session]
+            if head is not None and head != SESSION_FIELDS:
+                os.replace(self.sessions_path,
+                           f"{os.path.splitext(self.sessions_path)[0]}"
+                           f"_cols_{datetime.now():%Y%m%d_%H%M%S}.csv")
+                rows = []
+            rows.append(row)
+            with open(self.sessions_path, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=SESSION_FIELDS)
+                w.writeheader()
+                w.writerows(rows)
+        except OSError:
+            pass  # a locked file shouldn't stop the simulation
 
     def _append(self, path, fields, row):
         """Append one row, writing the header for a new file. If an older file has a
@@ -999,6 +1085,7 @@ class KalshiTrader:
                 self._append_csv(e, now)
         # Every path that moves money ends here, so this is the one place to notice that a
         # strategy has nothing left.
+        self.session_bets += sum(1 for e in events if e["kind"] == "bet")
         events = events + self._check_broke(now)
         if events:
             self.save(force=True)
@@ -1188,6 +1275,7 @@ class KalshiTrader:
         mkt = (self.coins[e["coin"]].market or {}) if e.get("coin") in self.coins else {}
         yb, ya = mkt.get("yes_bid", ""), mkt.get("yes_ask", "")
         row = {
+            "session": self.session,
             "time": _iso(now), "strategy": e["strategy"], "coin": e.get("coin", ""),
             "event": {"bet": "BET", "sold": "SOLD", "settled": "SETTLED"}[e["kind"]],
             "ticker": e["ticker"], "side": e["side"], "contracts": e["contracts"],
@@ -1246,6 +1334,7 @@ class KalshiTrader:
         if not force and time.monotonic() - self._last_save < 5:
             return
         self._last_save = time.monotonic()
+        self._write_session_row()
         standings = self.standings()
         mk = self.markets()
         data = {
@@ -1308,6 +1397,12 @@ class KalshiTrader:
                     pass
         self.accounts = {p["name"]: Account(p) for p in ALL_STRATEGIES}
         self.started_at = time.time()
+        # A reset ends one run and begins another: the rows already written keep the old
+        # session id, so they stay findable rather than blurring into what follows.
+        self.session = session_id(self.session)
+        self.session_started = time.time()
+        self.session_bets = 0
+        self.session_rounds = 0
         self.rounds_monitored = 0
         self._round_close = None
         self._rounds = {}

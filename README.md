@@ -285,7 +285,25 @@ the other two exist to say whether it should have.
 | `kalshi_exits.csv` | early sale, written when that round settles | **Did selling early cost us?** `gave_up` is what holding would have paid minus what we got. Positive means the sale was a mistake in hindsight. |
 | `kalshi_rounds.csv` | coin per round, *including rounds nobody bet on* | Why didn't it trade? Rows with `bets = 0` are the passed-on rounds. `index_gap_pct` tracks whether the index offset is drifting. |
 | `kalshi_bankruptcies.log` | strategy that ran out of money | Which ones die, how long they lasted, and how many times. Tab-separated and append-only, so `tail -f` works. |
+| `kalshi_sessions.csv` | run of the app | Which runs happened, how long, on what settings, and how they ended. |
 | `kalshi_bankrupt_<name>_<time>.md` | the same event, in full | **Why it died.** Net by coin, by outcome, by exit trigger, the worst rounds, and the settings it was running. |
+
+Every row in all three CSVs carries a **`session`** — the run of the app it came from —
+because otherwise the logs are one undifferentiated stream: close the app, reopen it, change
+the starting bank from $150 to $1,000, and the rows simply continue with nothing marking
+where one era ended. `kalshi_sessions.csv` indexes the runs, recording what each was
+*configured* with (bank, round cap, coins, strategy count) as well as how it went, since an
+old session's numbers cannot be read correctly without knowing the settings behind them.
+
+```bash
+python research/sessions.py           # every run, newest first
+python research/sessions.py last      # the most recent, in detail
+python research/sessions.py 20260920_235320
+```
+
+Counts on a session row are for that run alone. The accounts themselves persist across
+restarts, so reading their lifetime totals would credit a one-minute session with every bet
+ever placed.
 
 `gave_up` is the number to tune `take_capture` on. Selling early always costs something in
 hindsight — a position deep enough in the money to trigger a capture exit usually goes on
