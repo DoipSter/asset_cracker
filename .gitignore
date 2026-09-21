@@ -8,6 +8,8 @@ kalshi_balance*.json
 kalshi_trades*.csv
 kalshi_exits*.csv
 kalshi_rounds*.csv
+kalshi_bankruptcies*.log
+kalshi_bankrupt_*.md
 
 # Scraped market data: caches of public APIs, not source. Each has a script that rebuilds
 # it, named in research/README.md, so nothing here is lost by not committing it.

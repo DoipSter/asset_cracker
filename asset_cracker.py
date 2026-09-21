@@ -1319,6 +1319,28 @@ class Monitor(Drawing, tk.Toplevel):
             return 0.0
         return min(1.0, age / 0.5) * (1 - age / FLASH_SECONDS)
 
+    def _on_bankrupt(self, e):
+        """A strategy ran out and has been staked again. Unlike a bet, this is reported
+        whichever strategy is being tracked -- it is about the experiment, not about one
+        position -- though the bell still silences the toast. The postmortem is on disk
+        either way, which is what makes it findable after the fact.
+        """
+        title = f"{e['strategy']} ran out of money"
+        body = (f"Ended with ${e['cash']:.2f} after {e['rounds']} rounds. "
+                f"Staked again at ${START_BALANCE:,.0f} (life {e['life'] + 1}). "
+                f"Findings: {os.path.basename(e['report'])}")
+        print(f"[bankrupt] {title} - {body}", flush=True)  # also on stdout, for a log
+        if self.muted:
+            return
+
+        def worker():
+            try:
+                send_toast(self.app_id, title, body)
+            except Exception:
+                pass  # a missed toast shouldn't disturb the display
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _on_trade(self, e):
         """A bet was placed or settled: refresh the panel and (unless muted) notify."""
         if e["kind"] == "bet":
@@ -1326,6 +1348,9 @@ class Monitor(Drawing, tk.Toplevel):
         if self.panel and self.panel.is_open:
             self.panel.refresh()
         self._chart_dirty = True  # a new marker may belong on the chart
+        if e["kind"] == "bankrupt":
+            self._on_bankrupt(e)
+            return
         # Five strategies trade at once; only the one you're tracking gets notifications,
         # and the bell silences those too.
         if self.muted or e["strategy"] != self.trader.selected:

@@ -79,24 +79,31 @@ class ProfitTaking(unittest.TestCase):
 
 
 class ExposureCap(unittest.TestCase):
-    """Total exposure is capped in dollars, at half the STARTING balance. As a share of
+    """Total exposure is capped in dollars, as a share of the STARTING balance. As a share of
     current equity it would raise the ceiling on its own stakes during a winning run, so a
-    bad round costs more the better things have been going."""
+    bad round costs more the better things have been going.
+
+    The ceiling is derived here rather than written down, because what these tests are for is
+    that it does not move. The literal dollar figures are pinned once, in
+    test_bankruptcy.Thresholds, so changing the bank fails exactly one test rather than six.
+    """
+
+    CEILING = kt.TOTAL_CAP * kt.START_BALANCE
 
     def test_ceiling_does_not_move_with_the_balance(self):
         acct = kt.Account(dict(kt.STRATEGIES[0]))
-        for balance in (150.0, 300.0, 600.0, 1500.0, 10000.0):
+        for balance in (kt.START_BALANCE, kt.START_BALANCE * 2, kt.START_BALANCE * 10):
             acct.cash, acct.log = balance, []
             room = kt.TOTAL_CAP * kt.START_BALANCE - acct.committed()
             with self.subTest(balance=balance):
-                self.assertAlmostEqual(room, 75.0, places=9)
+                self.assertAlmostEqual(room, self.CEILING, places=9)
 
     def test_binds_with_a_rich_account_and_every_coin_live(self):
         coins = {c: {} for c in ("BTC", "ETH", "SOL", "XRP", "DOGE")}
         t = h.new_trader(coins)
         t._append_csv = lambda *a, **k: None
         for acct in t.accounts.values():
-            acct.cash = 2000.0  # a very good week
+            acct.cash = kt.START_BALANCE * 9  # a very good week
         peak = {}
         levels = {"BTC": 81000.0, "ETH": 2637.0, "SOL": 110.36, "XRP": 1.4096,
                   "DOGE": 0.0875}
@@ -106,11 +113,11 @@ class ExposureCap(unittest.TestCase):
             h.run_round(t, coin, [px * (1 + (k % 5) * 2e-5) for k in range(400)], mkt)
             for name, acct in t.accounts.items():
                 peak[name] = max(peak.get(name, 0.0), acct.committed())
-        self.assertTrue(any(v > 50 for v in peak.values()),
+        self.assertTrue(any(v > self.CEILING * 0.5 for v in peak.values()),
                         "nothing came near the cap, so this proves nothing")
         for name, committed in peak.items():
             with self.subTest(strategy=name):
-                self.assertLessEqual(committed, kt.TOTAL_CAP * kt.START_BALANCE + 1e-6)
+                self.assertLessEqual(committed, self.CEILING + 1e-6)
 
 
 class RoundCounting(unittest.TestCase):

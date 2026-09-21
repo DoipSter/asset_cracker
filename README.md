@@ -20,7 +20,7 @@ keeps imaginary balances.
   close with a marker for every bet placed, at the price and moment it went in.
 - **Two side panels**, one per coin, that slide out from either edge and can both be open at once.
   Each has an Account view, a bet Log, and a Strategies leaderboard.
-- **Six strategies**, each with its own $150, trading the same live market so you can see which
+- **Six strategies**, each with its own $1,000, trading the same live market so you can see which
   approach actually works.
 
 ## Does it make money?
@@ -96,7 +96,7 @@ Full numbers and method in [`research/README.md`](research/README.md).
 | `Value` | Blends the model with the market's own odds, one bet, holds to settlement |
 | `Model` | Trusts the model more, up to 3 bets per round |
 | `Late` | Only bets in the last 2.5 minutes |
-| `Scalper` | Up to 3 bets, sells early when the odds turn against it |
+| `Scalper` | Up to 25 bets a round, one every 8s, banks gains once a bid has covered 80% of the way to $1 |
 | `Favorite` | Backs the favorite late, at 62–88¢ |
 | `Lottery` | Cheap longshots after a volatility spike (see above — it loses) |
 
@@ -154,6 +154,31 @@ of the index, and roughly $8 of round-to-round noise is irreducible.
 | `research/` | Scrapes Kalshi markets, tests how they price, backtests the engine — see its own README |
 | `CONTRIBUTING.md` | How this repo is worked on: branching, commits, tests |
 
+## When a strategy runs out
+
+Each strategy starts with **$1,000** and may have at most **$250** at risk across all open
+bets at any moment — a quarter of the *starting* bank, not the current one, so a winning run
+does not quietly raise the ceiling on its own stakes.
+
+A strategy is finished when it has under a dollar and nothing outstanding: a contract costs a
+cent plus fee, so it cannot bet again. Open bets are excluded on purpose — while one is live
+the strategy still holds something that might pay, and calling it dead then would flap every
+time a round went against it.
+
+Three things happen, in order:
+
+1. **A postmortem is written** to `kalshi_bankrupt_<name>_<time>.md`, before anything is
+   cleared. Net by coin, by outcome, by what triggered each early sale, the worst rounds and
+   what share of the damage they were, and the exact settings it was running.
+2. **A line is appended** to `kalshi_bankruptcies.log` and the app raises a notification.
+   That file is tab-separated and append-only, so it can be watched from outside the app.
+3. **It is staked again** at $1,000 with a clean log, and `bankruptcies` counts the lives.
+
+Restaking is deliberate. Six strategies exist to be compared, and one sitting at zero stops
+producing evidence, so leaving it dead would quietly shrink the experiment. The run that
+ended is preserved in its postmortem — and a strategy on its third life is telling you
+something a balance alone would not.
+
 ## Tests
 
 ```bash
@@ -171,7 +196,7 @@ change underneath it.
 See [CONTRIBUTING.md](CONTRIBUTING.md) before making changes.
 
 Runtime state (`kalshi_balance*.json`, `kalshi_*.csv`) is gitignored — it's personal
-results, and the app recreates it at $150 per strategy on first launch.
+results, and the app recreates it at $1,000 per strategy on first launch.
 
 ## The logs, and what to ask them
 
@@ -183,6 +208,8 @@ the other two exist to say whether it should have.
 | `kalshi_trades.csv` | bet, sale, settlement | What did it do, at what price, with how long left (`tau`) and what book (`yes_bid`/`yes_ask`)? `why` separates an entry from a value exit from a capture exit. |
 | `kalshi_exits.csv` | early sale, written when that round settles | **Did selling early cost us?** `gave_up` is what holding would have paid minus what we got. Positive means the sale was a mistake in hindsight. |
 | `kalshi_rounds.csv` | coin per round, *including rounds nobody bet on* | Why didn't it trade? Rows with `bets = 0` are the passed-on rounds. `index_gap_pct` tracks whether the index offset is drifting. |
+| `kalshi_bankruptcies.log` | strategy that ran out of money | Which ones die, how long they lasted, and how many times. Tab-separated and append-only, so `tail -f` works. |
+| `kalshi_bankrupt_<name>_<time>.md` | the same event, in full | **Why it died.** Net by coin, by outcome, by exit trigger, the worst rounds, and the settings it was running. |
 
 `gave_up` is the number to tune `take_capture` on. Selling early always costs something in
 hindsight — a position deep enough in the money to trigger a capture exit usually goes on

@@ -14,7 +14,7 @@ How those markets work:
     cent, on every buy and every sell. We also assume one cent of slippage per fill.
 
 Because nobody knows in advance which approach works, six strategies each trade their
-own $150 account at the same time, on the same live prices. Each may bet several times
+own $1000 account at the same time, on the same live prices. Each may bet several times
 in a window (even both sides, if its view flips) and some sell early to cut losses.
 The leaderboard shows which is actually ahead.
 
@@ -28,6 +28,8 @@ Saved next to the app after every event:
   kalshi_trades.csv     - one row per bet, sale and settlement
   kalshi_exits.csv      - one row per early sale, with what holding would have paid
   kalshi_rounds.csv     - one row per coin per round, including rounds nobody bet on
+  kalshi_bankruptcies.log - one line per strategy that ran out of money
+  kalshi_bankrupt_*.md  - a postmortem for each, written at the moment it happened
 
 The last two exist to be argued with. The trade log says what happened; those two say
 whether it should have. Between them they answer the questions worth asking: did selling
@@ -44,7 +46,10 @@ import time
 from collections import deque
 from datetime import datetime
 
-START_BALANCE = 150.0
+START_BALANCE = 1000.0
+# An account with less than this and nothing outstanding cannot place another bet, so it
+# is finished rather than merely losing. Not zero: a single contract costs a cent plus fee.
+BANKRUPT_AT = 1.0
 
 FEE_RATE = 0.07  # Kalshi's taker fee: 7% x price x (1 - price) per contract, rounded up
 SLIPPAGE = 0.01  # we pay one cent worse than the displayed price, buying or selling
@@ -55,8 +60,8 @@ WINDOW_CAP = 0.35  # ...or more than this share of the account into one window
 # WINDOW_CAP. This caps what can be at risk across all open bets, whatever the coin --
 # as a share of the STARTING balance, not the current one. A winning run would otherwise
 # keep raising the ceiling on its own stakes, so a bad round costs more the better things
-# have been going. Half of $150 is $75 at risk, and it stays $75 at any balance.
-TOTAL_CAP = 0.50
+# have been going. A quarter of $1000 is $250 at risk, and it stays $250 at any balance.
+TOTAL_CAP = 0.25
 MIN_GAP = 20  # default seconds between bets in the same round; a strategy may override
 MIN_HOLD = 15  # default seconds before a bet may be sold again
 EXIT_MARGIN = 0.02  # an early sale must beat our estimate of the hold value by this
@@ -201,6 +206,7 @@ class Account:
         self.realized_pnl = 0.0
         self.next_id = 1
         self.views = {}  # coin -> what the model thinks right now, for the display
+        self.bankruptcies = 0  # times this strategy has run out and been staked again
 
     # ---- persistence ------------------------------------------------------
 
@@ -211,6 +217,7 @@ class Account:
         self.wins = int(d.get("wins", 0))
         self.losses = int(d.get("losses", 0))
         self.realized_pnl = float(d.get("realized_pnl", 0.0))
+        self.bankruptcies = int(d.get("bankruptcies", 0))
         self.next_id = 1 + max([lot["id"] for lot in self.log], default=0)
         for lot in self.log:  # bets saved before coins were tracked: infer from the ticker
             lot.setdefault("coin", coin_from_ticker(lot.get("ticker", "")))
@@ -224,8 +231,27 @@ class Account:
             "cash": round(self.cash, 2),
             "realized_pnl": round(self.realized_pnl, 2),
             "bets": self.bets, "wins": self.wins, "losses": self.losses,
+            "bankruptcies": self.bankruptcies,
             "log": self.log[-LOG_KEPT:],
         }
+
+    def broke(self):
+        """No money and nothing outstanding, so it cannot place another bet. Open lots are
+        excluded deliberately: while a bet is live the strategy still has something that
+        might pay, and calling it dead then would flap every time a round went against it."""
+        return self.cash < BANKRUPT_AT and not self.open_lots()
+
+    def revive(self, stake=START_BALANCE):
+        """Stake it again from scratch. The history it just lost is preserved in its
+        postmortem, so clearing the log here loses nothing -- and leaving it would make the
+        new run's win rate and round count meaningless."""
+        self.cash = stake
+        self.log = []
+        self.bets = self.wins = self.losses = 0
+        self.realized_pnl = 0.0
+        self.next_id = 1
+        self.views = {}
+        self.bankruptcies += 1
 
     # ---- helpers ----------------------------------------------------------
 
@@ -625,6 +651,10 @@ class KalshiTrader:
         self.csv_path = os.path.join(folder, "kalshi_trades.csv")
         self.exit_path = os.path.join(folder, "kalshi_exits.csv")
         self.round_path = os.path.join(folder, "kalshi_rounds.csv")
+        # One line per strategy that ran out. Appended to and never rewritten, so it is cheap
+        # to watch with `tail -f` and a reader never has to parse the whole trade log.
+        self.bankrupt_path = os.path.join(folder, "kalshi_bankruptcies.log")
+        self.folder = folder
         # What each live round looked like while it ran, so the round log can be written
         # when it settles -- including the rounds no strategy touched.
         self._rounds = {}
@@ -788,6 +818,8 @@ class KalshiTrader:
                     "gave_up": round(held - lot["payout"], 2),
                     "tau_at_exit": lot.get("exit_tau", ""), "result": result,
                 })
+                # kept on the lot as well: a postmortem reads the account's log, not the CSV
+                lot["gave_up"] = round(held - lot["payout"], 2)
 
     def _log_round(self, ticker, result, final_value, now):
         """One row per round, whether or not anyone bet. A round with bets == 0 is a round
@@ -839,10 +871,153 @@ class KalshiTrader:
 
     def _record(self, events, now):
         for e in events:
-            self._append_csv(e, now)
+            if e["kind"] in ("bet", "sold", "settled"):
+                self._append_csv(e, now)
+        # Every path that moves money ends here, so this is the one place to notice that a
+        # strategy has nothing left.
+        events = events + self._check_broke(now)
         if events:
             self.save(force=True)
         return events
+
+    # ---- when a strategy runs out -----------------------------------------
+
+    def _check_broke(self, now):
+        """Write a postmortem for any strategy that has run out, then stake it again.
+
+        Staking it again is deliberate. Six strategies exist to be compared, and a dead one
+        stops producing evidence, so leaving it at zero would quietly shrink the experiment.
+        The run that ended is preserved in its postmortem and `bankruptcies` counts how often
+        it has happened -- a strategy on its third life is saying something a balance is not.
+        """
+        events = []
+        for acct in self.accounts.values():
+            if not acct.broke():
+                continue
+            report = self._write_postmortem(acct, now)
+            died_with, lasted = acct.cash, acct.participated()
+            acct.revive()
+            line = "\t".join([_iso(now), acct.name, f"cash=${died_with:.2f}",
+                               f"rounds={lasted}", f"life={acct.bankruptcies}",
+                               os.path.basename(report)])
+            try:
+                with open(self.bankrupt_path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            except OSError:
+                pass  # a locked file should not stop the simulation
+            events.append({"kind": "bankrupt", "strategy": acct.name, "cash": died_with,
+                           "rounds": lasted, "life": acct.bankruptcies, "report": report,
+                           "coin": None})
+        return events
+
+    def _write_postmortem(self, acct, now):
+        """What went wrong, from the strategy's own log, at the moment it ran out.
+
+        Written now rather than reconstructed later because `revive` is about to clear that
+        log. Everything here is arithmetic over bets that actually happened, with no
+        interpretation, so it stays true whoever reads it and whenever.
+        """
+        log = acct.log
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(now))
+        path = os.path.join(self.folder, f"kalshi_bankrupt_{acct.name}_{stamp}.md")
+        settled = [l for l in log if l["status"] in ("won", "lost", "sold")]
+        staked = sum(l["cost"] for l in log)
+        returned = sum(l.get("payout", 0.0) or 0.0 for l in settled)
+        resolved = acct.wins + acct.losses
+
+        def grouped(lots, keyfn):
+            out = {}
+            for lot in lots:
+                out.setdefault(keyfn(lot), []).append(lot)
+            return out
+
+        def table(title, groups, key_name):
+            """Worst line first, because the worst line is the point of the table."""
+            rows = sorted((sum(l.get("pnl", 0.0) or 0.0 for l in lots), name, len(lots),
+                           sum(l["cost"] for l in lots))
+                          for name, lots in groups.items())
+            out = ["", f"### {title}", "",
+                   f"| {key_name} | bets | staked | net | return |", "|---|---|---|---|---|"]
+            for pnl, name, n, cost in rows:
+                pct = f"{pnl / cost * 100:+.1f}%" if cost else "-"
+                out.append(f"| {name} | {n} | ${cost:,.2f} | ${pnl:+,.2f} | {pct} |")
+            return out
+
+        L = [f"# {acct.name} ran out of money", "",
+             f"**{_iso(now)}** \u2014 life {acct.bankruptcies + 1}, staked "
+             f"${START_BALANCE:,.2f}, ended with ${acct.cash:.2f}.", "",
+             f"> {acct.params['blurb']}", "", "## What happened", "",
+             f"- **{acct.bets}** bets over **{acct.participated()}** rounds, of "
+             f"**{self.rounds_monitored}** that were on offer",
+             f"- **{acct.wins}W / {acct.losses}L** \u2014 "
+             f"{acct.wins / resolved * 100:.1f}% of resolved bets won" if resolved else
+             "- nothing resolved",
+             f"- staked **${staked:,.2f}**, got back **${returned:,.2f}** "
+             f"(**{returned / staked * 100:.1f}%** of what went in)" if staked else
+             "- nothing was ever staked",
+             f"- realised **${acct.realized_pnl:+,.2f}**"]
+
+        if log:
+            costs = [l["cost"] for l in log]
+            prices = [l["price"] for l in log]
+            L.append(f"- average bet **${sum(costs) / len(costs):.2f}** (largest "
+                     f"${max(costs):.2f}), average entry "
+                     f"**{sum(prices) / len(prices) * 100:.0f}\u00a2**")
+        if settled:
+            worst = min(settled, key=lambda l: l.get("pnl", 0.0) or 0.0)
+            L.append(f"- worst single bet **${worst.get('pnl', 0.0):+,.2f}** \u2014 "
+                     f"{worst['side']} {worst['contracts']}\u00d7"
+                     f"{worst['price'] * 100:.0f}\u00a2 on {worst.get('coin') or '?'}")
+
+            L += table("By coin", grouped(settled, lambda l: l.get("coin") or "?"), "coin")
+            L += table("By outcome", grouped(settled, lambda l: l["status"]), "outcome")
+
+            sold = [l for l in settled if l["status"] == "sold"]
+            if sold:
+                L += table("Early sales, by what triggered them",
+                           grouped(sold, lambda l: l.get("why") or "?"), "why")
+                graded = [l for l in sold if "gave_up" in l]
+                if graded:
+                    gave = sum(l["gave_up"] for l in graded)
+                    held_better = sum(1 for l in graded if l["gave_up"] > 0)
+                    L += ["", f"Of **{len(graded)}** sales graded against holding to "
+                              f"settlement, holding would have paid more in "
+                              f"**{held_better}**, for **${gave:+,.2f}** overall. Positive "
+                              f"means selling cost it; negative means selling saved it."]
+
+            rounds = grouped(settled, lambda l: l["close"])
+            worst_rounds = sorted((sum(x.get("pnl", 0.0) or 0.0 for x in lots), close, lots)
+                                  for close, lots in rounds.items())[:5]
+            # "the five worst" is a lie when a short run only had three
+            n_worst = len(worst_rounds)
+            L += ["", f"### The worst {n_worst} round{'s' if n_worst != 1 else ''} "
+                      f"of {len(rounds)}", "",
+                  "| round closed | coins | bets | net |", "|---|---|---|---|"]
+            for pnl, close, lots in worst_rounds:
+                coins = ", ".join(sorted({l.get("coin") or "?" for l in lots}))
+                L.append(f"| {_iso(close)} | {coins} | {len(lots)} | ${pnl:+,.2f} |")
+            drain = sum(pnl for pnl, _, _ in worst_rounds)
+            if acct.realized_pnl:
+                L += ["", f"Those {n_worst} are **${drain:+,.2f}** of the "
+                          f"**${acct.realized_pnl:+,.2f}** realised \u2014 "
+                          f"{abs(drain / acct.realized_pnl) * 100:.0f}% of the damage."]
+
+        L += ["", "## What it was running", "", "| parameter | value |", "|---|---|"]
+        for key, value in sorted(acct.params.items()):
+            if key not in ("name", "blurb"):
+                L.append(f"| `{key}` | `{value}` |")
+        L += [f"| `START_BALANCE` | `{START_BALANCE}` |",
+              f"| `TOTAL_CAP` | `{TOTAL_CAP}` \u2014 ${TOTAL_CAP * START_BALANCE:,.0f} at "
+              f"risk at once |",
+              f"| `WINDOW_CAP` | `{WINDOW_CAP}` |",
+              f"| `KELLY` | `{KELLY}` |", "",
+              "Simulated money. Nothing real was lost.", ""]
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(L))
+        except OSError:
+            pass
+        return path
 
     # ---- reporting --------------------------------------------------------
 
@@ -993,7 +1168,8 @@ class KalshiTrader:
     def reset(self):
         """Start every account over with the starting balance. The old files are kept, renamed."""
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        for path in (self.json_path, self.csv_path, self.exit_path, self.round_path):
+        for path in (self.json_path, self.csv_path, self.exit_path, self.round_path,
+                     self.bankrupt_path):
             if os.path.exists(path):
                 root, ext = os.path.splitext(path)
                 try:
