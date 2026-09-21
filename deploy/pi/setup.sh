@@ -17,6 +17,7 @@
 #        assetcracker       owned by role "assetcracker"   the real run
 #        assetcracker_dev   owned by role "$USER"          development and tests
 #   4. Adds a small memory-tuning file sized for this 16 GB Pi.
+#   5. Checks data checksums are on, and if not prints the commands for an admin to run.
 #
 # What it deliberately does NOT do
 #   - Set any password. Both roles log in over the local unix socket by "peer" authentication:
@@ -109,6 +110,22 @@ CONF
   sudo systemctl restart postgresql
 else
   echo "already present: ${conf}"
+fi
+
+say "Data checksums (detect silent disk corruption; these are long-lived records)"
+if [ "$(sudo -u postgres psql -Atc 'show data_checksums')" = "on" ]; then
+  echo "on"
+else
+  # Not something the deploy user may do, on purpose. It needs the server fully down: stop the
+  # cluster's own unit, not the "postgresql" umbrella, which returns before shutdown finishes.
+  cat <<HELP
+OFF. Turn them on now, while the databases are small. As an admin user on this machine:
+
+  sudo systemctl stop postgresql@${PG_VERSION}-main
+  until pg_lsclusters -h | grep -q ' down '; do sleep 1; done
+  sudo -u postgres /usr/lib/postgresql/${PG_VERSION}/bin/pg_checksums --enable -D /var/lib/postgresql/${PG_VERSION}/main
+  sudo systemctl start postgresql@${PG_VERSION}-main
+HELP
 fi
 
 say "Done"

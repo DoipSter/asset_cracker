@@ -205,8 +205,10 @@ database. Both databases use the `en_US.UTF-8` locale (Brad generated it on the 
 empty databases were recreated with it). Reach the dev database from the Mac with
 `ssh -L 5433:/var/run/postgresql/.s.PGSQL.5432 acdeploy@rpi-v5-1.local`.
 
-Not yet done: a backup target; power-loss behaviour; data checksums are off (the installer's
-default for 17), worth turning on before real records accumulate.
+Data checksums are on (Brad enabled them with `pg_checksums` while the databases were empty;
+the deploy user is deliberately not allowed to).
+
+Not yet done: a backup target; power-loss behaviour.
 
 The service needs outbound internet to the exchanges. Postgres backups go to a second machine:
 these are tax records. Tick data volume, measured today: about 57 KB a minute of raw input for
