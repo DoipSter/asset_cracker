@@ -74,6 +74,10 @@ func run() error {
 		if in.Source != "kalshi" || in.Kind != "binary_contract" {
 			continue
 		}
+		if trade, set := in.Spec["trade"].(bool); set && !trade {
+			slog.Info("recording only, no strategies", "series", in.Symbol)
+			continue // market data is still captured: the poller's sink works without a runner
+		}
 		priceFrom, _ := in.Spec["price_from"].(string) // "coinbase:BTC-USD"
 		product := strings.TrimPrefix(priceFrom, "coinbase:")
 		num := func(key string, fallback float64) float64 {
@@ -161,16 +165,18 @@ func run() error {
 	// What the running service knows right now. The health check and the status page share it.
 	live := func(hctx context.Context) (map[string]any, bool) {
 		ok := db.Ping(hctx) == nil
+		// The feed is one connection for every product, so it is healthy if ANY product traded in
+		// the last minute. A quiet coin is not a fault: DOGE went 50 seconds with three trades.
 		prices := map[string]any{}
+		feedFresh := len(products) == 0
 		for p := range products {
 			if t, seen := latest.Get(p); seen {
 				age := time.Since(t.ReceivedAt)
 				prices[p] = map[string]any{"price": t.Price, "age_seconds": age.Seconds()}
-				ok = ok && age < time.Minute
-			} else {
-				ok = false
+				feedFresh = feedFresh || age < time.Minute
 			}
 		}
+		ok = ok && feedFresh
 		rounds := map[string]kalshi.Status{}
 		for series, p := range pollers {
 			st := p.Status()
@@ -260,6 +266,9 @@ func (s *sink) SaveMarket(ctx context.Context, m kalshi.MarketInfo, closes time.
 }
 
 func (s *sink) SaveQuotes(ctx context.Context, at time.Time, marketID int64, m kalshi.MarketInfo, closes time.Time, q kalshi.Quotes) error {
+	if s.run == nil { // a record-only series
+		return s.db.InsertEvaluation(ctx, at, marketID, s.price(), q)
+	}
 	return s.run.Step(ctx, at, marketID, m, closes, q, s.price())
 }
 
@@ -269,7 +278,7 @@ func (s *sink) SaveResult(ctx context.Context, marketID int64, m kalshi.MarketIn
 		settled = time.Now()
 	}
 	first, err := s.db.RecordResult(ctx, marketID, m.Result, m.ExpirationValue, settled)
-	if err != nil || !first {
+	if err != nil || !first || s.run == nil {
 		return first, err
 	}
 	return true, s.run.Settled(ctx, marketID, m, closes, s.price())

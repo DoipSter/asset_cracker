@@ -65,8 +65,8 @@ deploy/pi/deploy.sh prod
 5. Points `/opt/assetcracker/current` at the new release (one atomic rename), remembers the
    old one in `/opt/assetcracker/previous`, restarts the unit.
 6. Polls `/healthz` for up to a minute. Healthy means: the expected version, the database
-   answering, a Coinbase price under a minute old for every product, quotes under a minute old
-   for every series.
+   answering, the Coinbase feed alive (some product traded in the last minute; a quiet coin is
+   not a fault), quotes under a minute old for every series.
 7. **Not healthy: switches back to the previous release, restarts, prints the unit's last log
    lines, exits non-zero.** Healthy: prunes to the newest five releases.
 
