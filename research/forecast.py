@@ -42,6 +42,20 @@ def candles(product, minutes=60):
     return rows[-minutes:]
 
 
+def ticker(product):
+    """The live price. The candle endpoint lags one to two minutes, and using a stale spot
+    while the clock keeps running quietly poisons every probability -- observed reporting
+    $87,000 against a live $86,801, a $200 error. Candles are still right for measuring
+    volatility, which is a property of the last hour rather than of this instant.
+    """
+    url = f"https://api.exchange.coinbase.com/products/{product}/ticker"
+    req = urllib.request.Request(url, headers={"User-Agent": "asset-cracker-forecast/1.0"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        quote = json.load(r)
+    return float(quote["price"]), datetime.fromisoformat(
+        quote["time"].replace("Z", "+00:00")).astimezone()
+
+
 def normal_cdf(x):
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
 
@@ -107,10 +121,13 @@ def main():
 
     m = measure(candles(PRODUCTS[coin]))
     dec = DECIMALS[coin]
-    spot, sigma = m["spot"], m["sd_minute"] * math.sqrt(horizon)
+    spot, at = ticker(PRODUCTS[coin])          # live, not the lagging candle
+    sigma = m["sd_minute"] * math.sqrt(horizon)
     levels = levels or ladder(spot, sigma, dec)
 
-    print(f"{coin}  spot ${spot:,.{dec}f}   as of {m['at']:%H:%M:%S} local")
+    drift = spot - m["spot"]
+    stale = f"   (last candle {m['at']:%H:%M} was ${m['spot']:,.{dec}f}, {drift:+,.0f})"         if abs(drift) > spot * 0.0003 else ""
+    print(f"{coin}  spot ${spot:,.{dec}f}   as of {at:%H:%M:%S} local{stale}")
     print(f"  last hour: {(spot / m['open'] - 1) * 100:+.2f}%, "
           f"${m['low']:,.{dec}f} to ${m['high']:,.{dec}f}, {m['volume']:,.1f} traded")
     print(f"  volatility {m['sd_minute'] * 100:.4f}%/min over {m['samples']} returns "
