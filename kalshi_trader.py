@@ -14,7 +14,7 @@ How those markets work:
     cent, on every buy and every sell. We also assume one cent of slippage per fill.
 
 Because nobody knows in advance which approach works, six strategies each trade their
-own $150 account at the same time, on the same live prices. Each may bet several times
+own $1000 account at the same time, on the same live prices. Each may bet several times
 in a window (even both sides, if its view flips) and some sell early to cut losses.
 The leaderboard shows which is actually ahead.
 
@@ -28,6 +28,8 @@ Saved next to the app after every event:
   kalshi_trades.csv     - one row per bet, sale and settlement
   kalshi_exits.csv      - one row per early sale, with what holding would have paid
   kalshi_rounds.csv     - one row per coin per round, including rounds nobody bet on
+  kalshi_bankruptcies.log - one line per strategy that ran out of money
+  kalshi_bankrupt_*.md  - a postmortem for each, written at the moment it happened
 
 The last two exist to be argued with. The trade log says what happened; those two say
 whether it should have. Between them they answer the questions worth asking: did selling
@@ -44,7 +46,10 @@ import time
 from collections import deque
 from datetime import datetime
 
-START_BALANCE = 150.0
+START_BALANCE = 1000.0
+# An account with less than this and nothing outstanding cannot place another bet, so it
+# is finished rather than merely losing. Not zero: a single contract costs a cent plus fee.
+BANKRUPT_AT = 1.0
 
 FEE_RATE = 0.07  # Kalshi's taker fee: 7% x price x (1 - price) per contract, rounded up
 SLIPPAGE = 0.01  # we pay one cent worse than the displayed price, buying or selling
@@ -55,8 +60,8 @@ WINDOW_CAP = 0.35  # ...or more than this share of the account into one window
 # WINDOW_CAP. This caps what can be at risk across all open bets, whatever the coin --
 # as a share of the STARTING balance, not the current one. A winning run would otherwise
 # keep raising the ceiling on its own stakes, so a bad round costs more the better things
-# have been going. Half of $150 is $75 at risk, and it stays $75 at any balance.
-TOTAL_CAP = 0.50
+# have been going. A quarter of $1000 is $250 at risk, and it stays $250 at any balance.
+TOTAL_CAP = 0.25
 MIN_GAP = 20  # default seconds between bets in the same round; a strategy may override
 MIN_HOLD = 15  # default seconds before a bet may be sold again
 EXIT_MARGIN = 0.02  # an early sale must beat our estimate of the hold value by this
@@ -117,7 +122,45 @@ STRATEGIES = [
      "tau": (LOTTERY["min_tau"], 900), "band": (0.0, LOTTERY["max_ask"])},
 ]
 
-CSV_FIELDS = ["time", "strategy", "coin", "event", "ticker", "side", "contracts", "price",
+OPPOSITE = {"UP": "DOWN", "DOWN": "UP"}
+
+
+def _mirrored(params):
+    """The anti-world twin of a strategy. It has no opinions of its own: it takes the other
+    side of whatever its original does, at the same size, and closes when the original
+    closes.
+
+    An earlier version gave the twin an inverted belief and let it trade on it. That made it
+    a different strategy rather than a mirror -- it picked its own moments and its own sizes,
+    and the pair stopped being comparable. A mirror is worth more: with the same number of
+    contracts on each side, exactly one of them pays, so whatever the pair loses is precisely
+    what the two fills and the fees cost.
+    """
+    return dict(params, name=f"Anti {params['name']}", anti=True,
+                blurb=f"Takes the other side of {params['name']}")
+
+
+# Twelve accounts, in matched pairs. The pair is the point: both sides pay the spread and the
+# fee on every trade, so if a strategy and its mirror BOTH lose, the losses are costs rather
+# than bad judgement -- and no amount of tuning the model will fix that. If a mirror wins,
+# the original is systematically wrong and worth inverting. Nothing else in this project
+# separates those two explanations.
+ANTI_STRATEGIES = [_mirrored(p) for p in STRATEGIES]
+ALL_STRATEGIES = STRATEGIES + ANTI_STRATEGIES
+
+
+def strategies(anti=False):
+    return ANTI_STRATEGIES if anti else STRATEGIES
+
+
+# Every row carries the run it came from, so the logs can be read a session at a time
+# instead of as one undifferentiated stream. kalshi_sessions.csv indexes the runs.
+SESSION_FIELDS = ["session", "started", "last_seen", "minutes", "bank", "round_cap",
+                  "coins", "strategies", "rounds", "bets", "best", "best_balance",
+                  "worst", "worst_balance", "bankruptcies"]
+
+CSV_FIELDS = ["session", "time", "strategy", "coin", "event", "ticker", "side", "contracts",
+              "price",
               "multiplier", "fee", "cost", "payout", "pnl", "result", "strike",
               "btc_price", "final_value", "balance_after", "model_prob", "edge",
               # added for tuning: why a sale happened, how much of the round was left, and
@@ -126,15 +169,35 @@ CSV_FIELDS = ["time", "strategy", "coin", "event", "ticker", "side", "contracts"
 
 # One row per early sale, written when that round finally settles, so it can say what
 # holding would have paid. This is the file that says whether take_capture is set right.
-EXIT_FIELDS = ["time", "strategy", "coin", "ticker", "side", "contracts", "why",
+EXIT_FIELDS = ["session", "time", "strategy", "coin", "ticker", "side", "contracts", "why",
                "entry", "exit", "cost", "sold_for", "booked", "held_would_pay",
                "gave_up", "tau_at_exit", "result"]
 
 # One row per coin per round, written at settlement -- including rounds nobody bet on,
 # which is where the answer to "why didn't it trade?" lives.
-ROUND_FIELDS = ["time", "coin", "ticker", "close", "strike", "final_value", "result",
+ROUND_FIELDS = ["session", "time", "coin", "ticker", "close", "strike", "final_value",
+                "result",
                 "last_price", "index_est", "index_gap_pct", "sigma_pct", "spread",
                 "ticks", "bets", "scalper_bets", "scalper_pnl"]
+
+
+def session_id(previous=None):
+    """An id for one run of the app: the timestamp to the second.
+
+    A reset ends one run and starts another, and can easily land inside the same second as
+    the run it replaces -- which would give two different runs the same id and silently merge
+    their rows. A collision gets a counter.
+    """
+    base = time.strftime("%Y%m%d_%H%M%S")
+    if not previous:
+        return base
+    if previous == base:
+        return f"{base}_2"
+    if previous.startswith(f"{base}_"):
+        tail = previous.rsplit("_", 1)[1]
+        if tail.isdigit():
+            return f"{base}_{int(tail) + 1}"
+    return base
 
 
 def parse_amount(value):
@@ -201,6 +264,8 @@ class Account:
         self.realized_pnl = 0.0
         self.next_id = 1
         self.views = {}  # coin -> what the model thinks right now, for the display
+        self.bankruptcies = 0  # times this strategy has run out and been staked again
+        self.retired = False  # ran out and was not staked again; it places no more bets
 
     # ---- persistence ------------------------------------------------------
 
@@ -211,6 +276,8 @@ class Account:
         self.wins = int(d.get("wins", 0))
         self.losses = int(d.get("losses", 0))
         self.realized_pnl = float(d.get("realized_pnl", 0.0))
+        self.bankruptcies = int(d.get("bankruptcies", 0))
+        self.retired = bool(d.get("retired", False))
         self.next_id = 1 + max([lot["id"] for lot in self.log], default=0)
         for lot in self.log:  # bets saved before coins were tracked: infer from the ticker
             lot.setdefault("coin", coin_from_ticker(lot.get("ticker", "")))
@@ -224,8 +291,38 @@ class Account:
             "cash": round(self.cash, 2),
             "realized_pnl": round(self.realized_pnl, 2),
             "bets": self.bets, "wins": self.wins, "losses": self.losses,
+            "bankruptcies": self.bankruptcies,
+            "retired": self.retired,
             "log": self.log[-LOG_KEPT:],
         }
+
+    def broke(self):
+        """No money and nothing outstanding, so it cannot place another bet. Open lots are
+        excluded deliberately: while a bet is live the strategy still has something that
+        might pay, and calling it dead then would flap every time a round went against it.
+
+        A retired account is already known to be finished. Without that check it would answer
+        yes on every tick forever, and be written up as newly bankrupt each time.
+        """
+        return not self.retired and self.cash < BANKRUPT_AT and not self.open_lots()
+
+    def retire(self):
+        """Stop. The log is kept rather than cleared -- there is no next life to keep it
+        clean for, and the panel should still be able to show what it did."""
+        self.retired = True
+
+    def revive(self, stake=START_BALANCE):
+        """Stake it again from scratch. The history it just lost is preserved in its
+        postmortem, so clearing the log here loses nothing -- and leaving it would make the
+        new run's win rate and round count meaningless."""
+        self.cash = stake
+        self.retired = False
+        self.log = []
+        self.bets = self.wins = self.losses = 0
+        self.realized_pnl = 0.0
+        self.next_id = 1
+        self.views = {}
+        self.bankruptcies += 1
 
     # ---- helpers ----------------------------------------------------------
 
@@ -403,6 +500,73 @@ class Account:
             return []
         return [self._bet(market, best, n, price, now)]
 
+    # ---- mirroring ---------------------------------------------------------
+
+    def mirror(self, events, market, now, price):
+        """Take the other side of whatever the original just did, for the same money.
+
+        Matched by stake, not by contract count. The two sides of a market are not the same
+        price -- buying UP at 30c and DOWN at 71c -- so matching contracts would have the
+        twin committing well over twice the capital for the same position, straight through
+        the exposure cap its original had just respected. Matching the stake keeps both
+        accounts risking the same amount on the same moment, which is what makes their
+        balances comparable, and keeps the cap honest for free.
+        """
+        if self.retired:
+            return []  # out of money and not staked again; its original carries on alone
+        out = []
+        for e in events:
+            if e["kind"] == "bet":
+                out += self._mirror_bet(e, market, now, price)
+            elif e["kind"] == "sold":
+                out += self._mirror_sell(e, market, now, price)
+        return out
+
+    def _mirror_bet(self, e, market, now, price):
+        side = OPPOSITE[e["side"]]
+        ask = market["yes_ask"] if side == "UP" else market["no_ask"]
+        size = market["yes_ask_size"] if side == "UP" else market["no_ask_size"]
+        if ask <= 0:
+            return []
+        c = min(0.99, ask + SLIPPAGE)
+        # As many contracts as the original's stake buys on this side, never more. The caps
+        # are not re-checked: matching the stake means the twin commits what its original
+        # committed, and that already passed them. Cash still binds -- it cannot spend money
+        # it does not have, and a twin too poor to follow is worth seeing rather than hiding.
+        budget = min(e["cost"], self.cash)
+        n = min(int(budget // c), int(size))
+        while n > 0 and n * c + kalshi_fee(n, c) > budget:
+            n -= 1
+        if n < 1:
+            return []
+        p_side = 1 - e["model_prob"] if e.get("model_prob") is not None else None
+        option = {"side": side, "cost": c, "size": size,
+                  "p": p_side if p_side is not None else 0.5,
+                  "edge": (p_side - c - FEE_RATE * c * (1 - c)) if p_side is not None else 0.0}
+        lot = self._bet(market, option, n, price, now)
+        # what this lot is the mirror of, so the matching sale can be found later
+        self.log[-1]["mirror_of"] = e["id"]
+        lot["mirror_of"] = e["id"]
+        return [lot]
+
+    def _mirror_sell(self, e, market, now, price):
+        """The original closed early, so the twin closes the position it opened against it."""
+        held = [l for l in self.open_lots(market["ticker"])
+                if l.get("mirror_of") == e["id"]]
+        out = []
+        for lot in held:
+            bid = market["yes_bid"] if lot["side"] == "UP" else market["no_bid"]
+            if bid <= 0:
+                continue  # nothing to sell into; it will settle instead
+            sell_c = max(0.01, bid - SLIPPAGE)
+            n = lot["contracts"]
+            proceeds = round(n * sell_c - kalshi_fee(n, sell_c), 2)
+            self._close(lot, "sold", proceeds, now, exit_price=round(sell_c, 2),
+                        exit_btc=price, why="mirror",
+                        exit_tau=round(market["close"] - now))
+            out.append(dict(lot, kind="sold", strategy=self.name, payout=proceeds))
+        return out
+
     def _bet(self, market, option, n, price, now):
         c = option["cost"]
         fee = kalshi_fee(n, c)
@@ -426,6 +590,8 @@ class Account:
         scalping mostly is, and a strategy opts into it with take_profit."""
         prm = self.params
         capture = prm.get("take_capture")  # None: only sell when the market overpays
+        stop = prm.get("stop_loss")  # None: never cut a loser, hold it to settlement
+        stop_tau = prm.get("stop_tau")  # ...or cut it this late, if it is still behind
         hold = prm.get("min_hold", MIN_HOLD)
         events = []
         for lot in self.open_lots(market["ticker"]):
@@ -446,12 +612,22 @@ class Account:
             # those two numbers, so this can never bank a loss.
             banking = (capture is not None and proceeds > lot["cost"]
                        and sell_c >= lot["price"] + capture * (1 - lot["price"]))
-            if overpriced or banking:
+            # Cutting a loser. Neither rule above can do this: banking requires proceeds to
+            # beat cost, and the market overpaying is a reason to sell into strength. Without
+            # this a position that is dying is simply held to zero.
+            cutting = (stop is not None and proceeds <= lot["cost"] * (1 - stop))
+            # A time stop instead of a price stop. Near the close a losing position has run
+            # out of room to recover, and unlike a price floor this cannot be gapped through:
+            # it triggers on the clock, which never jumps.
+            if stop_tau is not None and market["close"] - now <= stop_tau:
+                cutting = cutting or proceeds < lot["cost"]
+            if overpriced or banking or cutting:
                 self._close(lot, "sold", proceeds, now, exit_price=round(sell_c, 2),
                             exit_btc=price,
                             # kept on the lot, not just the event: at settlement the exits
                             # log looks back at this sale and needs to know what drove it
-                            why="capture" if banking and not overpriced else "value",
+                            why=("stop" if cutting and not (banking or overpriced)
+                                 else "capture" if banking and not overpriced else "value"),
                             exit_tau=round(market["close"] - now))
                 events.append(dict(lot, kind="sold", strategy=self.name, payout=proceeds))
         return events
@@ -625,6 +801,19 @@ class KalshiTrader:
         self.csv_path = os.path.join(folder, "kalshi_trades.csv")
         self.exit_path = os.path.join(folder, "kalshi_exits.csv")
         self.round_path = os.path.join(folder, "kalshi_rounds.csv")
+        # One line per strategy that ran out. Appended to and never rewritten, so it is cheap
+        # to watch with `tail -f` and a reader never has to parse the whole trade log.
+        self.bankrupt_path = os.path.join(folder, "kalshi_bankruptcies.log")
+        self.sessions_path = os.path.join(folder, "kalshi_sessions.csv")
+        self.folder = folder
+        # This run of the app. Every row written from here carries it, which is what makes
+        # the logs reviewable one session at a time.
+        self.session = session_id()
+        self.session_started = time.time()
+        # Counted for THIS run. The accounts' own totals persist across restarts, so using
+        # them would credit a one-minute session with every bet ever placed.
+        self.session_bets = 0
+        self.session_rounds = 0
         # What each live round looked like while it ran, so the round log can be written
         # when it settles -- including the rounds no strategy touched.
         self._rounds = {}
@@ -635,8 +824,10 @@ class KalshiTrader:
                             cfg.get("decimals", 2))
             for name, cfg in coins.items()
         }
-        self.accounts = {p["name"]: Account(p) for p in STRATEGIES}
+        self.accounts = {p["name"]: Account(p) for p in ALL_STRATEGIES}
+        # One tracked strategy per world, because the two are shown in their own panels
         self.selected = STRATEGIES[0]["name"]
+        self.selected_anti = ANTI_STRATEGIES[0]["name"]
         self.selected_coin = next(iter(self.coins))
         self.paused = False
         self.started_at = time.time()
@@ -652,8 +843,8 @@ class KalshiTrader:
     def coin(self, name=None):
         return self.coins[name or self.selected_coin]
 
-    def account(self, name=None):
-        return self.accounts[name or self.selected]
+    def account(self, name=None, anti=False):
+        return self.accounts[name or (self.selected_anti if anti else self.selected)]
 
     def markets(self):
         """Every coin's live quotes, keyed by coin, for valuing open bets."""
@@ -664,9 +855,17 @@ class KalshiTrader:
         return {name: c.rounds_monitored for name, c in self.coins.items()}
 
     def select(self, name):
+        """Track this strategy. Which panel it belongs to follows from the strategy itself,
+        so a caller never has to say."""
         if name in self.accounts:
-            self.selected = name
+            if self.accounts[name].params.get("anti"):
+                self.selected_anti = name
+            else:
+                self.selected = name
             self.save(force=True)
+
+    def tracked(self, anti=False):
+        return self.selected_anti if anti else self.selected
 
     def select_coin(self, name):
         if name in self.coins:
@@ -720,6 +919,7 @@ class KalshiTrader:
         if market["close"] != self._round_close:  # a new 15-minute window, for all coins
             self._round_close = market["close"]
             self.rounds_monitored += 1
+            self.session_rounds += 1
         self._note_round(coin, c, market, price, now)
         tau = market["close"] - now
         p_model = prob_yes(price, market["strike"], tau, c.sigma2,
@@ -728,7 +928,13 @@ class KalshiTrader:
         ctx = c.tail_context(market, price, tau)
         events = []
         for acct in self.accounts.values():
-            events += acct.step(c.market, price, now, p_model, self.paused, ctx)
+            if acct.params.get("anti"):
+                continue  # twins shadow; they are driven by their original, just below
+            moves = acct.step(c.market, price, now, p_model, self.paused, ctx)
+            events += moves
+            twin = self.accounts.get(f"Anti {acct.name}")
+            if twin is not None and moves:
+                events += twin.mirror(moves, c.market, now, price)
         return self._record(events, now)
 
     def on_settled(self, ticker, result, final_value, now, price):
@@ -779,6 +985,7 @@ class KalshiTrader:
                 won = (result == "yes") == (lot["side"] == "UP")
                 held = float(lot["contracts"]) if won else 0.0
                 self._append(self.exit_path, EXIT_FIELDS, {
+                    "session": self.session,
                     "time": _iso(now), "strategy": acct.name, "coin": lot.get("coin", ""),
                     "ticker": ticker, "side": lot["side"], "contracts": lot["contracts"],
                     "why": lot.get("why", ""), "entry": lot["price"],
@@ -788,6 +995,8 @@ class KalshiTrader:
                     "gave_up": round(held - lot["payout"], 2),
                     "tau_at_exit": lot.get("exit_tau", ""), "result": result,
                 })
+                # kept on the lot as well: a postmortem reads the account's log, not the CSV
+                lot["gave_up"] = round(held - lot["payout"], 2)
 
     def _log_round(self, ticker, result, final_value, now):
         """One row per round, whether or not anyone bet. A round with bets == 0 is a round
@@ -803,6 +1012,7 @@ class KalshiTrader:
         bets = [l for a in self.accounts.values() for l in a.log if l["ticker"] == ticker]
         scalp = [l for l in self.accounts["Scalper"].log if l["ticker"] == ticker]
         self._append(self.round_path, ROUND_FIELDS, {
+            "session": self.session,
             "time": _iso(now), "coin": r["coin"], "ticker": ticker, "close": _iso(r["close"]),
             "strike": r["strike"], "final_value": final if final is not None else "",
             "result": result, "last_price": round(r["last_price"], dec),
@@ -816,6 +1026,53 @@ class KalshiTrader:
             "ticks": r["ticks"], "bets": len(bets), "scalper_bets": len(scalp),
             "scalper_pnl": round(sum(l.get("pnl", 0.0) or 0.0 for l in scalp), 2),
         })
+
+    def _write_session_row(self):
+        """Keep this run's line in kalshi_sessions.csv current.
+
+        Rewritten in place rather than appended to, because a run's length and results are
+        only known as it goes and the app may be closed without warning -- an appended row
+        would be stale from the moment it was written. The file holds one line per run, so
+        rewriting it costs nothing.
+        """
+        standings = self.standings() + self.standings(anti=True)
+        if not standings:
+            return
+        best, worst = standings[0], standings[-1]
+        row = {
+            "session": self.session,
+            "started": _iso(self.session_started),
+            "last_seen": _iso(time.time()),
+            "minutes": round((time.time() - self.session_started) / 60, 1),
+            "bank": START_BALANCE,
+            "round_cap": round(TOTAL_CAP * START_BALANCE, 2),
+            "coins": " ".join(self.coins),
+            "strategies": len(self.accounts),
+            "rounds": self.session_rounds,
+            "bets": self.session_bets,
+            "best": best["name"], "best_balance": round(best["equity"], 2),
+            "worst": worst["name"], "worst_balance": round(worst["equity"], 2),
+            "bankruptcies": sum(a.bankruptcies for a in self.accounts.values()),
+        }
+        try:
+            rows, head = [], None
+            if os.path.exists(self.sessions_path):
+                with open(self.sessions_path, newline="", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    head = reader.fieldnames
+                    rows = [r for r in reader if r.get("session") != self.session]
+            if head is not None and head != SESSION_FIELDS:
+                os.replace(self.sessions_path,
+                           f"{os.path.splitext(self.sessions_path)[0]}"
+                           f"_cols_{datetime.now():%Y%m%d_%H%M%S}.csv")
+                rows = []
+            rows.append(row)
+            with open(self.sessions_path, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=SESSION_FIELDS)
+                w.writeheader()
+                w.writerows(rows)
+        except OSError:
+            pass  # a locked file shouldn't stop the simulation
 
     def _append(self, path, fields, row):
         """Append one row, writing the header for a new file. If an older file has a
@@ -839,20 +1096,179 @@ class KalshiTrader:
 
     def _record(self, events, now):
         for e in events:
-            self._append_csv(e, now)
+            if e["kind"] in ("bet", "sold", "settled"):
+                self._append_csv(e, now)
+        # Every path that moves money ends here, so this is the one place to notice that a
+        # strategy has nothing left.
+        self.session_bets += sum(1 for e in events if e["kind"] == "bet")
+        events = events + self._check_broke(now)
         if events:
             self.save(force=True)
         return events
 
+    # ---- when a strategy runs out -----------------------------------------
+
+    def _check_broke(self, now):
+        """Write up any account that has run out. A strategy is then staked again; a twin is
+        not.
+
+        The two need opposite treatment. A strategy exists to be compared and stops producing
+        evidence at zero, so leaving it dead would quietly shrink the experiment -- its run is
+        preserved in its postmortem and `bankruptcies` counts the lives. A twin is a
+        measurement of its original rather than a competitor, and handing it a fresh stake
+        every time it fails would say nothing except that it failed again. It retires, and its
+        original goes on trading alone.
+        """
+        events = []
+        for acct in self.accounts.values():
+            if not acct.broke():
+                continue
+            report = self._write_postmortem(acct, now)
+            died_with, lasted = acct.cash, acct.participated()
+            if acct.params.get("anti"):
+                acct.retire()
+            else:
+                acct.revive()
+            line = "\t".join([_iso(now), acct.name, f"cash=${died_with:.2f}",
+                               f"rounds={lasted}",
+                               "retired" if acct.retired else f"life={acct.bankruptcies}",
+                               os.path.basename(report)])
+            try:
+                with open(self.bankrupt_path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            except OSError:
+                pass  # a locked file should not stop the simulation
+            events.append({"kind": "bankrupt", "strategy": acct.name, "cash": died_with,
+                           "rounds": lasted, "life": acct.bankruptcies, "report": report,
+                           "retired": acct.retired, "coin": None})
+        return events
+
+    def _write_postmortem(self, acct, now):
+        """What went wrong, from the strategy's own log, at the moment it ran out.
+
+        Written now rather than reconstructed later because `revive` is about to clear that
+        log. Everything here is arithmetic over bets that actually happened, with no
+        interpretation, so it stays true whoever reads it and whenever.
+        """
+        log = acct.log
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(now))
+        path = os.path.join(self.folder, f"kalshi_bankrupt_{acct.name}_{stamp}.md")
+        settled = [l for l in log if l["status"] in ("won", "lost", "sold")]
+        staked = sum(l["cost"] for l in log)
+        returned = sum(l.get("payout", 0.0) or 0.0 for l in settled)
+        resolved = acct.wins + acct.losses
+
+        def grouped(lots, keyfn):
+            out = {}
+            for lot in lots:
+                out.setdefault(keyfn(lot), []).append(lot)
+            return out
+
+        def table(title, groups, key_name):
+            """Worst line first, because the worst line is the point of the table."""
+            rows = sorted((sum(l.get("pnl", 0.0) or 0.0 for l in lots), name, len(lots),
+                           sum(l["cost"] for l in lots))
+                          for name, lots in groups.items())
+            out = ["", f"### {title}", "",
+                   f"| {key_name} | bets | staked | net | return |", "|---|---|---|---|---|"]
+            for pnl, name, n, cost in rows:
+                pct = f"{pnl / cost * 100:+.1f}%" if cost else "-"
+                out.append(f"| {name} | {n} | ${cost:,.2f} | ${pnl:+,.2f} | {pct} |")
+            return out
+
+        ending = ("retired; it places no further bets and its original trades on alone"
+                  if acct.params.get("anti")
+                  else f"life {acct.bankruptcies + 1}")
+        L = [f"# {acct.name} ran out of money", "",
+             f"**{_iso(now)}** \u2014 {ending}. Staked "
+             f"${START_BALANCE:,.2f}, ended with ${acct.cash:.2f}.", "",
+             f"> {acct.params['blurb']}", "", "## What happened", "",
+             f"- **{acct.bets}** bets over **{acct.participated()}** rounds, of "
+             f"**{self.rounds_monitored}** that were on offer",
+             f"- **{acct.wins}W / {acct.losses}L** \u2014 "
+             f"{acct.wins / resolved * 100:.1f}% of resolved bets won" if resolved else
+             "- nothing resolved",
+             f"- staked **${staked:,.2f}**, got back **${returned:,.2f}** "
+             f"(**{returned / staked * 100:.1f}%** of what went in)" if staked else
+             "- nothing was ever staked",
+             f"- realised **${acct.realized_pnl:+,.2f}**"]
+
+        if log:
+            costs = [l["cost"] for l in log]
+            prices = [l["price"] for l in log]
+            L.append(f"- average bet **${sum(costs) / len(costs):.2f}** (largest "
+                     f"${max(costs):.2f}), average entry "
+                     f"**{sum(prices) / len(prices) * 100:.0f}\u00a2**")
+        if settled:
+            worst = min(settled, key=lambda l: l.get("pnl", 0.0) or 0.0)
+            L.append(f"- worst single bet **${worst.get('pnl', 0.0):+,.2f}** \u2014 "
+                     f"{worst['side']} {worst['contracts']}\u00d7"
+                     f"{worst['price'] * 100:.0f}\u00a2 on {worst.get('coin') or '?'}")
+
+            L += table("By coin", grouped(settled, lambda l: l.get("coin") or "?"), "coin")
+            L += table("By outcome", grouped(settled, lambda l: l["status"]), "outcome")
+
+            sold = [l for l in settled if l["status"] == "sold"]
+            if sold:
+                L += table("Early sales, by what triggered them",
+                           grouped(sold, lambda l: l.get("why") or "?"), "why")
+                graded = [l for l in sold if "gave_up" in l]
+                if graded:
+                    gave = sum(l["gave_up"] for l in graded)
+                    held_better = sum(1 for l in graded if l["gave_up"] > 0)
+                    L += ["", f"Of **{len(graded)}** sales graded against holding to "
+                              f"settlement, holding would have paid more in "
+                              f"**{held_better}**, for **${gave:+,.2f}** overall. Positive "
+                              f"means selling cost it; negative means selling saved it."]
+
+            rounds = grouped(settled, lambda l: l["close"])
+            worst_rounds = sorted((sum(x.get("pnl", 0.0) or 0.0 for x in lots), close, lots)
+                                  for close, lots in rounds.items())[:5]
+            # "the five worst" is a lie when a short run only had three
+            n_worst = len(worst_rounds)
+            L += ["", f"### The worst {n_worst} round{'s' if n_worst != 1 else ''} "
+                      f"of {len(rounds)}", "",
+                  "| round closed | coins | bets | net |", "|---|---|---|---|"]
+            for pnl, close, lots in worst_rounds:
+                coins = ", ".join(sorted({l.get("coin") or "?" for l in lots}))
+                L.append(f"| {_iso(close)} | {coins} | {len(lots)} | ${pnl:+,.2f} |")
+            drain = sum(pnl for pnl, _, _ in worst_rounds)
+            if acct.realized_pnl:
+                L += ["", f"Those {n_worst} are **${drain:+,.2f}** of the "
+                          f"**${acct.realized_pnl:+,.2f}** realised \u2014 "
+                          f"{abs(drain / acct.realized_pnl) * 100:.0f}% of the damage."]
+
+        L += ["", "## What it was running", "", "| parameter | value |", "|---|---|"]
+        for key, value in sorted(acct.params.items()):
+            if key not in ("name", "blurb"):
+                L.append(f"| `{key}` | `{value}` |")
+        L += [f"| `START_BALANCE` | `{START_BALANCE}` |",
+              f"| `TOTAL_CAP` | `{TOTAL_CAP}` \u2014 ${TOTAL_CAP * START_BALANCE:,.0f} at "
+              f"risk at once |",
+              f"| `WINDOW_CAP` | `{WINDOW_CAP}` |",
+              f"| `KELLY` | `{KELLY}` |", "",
+              "Simulated money. Nothing real was lost.", ""]
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(L))
+        except OSError:
+            pass
+        return path
+
     # ---- reporting --------------------------------------------------------
 
-    def standings(self):
-        """Every strategy, best balance first."""
+    def standings(self, anti=False):
+        """One world's strategies, best balance first. The two are never mixed: a mirror
+        beating its original is the comparison that means something, not its rank among
+        twelve."""
         mk = self.markets()
         rows = []
         for a in self.accounts.values():
+            if bool(a.params.get("anti")) is not anti:
+                continue
             eq = a.equity(mk)
             rows.append({"name": a.name, "blurb": a.params["blurb"], "equity": eq,
+                         "retired": a.retired,
                          "pnl_pct": (eq / START_BALANCE - 1) * 100, "bets": a.bets,
                          "wins": a.wins, "losses": a.losses, "joined": a.participated()})
         return sorted(rows, key=lambda r: -r["equity"])
@@ -885,6 +1301,7 @@ class KalshiTrader:
         mkt = (self.coins[e["coin"]].market or {}) if e.get("coin") in self.coins else {}
         yb, ya = mkt.get("yes_bid", ""), mkt.get("yes_ask", "")
         row = {
+            "session": self.session,
             "time": _iso(now), "strategy": e["strategy"], "coin": e.get("coin", ""),
             "event": {"bet": "BET", "sold": "SOLD", "settled": "SETTLED"}[e["kind"]],
             "ticker": e["ticker"], "side": e["side"], "contracts": e["contracts"],
@@ -911,6 +1328,7 @@ class KalshiTrader:
                 if name in self.accounts:
                     self.accounts[name].load(acct)
             self.selected = d.get("selected", self.selected)
+            self.selected_anti = d.get("selected_anti", self.selected_anti)
             self.selected_coin = d.get("selected_coin", self.selected_coin)
             self.paused = bool(d.get("paused", False))
             self.started_at = float(d.get("started_at", self.started_at))
@@ -935,13 +1353,14 @@ class KalshiTrader:
                     c.offset_obs.append((float(row[0]), float(row[1])))
         except Exception:
             # No file yet, or a format we don't recognise: start every account fresh.
-            self.accounts = {p["name"]: Account(p) for p in STRATEGIES}
+            self.accounts = {p["name"]: Account(p) for p in ALL_STRATEGIES}
 
     def save(self, force=False):
         """Write kalshi_balance.json. Throttled to every few seconds unless forced."""
         if not force and time.monotonic() - self._last_save < 5:
             return
         self._last_save = time.monotonic()
+        self._write_session_row()
         standings = self.standings()
         mk = self.markets()
         data = {
@@ -949,6 +1368,7 @@ class KalshiTrader:
             "updated": datetime.now().isoformat(timespec="seconds"),
             "starting_balance_each": START_BALANCE,
             "selected": self.selected,
+            "selected_anti": self.selected_anti,
             "selected_coin": self.selected_coin,
             "leader": standings[0]["name"],
             "paused": self.paused,
@@ -993,15 +1413,22 @@ class KalshiTrader:
     def reset(self):
         """Start every account over with the starting balance. The old files are kept, renamed."""
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        for path in (self.json_path, self.csv_path, self.exit_path, self.round_path):
+        for path in (self.json_path, self.csv_path, self.exit_path, self.round_path,
+                     self.bankrupt_path):
             if os.path.exists(path):
                 root, ext = os.path.splitext(path)
                 try:
                     os.replace(path, f"{root}_old_{stamp}{ext}")
                 except OSError:
                     pass
-        self.accounts = {p["name"]: Account(p) for p in STRATEGIES}
+        self.accounts = {p["name"]: Account(p) for p in ALL_STRATEGIES}
         self.started_at = time.time()
+        # A reset ends one run and begins another: the rows already written keep the old
+        # session id, so they stay findable rather than blurring into what follows.
+        self.session = session_id(self.session)
+        self.session_started = time.time()
+        self.session_bets = 0
+        self.session_rounds = 0
         self.rounds_monitored = 0
         self._round_close = None
         self._rounds = {}

@@ -16,9 +16,23 @@ Every change starts on a branch, named for what it does:
 | `feature/` | new behaviour — `feature/one-minute-chart` |
 | `fix/` | something is wrong — `fix/spread-from-closing-book` |
 | `research/` | investigation, may never merge — `research/market-microstructure` |
+| `integration/` | several finished branches gathered for one review — `integration/all-features` |
 
 Branching is cheap and needs no permission. Deciding what lands on `main` is the owner's
 call, not the contributor's.
+
+### Stacked branches
+
+A branch started from another branch rather than from `main` carries everything below it.
+Check before merging rather than assuming either way:
+
+```bash
+git merge-base --is-ancestor feature/lower feature/upper && echo "already included"
+```
+
+When a stack is finished, give the tip an `integration/` name that says what it holds. The
+tip's own name usually describes only the last thing added to it, which is misleading once
+three other features are sitting underneath.
 
 ## Committing
 
