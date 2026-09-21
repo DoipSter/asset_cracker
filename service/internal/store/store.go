@@ -283,3 +283,27 @@ func (s *Store) LedgerEntryCount(ctx context.Context) (int64, error) {
 	err := s.pool.QueryRow(ctx, `select count(*) from ledger_entry`).Scan(&n)
 	return n, err
 }
+
+// LastMinute returns a product's last trade price in each of the last sixty seconds that had
+// one, oldest first: what the 1M chart draws, where a missing second is a gap in the feed.
+func (s *Store) LastMinute(ctx context.Context, product string) ([][2]float64, error) {
+	rows, err := s.pool.Query(ctx, `
+		select extract(epoch from date_trunc('second', t.at))::float8,
+		       ((array_agg(t.price order by t.at desc))[1])::float8
+		  from price_tick t join instrument i on i.id = t.instrument_id
+		 where i.symbol = $1 and t.at > now() - interval '60 seconds'
+		 group by 1 order by 1`, product)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := [][2]float64{}
+	for rows.Next() {
+		var p [2]float64
+		if err := rows.Scan(&p[0], &p[1]); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}

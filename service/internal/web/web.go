@@ -95,6 +95,16 @@ func Routes(mux *http.ServeMux, db *store.Store, userAgent string, live Live) {
 		}
 		writeJSON(w, doc)
 	})
+	mux.HandleFunc("GET /api/minute", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		points, err := db.LastMinute(ctx, r.URL.Query().Get("product"))
+		if err != nil {
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, points)
+	})
 	mux.HandleFunc("GET /api/history", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 		defer cancel()

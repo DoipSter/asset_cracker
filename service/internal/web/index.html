@@ -5,31 +5,36 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Asset Cracker</title>
 <style>
-  /* Palette, sizes and layout follow doipster's tkinter widget (asset_cracker.py). */
+  /* Palette, sizes and layout follow doipster's tkinter widget (asset_cracker.py on main, 2026-09-21). */
   :root { --bezel:#2A3145; --island:#000; --bg:#0B0F1A; --card:#151B2B; --button:#232A3D; --hilite:#2C3752; --amber:#F2B84B;
           --text:#F2F5FA; --muted:#8A93A8; --grid:#222A3C; --bell:#E24B4A; --up:#2ECC85; --uptint:#123A2B; --down:#FF5C5A; --downtint:#3F1B1E; }
   * { box-sizing:border-box; }
   html, body { height:100%; }
   body { margin:0; background:#05070c; color:var(--text); font:600 13px "Segoe UI", system-ui, -apple-system, sans-serif; font-variant-numeric:tabular-nums;
-         display:flex; align-items:center; justify-content:center; gap:14px; flex-wrap:wrap; padding:18px 8px; }
+         display:flex; align-items:center; justify-content:center; gap:14px; flex-wrap:wrap; padding:18px 8px 34px; }
   button { font:inherit; color:inherit; border:0; cursor:pointer; background:none; padding:0; }
+  button:disabled { cursor:default; }
   .thin { font-weight:400; } .muted { color:var(--muted); } .up { color:var(--up); } .down { color:var(--down); }
 
-  .phone { position:relative; width:360px; height:720px; border-radius:54px; background:var(--bezel); flex:none; }
+  .phone { position:relative; width:360px; height:720px; border-radius:54px; background:var(--bezel); flex:none; order:2; }
   .screen { position:absolute; inset:6px; border-radius:48px; background:var(--bg); overflow:hidden; }
   .island { position:absolute; left:50%; top:14px; width:104px; height:26px; margin-left:-52px; border-radius:13px; background:var(--island); }
   .homebar { position:absolute; left:50%; bottom:16px; width:124px; height:6px; margin-left:-62px; border-radius:3px; background:var(--muted); }
-  .edge { position:absolute; top:196px; width:20px; height:100px; border-radius:7px; background:var(--bezel); color:var(--text); font-size:9px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; }
-  .edge.left { left:-16px; } .edge.right { right:-16px; } .edge.on { background:var(--up); color:var(--bg); } .edge i { font-style:normal; font-size:13px; }
-  .round { position:absolute; top:63px; width:30px; height:30px; border-radius:50%; background:var(--button); color:var(--muted); font-size:15px; line-height:30px; text-align:center; }
-  .round.bell { right:24px; width:40px; height:40px; top:58px; background:var(--card); color:var(--bell); font-size:17px; line-height:40px; } .round.bell.muted { color:var(--muted); text-decoration:line-through; }
-  .tabs { position:absolute; top:64px; left:0; right:0; display:flex; justify-content:center; gap:6px; }
-  .tabs button { width:96px; height:28px; border-radius:14px; background:var(--button); color:var(--muted); }
-  .tabs button.on { background:var(--text); color:var(--bg); }
-  .caption { position:absolute; top:107px; left:0; right:0; text-align:center; font-size:12px; color:var(--muted); }
+  .edge { position:absolute; top:196px; width:20px; height:100px; border-radius:7px; background:var(--bezel); color:var(--text); font-size:14px; line-height:100px; text-align:center; }
+  .edge.anti { left:-16px; } .edge.real { right:-16px; } .edge.real.on { background:var(--up); color:var(--bg); } .edge.anti.on { background:var(--down); color:var(--bg); }
+  /* the bell, the world toggle and close sit level with the island, clear of the coin pills */
+  .round { position:absolute; top:10px; width:40px; height:40px; border-radius:50%; background:var(--card); display:flex; align-items:center; justify-content:center; }
+  .round.bell { left:16px; color:var(--bell); } .round.bell.muted { color:var(--muted); }
+  .round.world { left:58px; color:var(--text); } .round.world:disabled { color:#4a5268; }
+  .round.close { right:25px; top:15px; width:30px; height:30px; background:var(--button); color:var(--muted); }
+  .round svg { width:26px; height:26px; fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; } .round.bell svg { fill:currentColor; stroke:none; }
+  .pills { position:absolute; top:65px; left:20px; right:20px; display:flex; gap:3px; }
+  .pills button { flex:1; height:26px; border-radius:12px; background:var(--button); color:var(--muted); font-size:10px; }
+  .pills button.on { background:var(--text); color:var(--bg); } .pills i { font-style:normal; margin-right:4px; }
+  .caption { position:absolute; top:107px; left:0; right:0; text-align:center; font-size:12px; color:var(--muted); } .caption i { font-style:normal; margin-right:4px; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--muted); margin:0 4px 0 8px; }
-  .live .dot { background:var(--up); } .live .state { color:var(--up); }
-  .price { position:absolute; top:134px; left:0; right:0; text-align:center; font-size:44px; line-height:1; letter-spacing:-.5px; }
+  .live .dot { background:var(--up); } .live .livetext { color:var(--up); }
+  .price { position:absolute; top:134px; left:0; right:0; text-align:center; font-size:44px; line-height:1; letter-spacing:-.5px; white-space:nowrap; }
   .change { position:absolute; top:194px; left:0; right:0; text-align:center; }
   .pill { display:inline-block; padding:0 16px; height:28px; line-height:28px; border-radius:14px; }
   .pill.up { background:var(--uptint); } .pill.down { background:var(--downtint); }
@@ -39,16 +44,17 @@
   .ptb .sub { position:absolute; top:26px; left:0; right:0; text-align:center; font-size:10px; font-weight:400; }
   .chartcard { position:absolute; top:288px; left:18px; right:18px; height:288px; border-radius:28px; background:var(--card); }
   .chartcard canvas { position:absolute; left:0; top:0; width:324px; height:288px; }
-  .ranges { position:absolute; top:590px; left:0; right:0; display:flex; justify-content:center; gap:8px; }
-  .ranges button { width:62px; height:36px; border-radius:18px; background:var(--card); }
+  .ranges { position:absolute; top:590px; left:0; right:0; display:flex; justify-content:center; gap:6px; }
+  .ranges button { width:56px; height:36px; border-radius:18px; background:var(--card); }
   .ranges button.on { background:var(--text); color:var(--bg); }
   .status { position:absolute; top:640px; left:0; right:0; text-align:center; font-size:11px; line-height:22px; }
 
   .panel { width:360px; height:360px; border-radius:26px; background:var(--bg); border:6px solid var(--bezel); position:relative; flex:none; overflow:hidden; }
+  #panelAnti { order:1; } #panelReal { order:3; }
   .panel h3 { position:absolute; left:22px; top:16px; margin:0; font-size:14px; }
   .chip { position:absolute; right:22px; top:14px; height:24px; padding:0 12px; border-radius:12px; background:var(--button); font-size:11px; }
   .ptabs { position:absolute; top:48px; left:22px; display:flex; gap:8px; }
-  .ptabs button { width:96px; height:26px; border-radius:13px; background:var(--button); font-size:11px; position:relative; }
+  .ptabs button { width:96px; height:26px; border-radius:13px; background:var(--button); font-size:11px; }
   .ptabs button.on { background:var(--text); color:var(--bg); }
   .pbody { position:absolute; top:84px; left:0; right:0; bottom:0; }
   .equity { position:absolute; left:22px; top:16px; font-size:30px; line-height:1; }
@@ -58,7 +64,8 @@
   .facts div { display:flex; justify-content:space-between; align-items:center; height:24px; border-bottom:1px solid var(--grid); font-size:11px; }
   .facts div:last-child { border-bottom:0; } .facts span:first-child { font-weight:400; font-size:12px; color:var(--muted); }
   .foot { position:absolute; left:0; right:0; text-align:center; font-weight:400; }
-  table { width:calc(100% - 44px); margin:0 22px; border-collapse:collapse; font-size:11px; }
+  .note { position:absolute; left:34px; right:34px; top:70px; text-align:center; font-weight:400; font-size:12px; line-height:1.55; color:var(--muted); } .note b { display:block; color:var(--text); font-size:14px; margin-bottom:8px; font-weight:600; }
+  table { width:calc(100% - 44px); margin:0 22px; border-collapse:collapse; font-size:10px; }
   th { font-size:9px; color:var(--muted); text-align:left; padding:4px 0 6px; } td { padding:4px 0; border-top:1px solid var(--grid); font-weight:400; }
   tr.now td { background:var(--hilite); } th.r, td.r { text-align:right; }
   .strat { position:relative; margin:0 14px 4px; height:36px; border-radius:14px; background:var(--card); display:block; width:calc(100% - 28px); text-align:left; }
@@ -70,14 +77,15 @@
 </style>
 </head>
 <body>
-<div class="panel" id="panelETH" hidden></div>
+<div class="panel" id="panelAnti" hidden></div>
 <div class="phone">
   <div class="screen">
     <div class="island"></div>
-    <button class="round" style="left:21px" data-closeall="1" title="Close both panels">✕</button>
-    <button class="round bell" id="bell" data-bell="1" title="Notify me when the tracked strategy bets or settles">🔔</button>
-    <div class="tabs"><button data-coin="ETH">Ethereum</button><button data-coin="BTC">Bitcoin</button></div>
-    <div class="caption" id="caption"><span id="capname">BTC index</span><span class="dot"></span><span class="state">connecting</span></div>
+    <button class="round bell" id="bell" data-bell="1" title="Notify me when the tracked strategy bets, sells or settles"><svg viewBox="-14 -14 28 28"><path d="M0-11c-5 0-8 4-8 9v5l-3 4h22l-3-4v-5c0-5-3-9-8-9z"/><circle cx="0" cy="10" r="2.6"/></svg></button>
+    <button class="round world" id="world" disabled title="Switches the chart between the strategies' bets and their anti-world twins'. The anti-world is not running on this service yet."><svg viewBox="-14 -14 28 28"><circle r="11"/><path d="M-11 0h22"/><ellipse rx="4.6" ry="11"/><ellipse rx="9.3" ry="11"/></svg></button>
+    <button class="round close" data-closeall="1" title="Close both panels"><svg viewBox="-14 -14 28 28" style="stroke-width:2.4"><path d="M-5-5l10 10M-5 5l10-10"/></svg></button>
+    <div class="pills" id="pills"></div>
+    <div class="caption" id="caption"><i id="capsign"></i><span id="capname"></span><span class="dot"></span><span class="livetext">connecting</span></div>
     <div class="price" id="price">$ ———</div>
     <div class="change" id="change"></div>
     <div class="ptb"><div class="row"><span class="dot" id="ptbdot" style="margin-left:0"></span><span class="thin muted">Price to beat</span><b id="ptbv">—</b><span class="muted" id="clock" style="font-size:12px"></span></div><div class="sub" id="ptbsub"></div></div>
@@ -86,57 +94,79 @@
     <div class="status"><div class="thin muted" id="lasttrade">Last trade —</div><div id="mode" class="thin muted"></div></div>
     <div class="homebar"></div>
   </div>
-  <button class="edge left" data-panel="ETH" title="Ethereum strategies"><i>‹</i>E</button>
-  <button class="edge right" data-panel="BTC" title="Bitcoin strategies"><i>›</i>B</button>
+  <button class="edge anti" data-panel="anti" title="The anti-world: a twin of every strategy, taking the other side">‹</button>
+  <button class="edge real" data-panel="real" title="The strategies on this coin">›</button>
 </div>
-<div class="panel" id="panelBTC" hidden></div>
+<div class="panel" id="panelReal" hidden></div>
 <div class="banner" id="banner">Simulation only. No account, no real orders.</div>
 
 <script>
-const COINS = { BTC: { name: "Bitcoin", series: "KXBTC15M", product: "BTC-USD", decimals: 0 }, ETH: { name: "Ethereum", series: "KXETH15M", product: "ETH-USD", decimals: 2 } };
-const RANGES = ["15M", "1H", "24H", "7D"];
+// Signs, colours and precision are doipster's (ASSETS in asset_cracker.py). Decimals follow the precision Kalshi quotes each strike to.
+const COINS = {
+  BTC:  { series: "KXBTC15M",  product: "BTC-USD",  sign: "₿", colour: "#F7931A", decimals: 2, pad: 0.000187 },
+  ETH:  { series: "KXETH15M",  product: "ETH-USD",  sign: "Ξ", colour: "#8FA2F2", decimals: 2, pad: 0.000187 },
+  SOL:  { series: "KXSOL15M",  product: "SOL-USD",  sign: "≡", colour: "#14F195", decimals: 4, pad: 0.00025 },
+  XRP:  { series: "KXXRP15M",  product: "XRP-USD",  sign: "✕", colour: "#4FC3F7", decimals: 4, pad: 0.00025 },
+  DOGE: { series: "KXDOGE15M", product: "DOGE-USD", sign: "Ð", colour: "#E3C044", decimals: 6, pad: 0.00025 },
+};
+const RANGES = ["1M", "15M", "1H", "24H", "7D"];
 const store = (k, v) => v === undefined ? localStorage.getItem("ac." + k) : localStorage.setItem("ac." + k, v);
-const ui = { coin: store("coin") || "BTC", range: store("range") || "15M", open: { BTC: store("openBTC") === "1", ETH: store("openETH") === "1" },
-             tab: { BTC: "account", ETH: "account" }, pick: { BTC: store("pickBTC") || "Value", ETH: store("pickETH") || "Value" }, logAt: { BTC: 0, ETH: 0 } };
-let status = null; const rounds = {}, histories = {};
+const ui = { coin: COINS[store("coin")] ? store("coin") : "BTC", range: RANGES.includes(store("range")) ? store("range") : "15M",
+             open: { real: store("openreal") === "1", anti: store("openanti") === "1" }, tab: "account", pick: {}, logAt: 0 };
+for (const c of Object.keys(COINS)) ui.pick[c] = store("pick" + c) || "Value";
+let status = null, minute = []; const rounds = {}, histories = {};
 const $ = (id) => document.getElementById(id);
 const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const usd = (v, d = 2) => "$" + Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
 const hm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const mix = (a, b, t) => "#" + [1, 3, 5].map(i => Math.round(parseInt(a.slice(i, i + 2), 16) * (1 - t) + parseInt(b.slice(i, i + 2), 16) * t).toString(16).padStart(2, "0")).join("");
 const engine = (coin) => status && status.engines ? status.engines[COINS[coin].series] : null;
 const account = (coin) => { const e = engine(coin); if (!e) return null; const a = e.accounts.find(a => a.name === ui.pick[coin]) || e.accounts[0]; a.log = a.log || []; a.open = a.open || []; return a; };
 
 function drawChart() {
   const cv = $("chart"), c = cv.getContext("2d"); c.setTransform(2, 0, 0, 2, 0, 0); c.clearRect(0, 0, 324, 288);
-  const left = 22, right = 302, top = 28, bottom = 224, coin = ui.coin, cfg = COINS[coin], eng = engine(coin), st = status && status.rounds[cfg.series];
+  const left = 22, right = 302, top = 28, bottom = 224, coin = ui.coin, cfg = COINS[coin], dec = cfg.decimals, eng = engine(coin), st = status && status.rounds[cfg.series];
+  const lift = 1 + (eng ? eng.index_offset : 0);
   const say = (msg) => { c.fillStyle = css("--muted"); c.font = "400 14px Segoe UI, system-ui"; c.textAlign = "center"; c.fillText(msg, 162, 130); };
   const grid = () => { c.strokeStyle = css("--grid"); c.lineWidth = 1; for (let i = 0; i < 4; i++) { const y = top + (bottom - top) * i / 3; c.beginPath(); c.moveTo(left, y); c.lineTo(right, y); c.stroke(); } };
-  const lowhigh = (lo, hi, d) => { c.fillStyle = css("--muted"); c.font = "600 11px Segoe UI, system-ui"; c.textAlign = "left"; c.fillText("Low  " + usd(lo, d), left, 264); c.textAlign = "right"; c.fillText("High  " + usd(hi, d), right, 264); };
-  const area = (xy, good) => { const line = css(good ? "--up" : "--down");
+  const lowhigh = (lo, hi, mid) => { c.fillStyle = css("--muted"); c.font = "600 11px Segoe UI, system-ui"; c.textAlign = "left"; c.fillText("Low  " + usd(lo, dec), left, 264); c.textAlign = "right"; c.fillText("High  " + usd(hi, dec), right, 264);
+    if (mid) { c.font = "400 11px Segoe UI, system-ui"; c.textAlign = "center"; c.fillText(mid, 162, 264); } };
+  const target = (y, strike) => { c.setLineDash([5, 4]); c.strokeStyle = css("--text"); c.lineWidth = 1.5; c.beginPath(); c.moveTo(left, y); c.lineTo(right, y); c.stroke(); c.setLineDash([]);
+    c.fillStyle = css("--muted"); c.font = "400 10px Segoe UI, system-ui"; c.textAlign = "right"; c.fillText("Price to beat  " + usd(strike, dec), right, y - 6); };
+  const area = (xy, good, dots) => { const line = css(good ? "--up" : "--down");
     c.beginPath(); xy.forEach(([x, y], i) => i ? c.lineTo(x, y) : c.moveTo(x, y)); c.lineTo(xy[xy.length - 1][0], bottom); c.lineTo(xy[0][0], bottom); c.closePath(); c.fillStyle = css(good ? "--uptint" : "--downtint"); c.fill();
     c.beginPath(); xy.forEach(([x, y], i) => i ? c.lineTo(x, y) : c.moveTo(x, y)); c.strokeStyle = line; c.lineWidth = 2.2; c.lineJoin = c.lineCap = "round"; c.stroke();
+    if (dots) { c.fillStyle = line; for (const [x, y] of xy) { c.beginPath(); c.arc(x, y, 1.8, 0, 7); c.fill(); } }
     const [ex, ey] = xy[xy.length - 1]; c.fillStyle = css("--card"); c.beginPath(); c.arc(ex, ey, 6.5, 0, 7); c.fill(); c.fillStyle = line; c.beginPath(); c.arc(ex, ey, 4, 0, 7); c.fill(); };
 
+  if (ui.range === "1M") {     // the last sixty seconds, one point per second, straight off the feed
+    const start = Date.now() / 1000 - 60, pts = minute.filter(([t]) => t >= start); if (pts.length < 2) return say("Listening…");
+    const levels = pts.map(([, p]) => p * lift); let lo = Math.min(...levels), hi = Math.max(...levels);
+    const pad = Math.max((hi - lo) * 0.18, hi * cfg.pad * 0.5); lo -= pad; hi += pad;   // fits the data: a far-off target would flatten the minute
+    const Yi = (p) => bottom - (bottom - top) * (p - lo) / (hi - lo); grid();
+    area(pts.map(([t], i) => [left + (right - left) * (t - start) / 60, Yi(levels[i])]), levels[levels.length - 1] >= levels[0], true);
+    if (st && st.strike >= lo && st.strike <= hi) target(Yi(st.strike), st.strike);        // only when it is actually in view
+    return lowhigh(Math.min(...levels), Math.max(...levels), pts.length + "/60 ticks");      // fewer than 60 is a quiet or laggy feed
+  }
   if (ui.range !== "15M") {
     const h = histories[cfg.product + ui.range]; if (!h || !h.closes || h.closes.length < 2) return say("Loading chart…");
     const pts = h.closes.slice(); const live = status && status.prices[cfg.product]; if (live) pts[pts.length - 1] = Number(live.price);
     let lo = Math.min(...pts), hi = Math.max(...pts); const pad = (hi - lo) * 0.1 || 1; lo -= pad; hi += pad; grid();
     area(pts.map((p, i) => [left + (right - left) * i / (pts.length - 1), bottom - (bottom - top) * (p - lo) / (hi - lo)]), pts[pts.length - 1] >= pts[0]);
-    const lift = 1 + (eng ? eng.index_offset : 0); return lowhigh(h.low * lift, h.high * lift, cfg.decimals);
+    return lowhigh(h.low * lift, h.high * lift);
   }
   if (!st || !st.ticker) return say("Loading window…");
-  const closeT = Date.parse(st.closes) / 1000, openT = closeT - 900, lift = 1 + (eng ? eng.index_offset : 0);
+  const closeT = Date.parse(st.closes) / 1000, openT = closeT - 900;
   const pts = (rounds[st.ticker] || []).filter(p => p.price != null).map(p => [Date.parse(p.at) / 1000, p.price]).filter(([t]) => t >= openT && t <= closeT);
   const live = status.prices[cfg.product]; if (live && Date.now() / 1000 <= closeT) pts.push([Date.now() / 1000, Number(live.price)]);
   if (!pts.length) return say("Window just opened…");
   const acct = account(coin), bets = acct ? acct.log.filter(l => l.close === closeT) : [];
   let levels = pts.map(([, p]) => p * lift).concat([st.strike]); bets.forEach(l => { levels.push(l.btc_price * lift); if (l.exit_btc) levels.push(l.exit_btc * lift); });
-  let lo = Math.min(...levels), hi = Math.max(...levels); const pad = Math.max((hi - lo) * 0.14, st.strike * 0.000187); lo -= pad; hi += pad;
+  let lo = Math.min(...levels), hi = Math.max(...levels); const pad = Math.max((hi - lo) * 0.14, st.strike * cfg.pad); lo -= pad; hi += pad;
   const X = (t) => left + (right - left) * (t - openT) / 900, Yi = (p) => bottom - (bottom - top) * (p - lo) / (hi - lo), Y = (p) => Yi(p * lift);
   grid(); if (pts.length >= 2) area(pts.map(([t, p]) => [X(t), Y(p)]), pts[pts.length - 1][1] * lift >= st.strike);
-  const y = Yi(st.strike); c.setLineDash([5, 4]); c.strokeStyle = css("--text"); c.lineWidth = 1.5; c.beginPath(); c.moveTo(left, y); c.lineTo(right, y); c.stroke(); c.setLineDash([]);
-  c.fillStyle = css("--muted"); c.font = "400 10px Segoe UI, system-ui"; c.textAlign = "right"; c.fillText("Price to beat  " + usd(st.strike), right, y - 6);
+  target(Yi(st.strike), st.strike);
   const taken = [];
   for (const l of bets) {                                   // where each bet went in
     const x = X(l.t), yb = Y(l.btc_price), col = css(l.side === "UP" ? "--up" : "--down"), d = l.side === "UP" ? -1 : 1;
@@ -146,29 +176,33 @@ function drawChart() {
     for (const dy of [-28, 28, -54, 54, -80, 80]) { ly = Math.min(Math.max(yb + dy, top + 10), bottom - 10); if (!taken.some(b => x0 < b[2] && b[0] < x1 && ly - 13 < b[3] && b[1] < ly + 13)) break; }
     taken.push([x0, ly - 13, x1, ly + 13]); c.textAlign = east ? "right" : "left";
     c.fillStyle = col; c.font = "600 10px Segoe UI, system-ui"; c.fillText(l.side + " " + l.contracts + "×" + Math.round(l.price * 100) + "¢ · " + Math.round(l.model_prob * 100) + "%", lx, ly - 2);
-    c.fillStyle = css("--muted"); c.font = "400 10px Segoe UI, system-ui"; c.fillText(coin + " " + usd(l.btc_price, cfg.decimals), lx, ly + 10);
+    c.fillStyle = css("--muted"); c.font = "400 10px Segoe UI, system-ui"; c.fillText(coin + " " + usd(l.btc_price, dec), lx, ly + 10);
     if (l.status === "sold" && l.exit_btc) { const sx = X(l.exit_t), sy = Y(l.exit_btc); c.beginPath(); c.arc(sx, sy, 5, 0, 7); c.fillStyle = css("--bg"); c.fill(); c.strokeStyle = col; c.lineWidth = 2; c.stroke();
       c.fillStyle = col; c.font = "400 9px Segoe UI, system-ui"; c.textAlign = "center"; c.fillText("sold " + (l.pnl >= 0 ? "+" : "") + l.pnl.toFixed(2), sx, sy + 16); }
   }
   c.fillStyle = css("--muted"); c.font = "400 10px Segoe UI, system-ui"; c.textAlign = "left"; c.fillText(hm(openT), left, 242); c.textAlign = "right"; c.fillText(hm(closeT), right, 242);
-  const ps = pts.map(([, p]) => p * lift); lowhigh(Math.min(...ps), Math.max(...ps), cfg.decimals);
+  const ps = pts.map(([, p]) => p * lift); lowhigh(Math.min(...ps), Math.max(...ps));
 }
 
 function renderPhone() {
-  const coin = ui.coin, cfg = COINS[coin], eng = engine(coin), st = status && status.rounds[cfg.series], live = status && status.prices[cfg.product];
-  document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("on", b.dataset.coin === coin));
-  document.querySelectorAll(".edge").forEach(b => { const on = ui.open[b.dataset.panel]; b.classList.toggle("on", on); b.firstChild.textContent = (b.dataset.panel === "BTC") === on ? "‹" : "›"; });
-  $("capname").textContent = coin + " index";
-  const online = live && live.age_seconds < 20; $("caption").classList.toggle("live", !!online); $("caption").querySelector(".state").textContent = !status ? "connecting" : online ? "live" : "offline";
+  const coin = ui.coin, cfg = COINS[coin], dec = cfg.decimals, eng = engine(coin), st = status && status.rounds[cfg.series], live = status && status.prices[cfg.product];
+  // an active pill is filled with TEXT, so its bright sign is dimmed half-way to the background to stay readable
+  $("pills").innerHTML = Object.entries(COINS).map(([c, k]) => '<button data-coin="' + c + '" class="' + (c === coin ? "on" : "") + '"><i style="color:' + (c === coin ? mix(k.colour, "#0B0F1A", 0.5) : k.colour) + '">' + k.sign + "</i>" + c + "</button>").join("");
+  for (const b of document.querySelectorAll(".edge")) { const on = ui.open[b.dataset.panel]; b.classList.toggle("on", on); b.textContent = (b.dataset.panel === "real") === on ? "‹" : "›"; }
+  $("capsign").textContent = cfg.sign; $("capsign").style.color = cfg.colour; $("capname").textContent = coin + " index";
+  const online = live && live.age_seconds < 60; $("caption").classList.toggle("live", !!online); $("caption").querySelector(".livetext").textContent = !status ? "connecting" : online ? "live" : live ? "quiet" : "offline";
   const lift = 1 + (eng ? eng.index_offset : 0), price = live ? Number(live.price) : null;
-  $("price").textContent = price == null ? "$ ———" : usd(price * lift); $("price").classList.toggle("muted", price == null);
-  const h = ui.range === "15M" ? null : histories[cfg.product + ui.range]; let first = h && h.closes && h.closes[0];
-  if (ui.range === "15M" && st) { const p = (rounds[st.ticker] || []).find(p => p.price != null); first = p && p.price; }
-  if (price != null && first) { const ch = (price - first) / first * 100, good = ch >= 0; $("change").innerHTML = '<span class="pill ' + (good ? "up" : "down") + '">' + (good ? "▲" : "▼") + " " + Math.abs(ch).toFixed(2) + "%  ·  " + ui.range + "</span>"; } else $("change").textContent = "";
+  $("price").textContent = price == null ? "$ ———" : usd(price * lift, dec); $("price").classList.toggle("muted", price == null);
+  $("price").style.fontSize = dec > 4 ? "38px" : "44px";
+  const h = histories[cfg.product + ui.range]; let first = h && h.closes && h.closes[0];
+  if (ui.range === "1M") first = minute.length ? minute[0][1] : null;
+  if (ui.range === "15M") { const p = st && (rounds[st.ticker] || []).find(p => p.price != null); first = p && p.price; }
+  if (price != null && first) { const ch = (price - first) / first * 100, good = ch >= 0;      // a minute's move rounds to 0.00% at two decimals nearly every time
+    $("change").innerHTML = '<span class="pill ' + (good ? "up" : "down") + '">' + (good ? "▲" : "▼") + " " + Math.abs(ch).toFixed(ui.range === "1M" ? 3 : 2) + "%  ·  " + ui.range + "</span>"; } else $("change").textContent = "";
   if (st && st.ticker) {
     const est = price == null ? null : price * lift, state = est == null ? "--muted" : est >= st.strike ? "--up" : "--down", left = Math.floor(Date.parse(st.closes) / 1000 - Date.now() / 1000);
-    $("ptbdot").style.background = css(state); $("ptbv").textContent = usd(st.strike); $("clock").textContent = left > 0 ? Math.floor(left / 60) + ":" + String(left % 60).padStart(2, "0") : "settling";
-    if (est != null) { const diff = est - st.strike; $("ptbsub").style.color = css(state); $("ptbsub").textContent = (diff >= 0 ? "above" : "below") + " target by " + usd(Math.abs(diff), cfg.decimals) + (eng && eng.offset_samples < 3 ? "  ·  index gap still estimated" : ""); }
+    $("ptbdot").style.background = css(state); $("ptbv").textContent = usd(st.strike, dec); $("clock").textContent = left > 0 ? Math.floor(left / 60) + ":" + String(left % 60).padStart(2, "0") : "settling";
+    if (est != null) { const diff = est - st.strike; $("ptbsub").style.color = css(state); $("ptbsub").textContent = (diff >= 0 ? "above" : "below") + " target by " + usd(Math.abs(diff), dec) + (!eng ? "" : eng.offset_samples < 3 ? "  ·  index gap still estimated" : ""); }
   } else { $("ptbv").textContent = "—"; $("clock").textContent = ""; $("ptbsub").textContent = ""; }
   $("ranges").innerHTML = RANGES.map(r => '<button data-range="' + r + '" class="' + (r === ui.range ? "on" : "") + '">' + r + "</button>").join("");
   $("lasttrade").textContent = "Last trade " + (live ? new Date(Date.now() - live.age_seconds * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3 }) : "—");
@@ -178,13 +212,19 @@ function renderPhone() {
   drawChart();
 }
 
-function renderPanel(coin) {
-  const el = $("panel" + coin); el.hidden = !ui.open[coin]; if (!ui.open[coin]) return;
-  const eng = engine(coin), a = account(coin), tab = ui.tab[coin], st = status && status.rounds[COINS[coin].series];
-  if (!eng || !a) { el.innerHTML = '<h3>Kalshi ' + coin + " 15-min</h3><div class='foot muted' style='top:160px'>Waiting for the service…</div>"; return; }
+function renderAnti() {
+  const el = $("panelAnti"); el.hidden = !ui.open.anti; if (el.hidden) return;
+  el.innerHTML = '<h3 class="down">Anti-world ' + ui.coin + '</h3><div class="pbody"><div class="note"><b>Not running here yet</b>The anti-world is a twin of every strategy that takes the other side of each bet, for the same stake, at the same moment. It is part of the app\'s second strategy version, which this service has not ported. Nothing is being simulated for it.</div></div>';
+}
+
+function renderReal() {
+  const coin = ui.coin, el = $("panelReal"); el.hidden = !ui.open.real; if (el.hidden) return;
+  const eng = engine(coin), a = account(coin), tab = ui.tab, st = status && status.rounds[COINS[coin].series], title = "<h3>Kalshi " + coin + " 15-min</h3>";
+  if (!status) { el.innerHTML = title + '<div class="pbody"><div class="note">Waiting for the service…</div></div>'; return; }
+  if (!eng || !a) { el.innerHTML = title + '<div class="pbody"><div class="note"><b>Recording only</b>' + coin + "'s trades, Kalshi's order book each second and every settlement are being stored. No strategy runs on " + coin + " yet: the ones registered are the per-coin originals, and the app's current five-coin design has not been ported.</div></div>"; return; }
   let body = "";
   if (tab === "account") {
-    const good = a.pnl >= 0, q = st && st.quotes, v = a.view, open = a.open || [];
+    const good = a.pnl >= 0, q = st && st.quotes, v = a.view, open = a.open;
     const odds = q && Number(q.yes_ask) > 0 && Number(q.no_ask) > 0 ? "UP " + Math.round(q.yes_ask * 100) + "¢ (" + (1 / q.yes_ask).toFixed(2) + "x)  ·  DOWN " + Math.round(q.no_ask * 100) + "¢ (" + (1 / q.no_ask).toFixed(2) + "x)" : "Loading…";
     const chance = v ? "model " + Math.round(v.p_model * 100) + "%  ·  market " + Math.round(v.mid * 100) + "%" : "—";
     const sig = !v ? ["—", "muted"] : v.bet ? [v.side + " · " + Math.round(v.conf) + "% confident · will bet", v.side === "UP" ? "up" : "down"] : [v.side + " " + Math.round(v.conf) + "%  ·  " + v.why, "muted"];
@@ -195,61 +235,61 @@ function renderPanel(coin) {
       '<div class="facts"><div><span>Odds</span><span>' + esc(odds) + "</span></div><div><span>UP chance</span><span>" + chance + '</span></div><div><span>Signal</span><span class="' + sig[1] + '">' + esc(sig[0]) + '</span></div><div><span>Bets</span><span class="' + bet[1] + '">' + esc(bet[0]) + "</span></div></div>" +
       '<div class="foot" style="top:200px;font-size:11px">Rounds monitored ' + eng.rounds_monitored + "  ·  participated " + a.joined + '</div><div class="foot muted" style="top:216px;font-size:10px">' + a.bets + " bets  ·  " + a.wins + " wins  ·  " + a.losses + " losses  ·  cash " + usd(a.cash) + "</div>";
   } else if (tab === "log") {
-    const lots = a.log.slice().reverse(), at = Math.max(0, Math.min(ui.logAt[coin], lots.length - 9)), page = lots.slice(at, at + 9), now = st ? Date.parse(st.closes) / 1000 : 0;
-    ui.logAt[coin] = at;
+    const lots = a.log.slice().reverse(), at = Math.max(0, Math.min(ui.logAt, lots.length - 9)), page = lots.slice(at, at + 9), now = st ? Date.parse(st.closes) / 1000 : 0, net = lots.reduce((s, l) => s + (l.pnl || 0), 0);
+    ui.logAt = at;
     body = !lots.length ? '<div class="foot muted thin" style="top:100px;font-size:14px">No bets yet</div><div class="foot muted" style="top:126px;font-size:11px">They\'ll show up here as they\'re placed</div>'
-      : '<table><tr><th>TIME</th><th>BET</th><th></th><th class="r">COST</th><th class="r">RESULT</th></tr>' + page.map(l => { const res = l.status === "open" ? ["open", "muted"] : [(l.status === "sold" ? "sold " : "") + (l.pnl > 0 ? "+" : "−") + "$" + Math.abs(l.pnl).toFixed(2), l.pnl > 0 ? "up" : "down"];
-          return '<tr class="' + (l.close === now ? "now" : "") + '"><td class="muted">' + hm(l.t) + '</td><td class="' + (l.side === "UP" ? "up" : "down") + '" style="font-weight:600">' + l.side + "</td><td>" + l.contracts + "×" + Math.round(l.price * 100) + '¢ <span class="muted">' + l.multiplier.toFixed(2) + 'x</span></td><td class="r">$' + l.cost.toFixed(2) + '</td><td class="r ' + res[1] + '" style="font-weight:600">' + res[0] + "</td></tr>"; }).join("") + "</table>" +
-        '<div class="foot muted" style="bottom:12px;font-size:10px">' + (at + 1) + "–" + Math.min(lots.length, at + 9) + " of " + a.log_total + "  ·  net " + (lots.reduce((s, l) => s + (l.pnl || 0), 0) >= 0 ? "+" : "−") + "$" + Math.abs(lots.reduce((s, l) => s + (l.pnl || 0), 0)).toFixed(2) +
-        '  ·  <button data-log="-3">▲</button> <button data-log="3">▼</button></div>';
+      : '<table><tr><th>TIME</th><th>COIN</th><th>BET</th><th></th><th class="r">COST</th><th class="r">RESULT</th></tr>' + page.map(l => { const res = l.status === "open" ? ["open", "muted"] : [(l.status === "sold" ? "sold " : "") + (l.pnl > 0 ? "+" : "−") + "$" + Math.abs(l.pnl).toFixed(2), l.pnl > 0 ? "up" : "down"];
+          return '<tr class="' + (l.close === now ? "now" : "") + '"><td class="muted" style="font-size:9px">' + hm(l.t).replace(/\s?([AP])M$/i, (m, x) => " " + x.toLowerCase()) + "</td><td style='font-weight:600'>" + coin + '</td><td class="' + (l.side === "UP" ? "up" : "down") + '" style="font-weight:600">' + l.side + "</td><td>" + l.contracts + "×" + Math.round(l.price * 100) + '¢ <span class="muted" style="font-size:9px">' + (l.multiplier >= 10 ? l.multiplier.toFixed(0) : l.multiplier.toFixed(2)) + 'x</span></td><td class="r">$' + l.cost.toFixed(2) + '</td><td class="r ' + res[1] + '" style="font-weight:600">' + res[0] + "</td></tr>"; }).join("") + "</table>" +
+        '<div class="foot muted" style="bottom:12px;font-size:10px">' + (at + 1) + "–" + Math.min(lots.length, at + 9) + " of " + a.log_total + "  ·  net " + (net >= 0 ? "+" : "−") + "$" + Math.abs(net).toFixed(2) + '  ·  <span style="display:inline-block;width:12px;height:10px;border-radius:3px;background:var(--hilite);vertical-align:-1px"></span> live round  ·  <button data-log="-3">▲</button> <button data-log="3">▼</button></div>';
   } else {
     const rows = eng.accounts.slice().sort((x, y) => y.equity - x.equity), any = rows.some(r => r.bets);
     body = rows.map((r, i) => '<button class="strat ' + (r.name === a.name ? "on" : "") + '" data-pick="' + esc(r.name) + '"><span class="n">' + (i === 0 && any && r.pnl_pct > 0 ? "★ " : "") + esc(r.name) + '</span><span class="e">' + usd(r.equity) + '</span><span class="p ' + (r.pnl_pct >= 0 ? "up" : "down") + '">' + (r.pnl_pct >= 0 ? "+" : "−") + Math.abs(r.pnl_pct).toFixed(1) + '%</span><span class="b">' + esc(r.blurb) + '</span><span class="r">' + r.bets + " bets · " + r.joined + "/" + eng.rounds_monitored + " rounds</span></button>").join("") +
       '<div class="foot muted" style="bottom:10px;font-size:10px">Rounds monitored ' + eng.rounds_monitored + "  ·  tap a strategy to track it</div>";
   }
-  el.innerHTML = "<h3>Kalshi " + coin + ' 15-min</h3><button class="chip" data-cycle="1">' + esc(a.name) + "  ▾</button><div class='ptabs'>" +
+  el.innerHTML = title + '<button class="chip" data-cycle="1">' + esc(a.name) + "  ▾</button><div class='ptabs'>" +
     [["account", "Account"], ["log", "Log"], ["strategies", "Strategies"]].map(([k, n]) => '<button data-tab="' + k + '" class="' + (k === tab ? "on" : "") + '">' + n + "</button>").join("") + '</div><div class="pbody">' + body + "</div>";
 }
 
-// Tell the viewer when the strategy they are tracking bets, sells or settles, as the widget's toasts did.
+// Tell the viewer when the strategy they are tracking bets, sells or settles, as the widget's toasts do.
 const seen = {};
 function notify() {
   const on = store("alerts") === "1" && "Notification" in window && Notification.permission === "granted";
   $("bell").classList.toggle("muted", !on);
-  for (const coin of Object.keys(COINS)) { const a = account(coin); if (!a) continue;
+  for (const coin of Object.keys(COINS)) { const a = account(coin); if (!a) continue; const dec = COINS[coin].decimals;
     for (const l of a.log) { const key = coin + a.name + l.id + l.status, first = seen[coin + a.name] === undefined;
       if (!seen[key] && !first && on) { const who = coin + " " + a.name;
-        if (l.status === "open") new Notification(who + ": bet " + l.side + ", " + l.contracts + " × " + Math.round(l.price * 100) + "¢ (" + l.multiplier.toFixed(2) + "x)", { body: Math.round(l.model_prob * 100) + "% confident  ·  $" + l.cost.toFixed(2) + " incl. fee  ·  price to beat " + usd(l.strike) });
+        if (l.status === "open") new Notification(who + ": bet " + l.side + ", " + l.contracts + " × " + Math.round(l.price * 100) + "¢ (" + l.multiplier.toFixed(2) + "x)", { body: Math.round(l.model_prob * 100) + "% confident  ·  $" + l.cost.toFixed(2) + " incl. fee  ·  price to beat " + usd(l.strike, dec) });
         else if (l.status === "sold") new Notification(who + ": sold early " + (l.pnl >= 0 ? "+" : "−") + "$" + Math.abs(l.pnl).toFixed(2), { body: l.side + " × " + l.contracts + " at " + Math.round(l.exit_price * 100) + "¢" });
-        else new Notification(who + ": " + (l.status === "won" ? "won +" : "lost −") + "$" + Math.abs(l.pnl).toFixed(2), { body: l.side + " bet " + (l.status === "won" ? "paid out" : "missed") + "  ·  final " + usd(Number(String(l.final_value).replace(/,/g, "")) || 0) }); }
+        else new Notification(who + ": " + (l.status === "won" ? "won +" : "lost −") + "$" + Math.abs(l.pnl).toFixed(2), { body: l.side + " bet " + (l.status === "won" ? "paid out" : "missed") + "  ·  final " + usd(Number(String(l.final_value).replace(/,/g, "")) || 0, dec) }); }
       seen[key] = true; }
     seen[coin + a.name] = true; }
 }
-function render() { renderPhone(); renderPanel("BTC"); renderPanel("ETH"); notify(); }
+function render() { renderPhone(); renderAnti(); renderReal(); notify(); }
 
 async function poll() {
   try { status = await (await fetch("/api/status", { cache: "no-store" })).json(); } catch { status = null; }
+  if (ui.range === "1M") { try { minute = await (await fetch("/api/minute?product=" + COINS[ui.coin].product, { cache: "no-store" })).json() || []; } catch {} }
   render();
 }
 async function pollSeries() {
   if (!status) return;
-  for (const coin of Object.keys(COINS)) { const st = status.rounds[COINS[coin].series]; if (!st || !st.ticker) continue;
-    try { rounds[st.ticker] = await (await fetch("/api/round?ticker=" + encodeURIComponent(st.ticker), { cache: "no-store" })).json() || []; } catch {}
+  const st = status.rounds[COINS[ui.coin].series];
+  if (st && st.ticker) { try { rounds[st.ticker] = await (await fetch("/api/round?ticker=" + encodeURIComponent(st.ticker), { cache: "no-store" })).json() || []; } catch {}
     for (const k of Object.keys(rounds)) if (!Object.values(status.rounds).some(r => r.ticker === k)) delete rounds[k]; }
-  if (ui.range !== "15M") { const key = COINS[ui.coin].product + ui.range; try { histories[key] = await (await fetch("/api/history?product=" + COINS[ui.coin].product + "&range=" + ui.range)).json(); } catch {} }
+  if (ui.range !== "15M" && ui.range !== "1M") { const key = COINS[ui.coin].product + ui.range; try { histories[key] = await (await fetch("/api/history?product=" + COINS[ui.coin].product + "&range=" + ui.range)).json(); } catch {} }
   render();
 }
 
 document.addEventListener("click", (e) => {
-  const b = e.target.closest("button"); if (!b) return; const panel = b.closest(".panel"), coin = panel ? panel.id.replace("panel", "") : null;
-  if (b.dataset.coin) { ui.coin = b.dataset.coin; store("coin", ui.coin); pollSeries(); }
-  else if (b.dataset.range) { ui.range = b.dataset.range; store("range", ui.range); pollSeries(); }
-  else if (b.dataset.panel) { const c = b.dataset.panel; ui.open[c] = !ui.open[c]; store("open" + c, ui.open[c] ? "1" : "0"); }
-  else if (b.dataset.tab) ui.tab[coin] = b.dataset.tab;
-  else if (b.dataset.pick) { ui.pick[coin] = b.dataset.pick; store("pick" + coin, ui.pick[coin]); ui.logAt[coin] = 0; }
-  else if (b.dataset.cycle) { const names = engine(coin).accounts.map(a => a.name); ui.pick[coin] = names[(names.indexOf(ui.pick[coin]) + 1) % names.length]; store("pick" + coin, ui.pick[coin]); ui.logAt[coin] = 0; }
-  else if (b.dataset.log) ui.logAt[coin] += Number(b.dataset.log);
-  else if (b.dataset.closeall) { for (const c of Object.keys(COINS)) { ui.open[c] = false; store("open" + c, "0"); } }
+  const b = e.target.closest("button"); if (!b || b.disabled) return;
+  if (b.dataset.coin) { ui.coin = b.dataset.coin; store("coin", ui.coin); ui.logAt = 0; minute = []; pollSeries(); }
+  else if (b.dataset.range) { ui.range = b.dataset.range; store("range", ui.range); minute = []; pollSeries(); }
+  else if (b.dataset.panel) { const p = b.dataset.panel; ui.open[p] = !ui.open[p]; store("open" + p, ui.open[p] ? "1" : "0"); }
+  else if (b.dataset.tab) ui.tab = b.dataset.tab;
+  else if (b.dataset.pick) { ui.pick[ui.coin] = b.dataset.pick; store("pick" + ui.coin, b.dataset.pick); ui.logAt = 0; }
+  else if (b.dataset.cycle) { const names = engine(ui.coin).accounts.map(a => a.name); ui.pick[ui.coin] = names[(names.indexOf(ui.pick[ui.coin]) + 1) % names.length]; store("pick" + ui.coin, ui.pick[ui.coin]); ui.logAt = 0; }
+  else if (b.dataset.log) ui.logAt += Number(b.dataset.log);
+  else if (b.dataset.closeall) { for (const p of ["real", "anti"]) { ui.open[p] = false; store("open" + p, "0"); } }
   else if (b.dataset.bell) { const on = store("alerts") === "1"; if (on) store("alerts", "0"); else if ("Notification" in window) Notification.requestPermission().then(p => { store("alerts", p === "granted" ? "1" : "0"); render(); }); }
   render();
 });

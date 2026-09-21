@@ -29,13 +29,20 @@ adding a coin is a row, not a code change.
     tools/view.sh          # from the Mac: opens an SSH tunnel to the Pi and the page in a browser
     tools/view.sh stop
 
-The page is doipster's phone widget, rebuilt in the browser from his drawing code: same
-palette and proportions, coin tabs, the index price, the price-to-beat card with its countdown,
-the 15-minute round chart with a marker for every bet, the 1H/24H/7D ranges, and a side panel per
-coin with Account, Log and Strategies. The bell turns on browser notifications for the tracked
-strategy. Not carried over: Pause all and Reset all (the page is read-only by design), the amber
-glow after a bet, and dragging a frameless window. The service still listens on the Pi's localhost only; the
-tunnel is the way in, so nothing is opened on the network.
+The page is doipster's phone widget, rebuilt in the browser from his drawing code and kept in
+step with `main` (last matched 2026-09-21, dc10fd4): same palette and proportions; a pill per
+coin with its coloured sign; the bell, world toggle and close level with the island; the index
+price to each coin's own precision; the price-to-beat card with its countdown; the 15-minute
+round chart with a marker for every bet; the 1M chart drawn from the live feed, one dot per
+second, with its tick count; 15M, 1H, 24H and 7D; the strategies panel on the right, following
+the coin you are looking at, with Account, Log and Strategies. The bell turns on browser
+notifications for the tracked strategy.
+
+What it cannot show, because the engine behind it is his first version: the anti-world (the
+left panel says so, and the world toggle is disabled), strategies on SOL, XRP and DOGE (their
+pages show price, round and charts; the panel says they are record-only), the shared \$1,000
+bank and the bankruptcy report. Not carried over by choice: Pause all and Reset all (the page is
+read-only), the amber glow after a bet, and dragging a frameless window.
 
 ## Settings
 
