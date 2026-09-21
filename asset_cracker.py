@@ -83,6 +83,10 @@ TRANSPARENT = "#010203"  # painted outside the rounded shell, then made see-thro
 
 W, H = 360, 720  # phone size in logical pixels
 TAB = 16  # the side button sticks out this far past the phone's right edge
+# The bell, world toggle and close button share this line, level with the island and clear
+# of the coin pills below. They used to sit in the pills' row, where the world toggle landed
+# on top of the first coin.
+TOP_ROW_Y = 36
 SIDE = 360  # the side panel is a square this big
 
 
@@ -818,10 +822,10 @@ class Monitor(Drawing, tk.Toplevel):
 
         # The page switch: one pill per coin. Tickers rather than names, because five
         # names will not fit across a phone.
-        # The close button sits at x=42 and the bell at x=W-46, so the pills get the strip
-        # between them rather than the full width.
+        # The bell, the world toggle and the close button sit in the island's band above, so
+        # the pills get the full width here rather than a strip between them.
         coins = list(ASSETS)
-        left, right, gap = 62, W - 70, 3
+        left, right, gap = 26, W - 26, 3
         wide = (right - left - gap * (len(coins) - 1)) / len(coins)
         for i, coin in enumerate(coins):
             x1 = left + i * (wide + gap)
@@ -831,12 +835,12 @@ class Monitor(Drawing, tk.Toplevel):
             self.text(x1 + wide / 2, 84, coin, 10, BG if active else MUTED, tags=tags)
             self._button(f"page_{coin}", lambda c=coin: self.hub.switch(c))
 
-        # Close sits top right, away from the two controls you actually use; the bell and
-        # the world toggle share the left, where the close button used to be.
-        cx = W - 46
-        self.circle(cx, 84, 15, fill=BUTTON, width=0, tags=("btn", "close"))
+        # All three controls sit either side of the island, clear of the coin pills below.
+        # They used to share the pills' row, where the world toggle covered the first coin.
+        cx, cy = W - 46, TOP_ROW_Y
+        self.circle(cx, cy, 15, fill=BUTTON, width=0, tags=("btn", "close"))
         for a, b in (((-5, -5), (5, 5)), ((-5, 5), (5, -5))):
-            c.create_line(*self.pts([cx + a[0], 84 + a[1], cx + b[0], 84 + b[1]]),
+            c.create_line(*self.pts([cx + a[0], cy + a[1], cx + b[0], cy + b[1]]),
                           fill=MUTED, width=self.px(2), capstyle="round",
                           tags=("btn", "close"))
         self._button("close", self.quit_app)
@@ -852,7 +856,7 @@ class Monitor(Drawing, tk.Toplevel):
     def _draw_bell_button(self):
         c = self.canvas
         c.delete("bell")
-        cx, cy, sc = 42, 84, 0.85
+        cx, cy, sc = 42, TOP_ROW_Y, 0.85
         self.circle(cx, cy, 20, fill=CARD, width=0, tags=("btn", "bell"))
         color = MUTED if self.muted else BELL
         body = []
@@ -879,7 +883,7 @@ class Monitor(Drawing, tk.Toplevel):
         c = self.canvas
         c.delete("world")
         anti = self.hub.chart_anti
-        cx, cy, r = 84, 84, 13
+        cx, cy, r = 84, TOP_ROW_Y, 13
         tags = ("btn", "world")
         colour = DOWN if anti else TEXT
         self.circle(cx, cy, 20, fill=CARD, width=0, tags=tags)

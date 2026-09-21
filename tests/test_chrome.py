@@ -14,6 +14,8 @@ W = 360  # the phone, in logical pixels
 # Where the three top-row controls sit, and how wide their hit areas are.
 BELL_X, WORLD_X, CLOSE_X = 42, 84, W - 46
 HIT_RADIUS = 20
+PILL_TOP, PILL_BOTTOM = 71, 97  # the coin page switch, one pill per coin
+ISLAND = (W / 2 - 52, W / 2 + 52)  # the notch, which nothing may sit under
 
 
 def block(src, marker, end="\n    def "):
@@ -57,18 +59,51 @@ class TopRow(unittest.TestCase):
     def setUp(self):
         self.src = h.app_source()
 
+    @property
+    def top_row_y(self):
+        return h.app_value("TOP_ROW_Y", self.src)
+
+    @property
+    def pill_span(self):
+        """The coin pills' x range, read from the app rather than copied, so the overlap
+        check below fails if either the pills or the controls move."""
+        line = [l for l in self.src.splitlines() if "left, right, gap = " in l][0]
+        ns = {"W": W}
+        exec(line.strip(), ns)
+        return ns["left"], ns["right"], ns["gap"]
+
     def test_close_is_on_the_right(self):
-        self.assertIn("cx = W - 46", block(self.src, "        # Close sits top right",
-                                           "self._button("))
+        self.assertIn("cx, cy = W - 46, TOP_ROW_Y",
+                      block(self.src, "        # All three controls sit", "self._button("))
 
     def test_the_bell_is_on_the_left(self):
-        self.assertIn(f"cx, cy, sc = {BELL_X}, 84",
+        self.assertIn(f"cx, cy, sc = {BELL_X}, TOP_ROW_Y",
                       block(self.src, "    def _draw_bell_button"))
 
     def test_the_world_button_sits_beside_the_bell(self):
         body = block(self.src, "    def _draw_world_button")
-        self.assertIn(f"cx, cy, r = {WORLD_X}, 84", body)
+        self.assertIn(f"cx, cy, r = {WORLD_X}, TOP_ROW_Y", body)
         self.assertIn("toggle_chart_world", body)
+
+    def test_nothing_in_the_top_row_covers_a_coin_pill(self):
+        """The world toggle used to sit at y 84, the same row as the pills, with its hit
+        area from x 64 to 104 -- directly on top of the first coin."""
+        bottom = self.top_row_y + HIT_RADIUS
+        self.assertLess(bottom, PILL_TOP,
+                        f"the top row reaches y {bottom}, into the coin pills at {PILL_TOP}")
+
+    def test_the_pills_use_the_width_the_controls_freed(self):
+        left, right, gap = self.pill_span
+        wide = (right - left - gap * 4) / 5
+        self.assertGreater(wide, 50, "five coins do not get a readable pill each")
+        self.assertGreaterEqual(left, 20)
+        self.assertLessEqual(right, W - 20)
+
+    def test_nothing_sits_under_the_island(self):
+        for name, x in (("bell", BELL_X), ("world", WORLD_X), ("close", CLOSE_X)):
+            with self.subTest(button=name):
+                self.assertFalse(ISLAND[0] < x < ISLAND[1],
+                                 f"{name} is behind the island")
 
     def test_the_three_hit_areas_do_not_overlap(self):
         spots = [("bell", BELL_X), ("world", WORLD_X), ("close", CLOSE_X)]
