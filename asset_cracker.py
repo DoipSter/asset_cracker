@@ -68,6 +68,22 @@ FLASH_SECONDS = 9.0  # how long that glow takes to fade away (one slow pulse, no
 SYMBOL_ON_LIGHT = 0.5
 
 
+def nice_step(span, target=14):
+    """A round step that puts roughly `target` lines across `span`.
+
+    Always 1, 2 or 5 times a power of ten, because those are the numbers people read prices
+    in. Anything else lands on ticks like 37 or 64 and the axis stops being scannable.
+    """
+    if span <= 0:
+        return 1.0
+    rough = span / max(1, target)
+    power = 10 ** math.floor(math.log10(rough))
+    for multiple in (1, 2, 5, 10):
+        if rough <= multiple * power:
+            return multiple * power
+    return 10 * power
+
+
 def mix_color(base, top, amount):
     """`base` colour with `amount` (0..1) of `top` blended in, as a hex string."""
     a = max(0.0, min(1.0, amount))
@@ -1383,24 +1399,46 @@ class Monitor(Drawing, tk.Toplevel):
             c.create_line(*self.pts(steps), fill=colour, width=self.px(1.8),
                           joinstyle="round", tags="depth")
 
-        c.create_line(*self.pts([X(mid), DEPTH_T + 12, X(mid), DEPTH_B]), fill=GRID,
-                      width=self.px(1), dash=(self.px(3), self.px(3)), tags="depth")
+        # A ruled price axis, so a wall can be read off as a number rather than as a
+        # position. Every line is drawn; only every other one is labelled, because at this
+        # width the labels would otherwise run into each other.
+        step = nice_step(2 * span)
+        first = math.ceil((mid - span) / step) * step
+        ticks = []
+        price = first
+        while price <= mid + span:
+            ticks.append(price)
+            price += step
+        # Every line gets a number. They are too close together for one row, so they
+        # alternate between two -- which keeps a $50 grid readable where dropping every
+        # other label would leave you counting gridlines to work out where you are.
+        labels = [f"{p:,.{dec}f}".replace(",", "") for p in ticks]
+        font = tkfont.Font(family="Segoe UI", size=-self.px(8))
+        widest = max(font.measure(t) for t in labels) / self.k
+        # Two rows doubles the room each label gets. Where even that is not enough -- a coin
+        # priced in millionths needs eight digits -- label every other line instead of
+        # letting them overlap into mush.
+        every = 1 if widest + 4 <= 2 * (PLOT_R - PLOT_L) / max(1, len(ticks)) else 2
+        for i, (price, label) in enumerate(zip(ticks, labels)):
+            x = X(price)
+            c.create_line(*self.pts([x, DEPTH_T + 12, x, DEPTH_B]), fill=GRID,
+                          width=self.px(1), tags="depth")
+            if i % every == 0:
+                self.text(x, DEPTH_B + (10 if (i // every) % 2 == 0 else 19), label, 8,
+                          MUTED, weight="", tags="depth")
+
+        c.create_line(*self.pts([X(mid), DEPTH_T + 12, X(mid), DEPTH_B]), fill=MUTED,
+                      width=self.px(1.2), dash=(self.px(3), self.px(3)), tags="depth")
 
         bid_total = down[-1][1] if down else 0.0
         ask_total = up[-1][1] if up else 0.0
         lean = "bid" if bid_total > ask_total else "ask"
-        self.text(PLOT_L, DEPTH_T + 4, f"{bid_total:,.0f} bid", 9, UP, weight="",
-                  anchor="w", tags="depth")
-        self.text(W / 2, DEPTH_T + 4,
-                  f"book \u00b1{span / mid * 100:.2f}%  \u00b7  {lean}-heavy", 9, MUTED,
-                  weight="", tags="depth")
+        self.text(PLOT_L, DEPTH_T + 4, f"{bid_total:,.0f} bid · {lean}-heavy", 9, UP,
+                  weight="", anchor="w", tags="depth")
         self.text(PLOT_R, DEPTH_T + 4, f"{ask_total:,.0f} ask", 9, DOWN, weight="",
                   anchor="e", tags="depth")
-        self.text(PLOT_L, DEPTH_B + 12, f"${mid - span:,.{dec}f}", 9, MUTED, weight="",
-                  anchor="w", tags="depth")
-        self.text(W / 2, DEPTH_B + 12, f"${mid:,.{dec}f}", 9, TEXT, weight="", tags="depth")
-        self.text(PLOT_R, DEPTH_B + 12, f"${mid + span:,.{dec}f}", 9, MUTED, weight="",
-                  anchor="e", tags="depth")
+        # the touch itself, above the ruled axis so it never collides with a tick label
+        self.text(X(mid), DEPTH_T + 4, f"${mid:,.{dec}f}", 9, TEXT, weight="", tags="depth")
 
     def _draw_status(self):
         self.canvas.delete("status")

@@ -110,6 +110,66 @@ class Staircase(unittest.TestCase):
         self.assertEqual(self.walk({}, True), [])
 
 
+class PriceAxis(unittest.TestCase):
+    """Ruled lines at round prices, so a wall reads as a number rather than a position."""
+
+    def setUp(self):
+        import math as _math
+        self.src = h.app_source()
+        ns = {"math": _math}
+        exec(self.src[self.src.index("def nice_step("):self.src.index("def mix_color(")], ns)
+        self.nice_step = ns["nice_step"]
+        self.span_pct = h.app_value("DEPTH_SPAN_PCT", self.src)
+
+    def ticks(self, spot):
+        import math as _math
+        span = spot * self.span_pct
+        step = self.nice_step(2 * span)
+        out, price = [], _math.ceil((spot - span) / step) * step
+        while price <= spot + span:
+            out.append(price)
+            price += step
+        return step, out
+
+    def test_steps_are_round_numbers_people_read_prices_in(self):
+        """1, 2 or 5 times a power of ten. Anything else lands on ticks like 37 or 64."""
+        for spot in (86_800.0, 2_637.0, 110.36, 1.4096, 0.0875, 7.0, 43_210.0):
+            step, _ = self.ticks(spot)
+            scaled = step / 10 ** round(__import__("math").log10(step) - 0.5)
+            with self.subTest(spot=spot, step=step):
+                self.assertAlmostEqual(min((1, 2, 5, 10), key=lambda m: abs(m - scaled)),
+                                       scaled, places=6)
+
+    def test_bitcoin_gets_a_fifty_dollar_grid(self):
+        step, ticks = self.ticks(86_800.0)
+        self.assertEqual(step, 50.0)
+        self.assertIn(86_750.0, ticks)
+        self.assertIn(86_800.0, ticks)
+
+    def test_the_grid_spans_the_whole_panel(self):
+        for spot in (86_800.0, 2_637.0, 0.0875):
+            span = spot * self.span_pct
+            _, ticks = self.ticks(spot)
+            with self.subTest(spot=spot):
+                self.assertGreaterEqual(len(ticks), 6, "too few lines to read a level off")
+                self.assertLessEqual(len(ticks), 20, "so many lines it is a smear")
+                self.assertGreaterEqual(ticks[0], spot - span)
+                self.assertLessEqual(ticks[-1], spot + span)
+
+    def test_labels_alternate_rows_rather_than_overlapping(self):
+        body = self.src[self.src.index("        labels = ["):]
+        body = body[:body.index("c.create_line(*self.pts([X(mid)")]
+        self.assertIn("DEPTH_B + (10 if", body)
+        self.assertIn("font.measure", body, "label width is assumed rather than measured")
+
+    def test_the_label_row_clears_the_range_pills(self):
+        ns = {}
+        for line in self.src.splitlines():
+            if line.startswith("DEPTH_T, DEPTH_B"):
+                exec(line, ns)
+        self.assertLess(ns["DEPTH_B"] + 19 + 5, 596, "the lower label row hits the pills")
+
+
 class Feed(unittest.TestCase):
 
     def setUp(self):
