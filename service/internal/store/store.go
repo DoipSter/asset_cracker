@@ -172,15 +172,22 @@ func (s *Store) UnsettledMarkets(ctx context.Context, instrumentID int64, before
 
 // InsertEvaluation records what was known about a market at one moment and returns the row's
 // id, so every strategy family that looked at it can hang its decisions off the same row.
-func (s *Store) InsertEvaluation(ctx context.Context, at time.Time, marketID int64, underlyingPrice string, quotes any) (int64, error) {
+func (s *Store) InsertEvaluation(ctx context.Context, at time.Time, marketID int64, underlyingPrice string, quotes, model any) (int64, error) {
 	q, err := json.Marshal(quotes)
+	if err != nil {
+		return 0, err
+	}
+	if model == nil {
+		model = map[string]any{}
+	}
+	m, err := json.Marshal(model)
 	if err != nil {
 		return 0, err
 	}
 	var id int64
 	err = s.pool.QueryRow(ctx, `
-		insert into evaluation (at, market_id, underlying_price, quotes)
-		values ($1, $2, nullif($3, '')::numeric, $4) returning id`, at, marketID, underlyingPrice, q).Scan(&id)
+		insert into evaluation (at, market_id, underlying_price, quotes, model)
+		values ($1, $2, nullif($3, '')::numeric, $4, $5) returning id`, at, marketID, underlyingPrice, q, m).Scan(&id)
 	return id, err
 }
 

@@ -2,7 +2,10 @@ package kalshi
 
 import (
 	"fmt"
+	"math"
 	"math/big"
+	"sort"
+	"strconv"
 )
 
 // Prices on Kalshi are dollars with up to four decimals ("0.9950"). They are handled here as
@@ -33,6 +36,71 @@ type Quotes struct {
 	NoAskSize  string `json:"no_ask_size"`
 	YesLevels  int    `json:"yes_levels"`
 	NoLevels   int    `json:"no_levels"`
+
+	// Depth behind the top of book. Without it two questions can never be answered from stored
+	// data: how much could really have been SOLD at a moment (a sale hits the bids on its own
+	// side), and how much more could have been BOUGHT within the slippage already assumed (a buy
+	// of Yes is filled by the No bids). Found missing by the 2026-09-21 strategy review, in which
+	// a simulated sale of 348 contracts met a displayed bid of 8.
+	YesBids     [][2]string `json:"yes_bids"`      // the five best Yes bids, best first: [price, size]
+	NoBids      [][2]string `json:"no_bids"`       // likewise for No
+	YesBidDepth Depth       `json:"yes_bid_depth"` // contracts bid within 1c, 3c and 5c of the best Yes bid
+	NoBidDepth  Depth       `json:"no_bid_depth"`
+}
+
+// Depth is cumulative size within a distance of the best price on one side.
+type Depth struct {
+	C1 float64 `json:"1c"`
+	C3 float64 `json:"3c"`
+	C5 float64 `json:"5c"`
+}
+
+type level struct {
+	price int64 // ten-thousandths of a dollar
+	size  float64
+	text  [2]string
+}
+
+// ladder parses one side's bids, best first, skipping empty levels.
+func ladder(levels [][]string) ([]level, error) {
+	var out []level
+	for _, lv := range levels {
+		if len(lv) < 2 {
+			continue
+		}
+		size, err := strconv.ParseFloat(lv[1], 64)
+		if err != nil || size <= 0 {
+			continue
+		}
+		p, err := parsePrice(lv[0])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, level{p, size, [2]string{lv[0], lv[1]}})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].price > out[j].price })
+	return out, nil
+}
+
+func depthOf(l []level) (top [][2]string, d Depth) {
+	top = [][2]string{}
+	for i, lv := range l {
+		if i < 5 {
+			top = append(top, lv.text)
+		}
+		switch gap := l[0].price - lv.price; {
+		case gap <= 100:
+			d.C1 += lv.size
+			fallthrough
+		case gap <= 300:
+			d.C3 += lv.size
+			fallthrough
+		case gap <= 500:
+			d.C5 += lv.size
+		}
+	}
+	round := func(v float64) float64 { return math.Round(v*100) / 100 }
+	return top, Depth{round(d.C1), round(d.C3), round(d.C5)}
 }
 
 // BookQuotes reads live quotes from an order book. Kalshi's book lists the BIDS on each side.
@@ -71,6 +139,14 @@ func BookQuotes(yes, no [][]string) (Quotes, error) {
 	if err != nil {
 		return Quotes{}, err
 	}
+	yesLadder, err := ladder(yes)
+	if err != nil {
+		return Quotes{}, err
+	}
+	noLadder, err := ladder(no)
+	if err != nil {
+		return Quotes{}, err
+	}
 	q := Quotes{YesBid: formatPrice(yesBid), NoBid: formatPrice(noBid), YesLevels: yesN, NoLevels: noN,
 		YesAsk: "0.0000", NoAsk: "0.0000", YesAskSize: "0", NoAskSize: "0"}
 	if noBid > 0 {
@@ -79,5 +155,7 @@ func BookQuotes(yes, no [][]string) (Quotes, error) {
 	if yesBid > 0 {
 		q.NoAsk, q.NoAskSize = formatPrice(priceScale-yesBid), yesSize
 	}
+	q.YesBids, q.YesBidDepth = depthOf(yesLadder)
+	q.NoBids, q.NoBidDepth = depthOf(noLadder)
 	return q, nil
 }

@@ -174,6 +174,26 @@ func (r *Runner2) Seed(ctx context.Context, client *kalshi.Client, userAgent str
 	}
 }
 
+// Inputs is what the model is being fed for one coin right now, stored with every market
+// snapshot so that a bad input can be found afterwards: a probability is only as good as the
+// price, volatility and index offset behind it. offset_source says whether the offset was
+// learned from recent settlements or is the coin's fallback constant, which the 2026-09-21
+// review found thin coins silently drop to.
+func (r *Runner2) Inputs(coin string) map[string]any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c := r.trader.Coins[coin]
+	if c == nil {
+		return nil
+	}
+	offset, samples := c.OffsetStatus()
+	source := "measured"
+	if samples < 3 {
+		source = "constant"
+	}
+	return map[string]any{"sigma2": c.Sigma2, "index_offset": offset, "offset_samples": samples, "offset_source": source}
+}
+
 // Observe takes a trade print for whichever coin uses that product.
 func (r *Runner2) Observe(t coinbase.Trade) {
 	price, err := strconv.ParseFloat(t.Price, 64)
@@ -247,7 +267,15 @@ func (r *Runner2) Step(ctx context.Context, coin string, evalID int64, at time.T
 		case "bet":
 			if journaled {
 				n := lot.Contracts
-				rec.Decisions[i].Action, rec.Decisions[i].SizeAlone = "enter", &n
+				d := &rec.Decisions[i]
+				d.Action, d.SizeAlone = "enter", &n
+				// The engine's display signal can say "cooling down" on a second it then bets in:
+				// it checks the default gap between bets while the entry rule uses the strategy's
+				// own (the Scalper's is 8 s, not 20). The port keeps that to match the Python, but
+				// the journal records what happened: nothing blocked an entry that was made.
+				if d.BlockedBy != "" {
+					d.Why, d.BlockedBy = "entered (its display signal said: "+d.BlockedBy+")", ""
+				}
 			}
 			row.Action, row.Price, row.FeeCents, row.CashCents = "buy", lot.Price, cents(lot.Fee), cents(lot.Cost)
 		case "sold":

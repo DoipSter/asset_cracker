@@ -304,7 +304,14 @@ func (s *sink) SaveMarket(ctx context.Context, m kalshi.MarketInfo, closes time.
 func (s *sink) SaveQuotes(ctx context.Context, at time.Time, marketID int64, m kalshi.MarketInfo, closes time.Time, q kalshi.Quotes) error {
 	// One snapshot row per second per market; every engine version hangs its decisions off it.
 	price := s.price()
-	evalID, err := s.db.InsertEvaluation(ctx, at, marketID, price, q)
+	model := map[string]any{}
+	if t, ok := s.latest.Get(s.product); ok {
+		model["price_age_s"] = at.Sub(t.At).Seconds() // how old the print the model is pricing off is, by the exchange's clock
+	}
+	if s.run2 != nil && s.coin != "" {
+		model["v2"] = s.run2.Inputs(s.coin)
+	}
+	evalID, err := s.db.InsertEvaluation(ctx, at, marketID, price, q, model)
 	if err != nil {
 		return err
 	}
