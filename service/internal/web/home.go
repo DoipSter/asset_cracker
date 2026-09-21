@@ -235,7 +235,48 @@ func earned(now runner.Line, then store.ValueSnapshot, have bool) (cents int64, 
 	return cents, pct
 }
 
-var groupLabels = map[string]string{"strategies": "Strategies", "anti": "Anti-world twins", "v1": "First engine", "money": "Money buckets"}
+var groupLabels = map[string]string{"strategies": "Strategies", "anti": "Anti-world twins", "v1": "First engine", "v3": "Third engine", "money": "Money buckets"}
+
+// batchAccountsForTotal says whether the group rows found in the `then` batch add up to that
+// batch's total, in value and in contributed. It is the test the zero-baseline rule (groupEarned)
+// rests on. The writer makes the total BY adding the groups up (runner.Value) and a batch goes in
+// all or nothing, so a batch whose groups add up to its total is whole, and a group with no row
+// in it was not written because the release that wrote the batch did not have that group: it
+// held nothing and had been given nothing. A batch that does NOT add up has lost rows some other
+// way, and nothing can be said about a group missing from it. This is a check of the rows, not
+// an assumption about which release wrote them.
+func batchAccountsForTotal(then store.ValueSnapshot, groups map[string]store.ValueSnapshot) bool {
+	if len(groups) == 0 {
+		return false
+	}
+	var value, contributed int64
+	for _, g := range groups {
+		value, contributed = value+g.ValueCents, contributed+g.ContributedCents
+	}
+	return value == then.ValueCents && contributed == then.ContributedCents
+}
+
+// groupEarned is what one composition group earned over the range, or ok false when that cannot
+// be known (the caller then serves null).
+//
+// The zero-baseline rule: a group with no row in the `then` batch, where that batch is whole
+// (batchAccountsForTotal), did not exist then. It is compared with a baseline of value 0 and
+// contributed 0, so what it earned over the range is everything it has earned: value less
+// contributed now. Without the rule the third engine's line, which no batch written before its
+// release has, would read "unknown" for every range that starts before that release (for ALL,
+// for ever), and the lines would stop adding up to the total. With it they still add up: the
+// total then was the sum of the groups that were there, and the missing one adds 0 to both sides.
+func groupEarned(g runner.Line, w window, whole bool) (cents int64, ok bool) {
+	then, found := w.groups[g.Key]
+	switch {
+	case found:
+		cents, _ = earned(g, then, true)
+		return cents, true
+	case whole:
+		return g.ValueCents - g.ContributedCents, true
+	}
+	return 0, false
+}
 
 func unixf(t time.Time) float64 { return float64(t.UnixNano()) / 1e9 }
 
@@ -322,14 +363,17 @@ func homeDoc(src Sources, key string, w window, now time.Time, changes map[strin
 	}
 
 	composition := []map[string]any{}
+	whole := w.have && batchAccountsForTotal(w.then, w.groups)
 	for _, g := range v.Groups {
 		row := map[string]any{"key": g.Key, "label": groupLabels[g.Key], "buckets": g.Count, "value_cents": g.ValueCents, "earned_cents": nil}
-		switch then, ok := w.groups[g.Key]; {
+		switch {
 		case !known || !historyKnown:
 		case !w.have:
 			row["earned_cents"] = int64(0)
-		case ok:
-			row["earned_cents"], _ = earned(g, then, true)
+		default:
+			if cents, ok := groupEarned(g, w, whole); ok {
+				row["earned_cents"] = cents
+			}
 		}
 		composition = append(composition, row)
 	}

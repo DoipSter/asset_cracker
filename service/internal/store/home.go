@@ -151,7 +151,7 @@ func (s *Store) SnapshotSeries(ctx context.Context, scope, key string, since tim
 type BucketCapital struct {
 	ID               int64
 	Name, Status     string
-	Version          int   // the strategy version's number: 1 is the first engine, 2 the second
+	Version          int   // the strategy version's number: 1 is the first engine, 2 the second, 3 the third (its own composition group)
 	Anti             bool  // an anti-world twin
 	ContributedCents int64 // seeds in, less what was reaped, less the sustainment allocation taken
 	// CashCents is the ledger's balance, read ONLY for a live bucket that no running engine holds

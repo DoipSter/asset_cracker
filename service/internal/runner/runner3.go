@@ -1,0 +1,1528 @@
+package runner
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"runtime/debug"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/doipster/asset_cracker/service/internal/broker"
+	"github.com/doipster/asset_cracker/service/internal/coinbase"
+	"github.com/doipster/asset_cracker/service/internal/kalshi"
+	k3 "github.com/doipster/asset_cracker/service/internal/kalshi15m3"
+	"github.com/doipster/asset_cracker/service/internal/store"
+)
+
+// This file runs the third engine (package kalshi15m3) live, in SIMULATION: it has no order code
+// and no venue client; what "fills" is decided by the paper broker from the recorded book.
+// Design: docs/honest-fills-v3.md, section 5. The rules that shape everything below:
+//
+//   - The third engine must never be able to halt, stall or mis-record the first two. So nothing
+//     that is called from a poller or from the Coinbase stream ever WAITS on r.mu, the lock that
+//     is held across a database write: Inputs and Observe touch the model only (which has its own
+//     small mutex, held across arithmetic alone), and Step and Settled give up at once if r.mu is
+//     busy (TryLock) and count the skip. Every such entry point recovers its own panics and
+//     returns nothing to its caller.
+//   - Memory is never AHEAD of the ledger: Engine.Apply runs only after RecordOrders returned nil.
+//     Memory can be BEHIND it (a write timed out and committed anyway), and then the engine is
+//     SUSPENDED: it writes nothing at all, settlements included, until a rebuild from the
+//     database has succeeded. There is no permanent halt.
+//   - Which buckets the engine holds is decided ONCE, in NewRunner3, and never changes while the
+//     service runs, because the second engine's cached capital depends on that list.
+//   - "Is held" and "may order" are separate. A held bucket is valued and SETTLED whatever AC_V3
+//     or its version's status says; those gate new orders only.
+
+// Coin3 is one coin the third engine looks at: the same shape as Coin2, with the fork's calibration.
+type Coin3 struct {
+	Coin, Series, Product string
+	Cal                   k3.Calibration
+}
+
+// Options3 is what NewRunner3 must be told from outside.
+type Options3 struct {
+	// On is AC_V3 == "on". Off (the default) means no new orders; held bets are still settled.
+	On bool
+	// DatabaseName is the database the service is connected to. Dev plumbing versions are
+	// constructed only when it ends in "_dev" (see devPlumbing).
+	DatabaseName string
+	// Now is the clock, for tests. nil means time.Now.
+	Now func() time.Time
+}
+
+const (
+	engine3  = "kalshi15m3"
+	family3  = "kalshi15m"
+	version3 = 3
+
+	// DevPlumbingMark is the text tools/dev-v3-plumbing.sql writes into a plumbing version's
+	// hypothesis AND, because the frozen store package has no call that reads a hypothesis, into
+	// its params under DevPlumbingKey, which is where this runner reads it.
+	DevPlumbingMark = "DEV PLUMBING, not a trial"
+	DevPlumbingKey  = "dev_plumbing"
+)
+
+// Every number here is a CONVENTION, not a measurement. None of them gates a trade: they are
+// budgets and retry cadences. S5 measures whether the budgets are enough on the Pi.
+const (
+	seed3Cents     = 100000           // [CONVENTION] the same $1,000 as v2, so the lines compare
+	writeBudget3   = 2 * time.Second  // [CONVENTION] one step's or one settlement's write, its last look included; a failed settlement write's lookup gets a fresh budget of the same size
+	healDelay3     = 10 * time.Second // [CONVENTION] no rebuild sooner after an unknown outcome: a late commit must have landed or died
+	tick3          = 10 * time.Second // [CONVENTION] Run's cadence: rebuild if suspended, probe if paused
+	sweepEvery3    = time.Minute      // [CONVENTION] the sweep and the cash check
+	rebuildBudget3 = 8 * time.Second  // [CONVENTION] one rebuild's reads, when Run makes it
+	startBudget3   = 30 * time.Second // [CONVENTION] the first rebuild and the start-up sweep, together
+	pauseAfter3    = 3                // [CONVENTION] refused writes in a row before v3 pauses
+	thinSeconds3   = 15               // [INHERITED from runner2.go] an unchanged decision is journaled this often
+	markersKept3   = 500              // [CONVENTION] chart markers kept in memory; they do not survive a restart
+	notesFor3      = 30 * time.Second // [CONVENTION] how long /api/status reuses its read of the versions' statuses
+)
+
+const (
+	stateRunning   = "running"
+	statePaused    = "paused"
+	stateSuspended = "suspended"
+)
+
+// bucket3 is one held bucket and what was decided about it at start. Immutable once NewRunner3
+// has returned, so the rebuild may read it outside the lock.
+type bucket3 struct {
+	store.HeldBucket
+	params   k3.Params
+	mayOrder bool
+	whyNot   string // why it may not order, for /api/status
+	plumbing bool   // a dev plumbing version, accepted because the database is a *_dev one
+}
+
+// seenView is the model view Inputs computed for a coin's market at one second, kept so that
+// Step decides on exactly what was journaled with that second's evaluation row.
+type seenView struct {
+	ticker string
+	at     time.Time
+	view   k3.View
+}
+
+type seenQuotes struct {
+	q      kalshi.Quotes
+	at     time.Time
+	closes float64
+}
+
+// rebuildReport is what the last rebuild found, for /api/status.
+type rebuildReport struct {
+	At     time.Time
+	OK     bool
+	Took   time.Duration
+	Fills  int
+	Note   string // whether the step that suspended v3 had committed after all
+	Reason string // why it failed, or was thrown away
+}
+
+// Runner3 runs the third engine. See the comment at the top of this file for its rules.
+type Runner3 struct {
+	db      Store3
+	setup   store.SimSetup
+	opts    Options3
+	coins   map[string]Coin3 // by coin
+	model   *k3.Model        // its own mutex; never touched under a database call
+	buckets []bucket3        // fixed after NewRunner3
+	ids     []int64          // their ids, fixed likewise
+
+	// What NewRunner3 decided about the approved versions, kept so that /api/status can say why a
+	// version is not trading instead of guessing. Fixed once NewRunner3 has returned, so they are
+	// read without a lock, like buckets.
+	refused map[int64]string // version id -> why vet refused it at this start
+	seeded  map[int64]bool   // version ids whose names were handed to EnsureSimSetup at this start
+
+	plumbing   bool // the engine is built with NewPlumbingEngine: dev only
+	feePerFill bool
+
+	// writeBudget is writeBudget3. It is a field only so that a test can make a real deadline
+	// expire in milliseconds; nothing in the service changes it.
+	writeBudget time.Duration
+
+	// coinMu guards views and nothing else. It is held across a map read or write only.
+	coinMu sync.Mutex
+	views  map[string]seenView // by coin
+
+	// mu guards everything below. Step and the settlement path hold it across their ledger write.
+	// Lock order where both are needed: mu, then coinMu.
+	mu         sync.Mutex
+	engine     *k3.Engine
+	paper      *broker.Paper
+	state      string
+	reason     string
+	since      time.Time
+	healAfter  time.Time
+	failures   int
+	gen        uint64
+	pendingIDs []string           // the client ids of the step that suspended v3, for the rebuild's report
+	probe      *store.StepRecord3 // a decisions-only record for the write-probe, made while paused
+	quotes     map[string]seenQuotes
+	last       map[string]string
+	lastAt     map[string]float64
+	markers    []Marker
+	entryPrice map[string]float64 // bucket|ticker|side -> the coin's price at the first buy; lost on restart
+	lastSweep  time.Time
+	rebuilt    rebuildReport
+
+	// panicNote carries a recovered panic from an entry point that may not wait on mu to the next
+	// holder of mu, which suspends v3 with it. Book() shows it at once.
+	panicNote atomic.Pointer[string]
+
+	// notes caches restartNotes, which asks the database: /api/status may be polled every second.
+	notesMu sync.Mutex
+	notesAt time.Time
+	notes   []string
+
+	skippedStep    atomic.Int64
+	skippedSettled atomic.Int64
+	stateDirty     atomic.Bool // the learned offsets changed; Run saves them
+}
+
+func (r *Runner3) now() time.Time {
+	if r.opts.Now != nil {
+		return r.opts.Now()
+	}
+	return time.Now()
+}
+
+// devPlumbing reports whether a version's params carry the dev-plumbing mark.
+func devPlumbing(params json.RawMessage) bool {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(params, &m) != nil {
+		return false
+	}
+	var mark string
+	return json.Unmarshal(m[DevPlumbingKey], &mark) == nil && mark == DevPlumbingMark
+}
+
+// vet decides whether a version's params may ORDER. A real version must pass Params.Validate,
+// which refuses any number that is not labelled with where it came from and any placeholder. A
+// version whose numbers are placeholders is accepted in exactly one case: it carries the
+// dev-plumbing mark AND the database's name ends in "_dev". Anything else is refused, with why.
+func (o Options3) vet(raw json.RawMessage) (p k3.Params, plumbing bool, err error) {
+	if err = json.Unmarshal(raw, &p); err != nil {
+		return p, false, fmt.Errorf("its params cannot be read: %w", err)
+	}
+	if p.SeedCents != seed3Cents {
+		return p, false, fmt.Errorf("its seed is %d cents and the runner seeds %d", p.SeedCents, seed3Cents)
+	}
+	if err = p.Validate(); err == nil {
+		return p, false, nil
+	}
+	if !devPlumbing(raw) {
+		return p, false, err
+	}
+	if !strings.HasSuffix(o.DatabaseName, "_dev") {
+		return p, false, fmt.Errorf("it is a dev plumbing version and database %q is not a *_dev one", o.DatabaseName)
+	}
+	if perr := p.ValidatePlumbing(); perr != nil {
+		return p, false, perr
+	}
+	return p, true, nil
+}
+
+// NewRunner3 decides, once, what the third engine holds and what may order, and rebuilds its
+// memory from the database. main calls it BEFORE NewRunner2 and hands BucketIDs() to it, so that
+// the second engine's first capital read already counts a freshly seeded v3 bucket as held.
+//
+// It returns (nil, nil) when there is nothing for a third engine to be: AC_V3 off and no v3
+// bucket. The service then behaves exactly as it did before this file existed (EnsureSimSetup
+// was still called, with no names, which creates no bucket and moves no money).
+//
+// It returns an error, and the service does not start, only when it cannot FIND OUT what it
+// holds (plan 5.4, D19): a v3 bucket that may hold a bet must not run unheld. A database that
+// cannot answer these reads will not let NewRunner2 start either.
+//
+// A first rebuild that fails is not an error: the runner is returned SUSPENDED with its bucket
+// ids known, Run heals it, and nothing is swept or closed at this start. A PANIC in the first
+// rebuild, the start-up sweep or the close is treated exactly the same way (firstRebuild): the
+// same rows that at run time would merely suspend v3 must not crash the process at every start
+// and so keep v1 and v2 down in a restart loop, with AC_V3 off too (a held bucket is rebuilt
+// whatever AC_V3 says).
+func NewRunner3(ctx context.Context, db Store3, coins []Coin3, opts Options3) (*Runner3, error) {
+	r := &Runner3{db: db, opts: opts, coins: map[string]Coin3{}, views: map[string]seenView{}, quotes: map[string]seenQuotes{},
+		last: map[string]string{}, lastAt: map[string]float64{}, entryPrice: map[string]float64{},
+		refused: map[int64]string{}, seeded: map[int64]bool{}, writeBudget: writeBudget3,
+		state: stateSuspended, reason: "starting: memory has not been rebuilt from the database yet"}
+	r.since = r.now()
+
+	// 1. The names to seed: the approved versions, and only with AC_V3 on. Each is vetted BEFORE
+	//    EnsureSimSetup, because that function seeds $1,000 into a bucket for any name it is given.
+	ordering := map[int64]bool{} // strategy_version.id -> may order
+	plumb := map[int64]bool{}
+	refused := r.refused
+	var names []string
+	if opts.On {
+		versions, err := db.TradableVersions(ctx, family3, version3)
+		if err != nil {
+			return nil, fmt.Errorf("v3 tradable versions: %w", err)
+		}
+		for _, v := range versions {
+			_, plumbing, err := opts.vet(v.Params)
+			if err != nil {
+				refused[v.ID] = err.Error()
+				slog.Error("v3 will NOT trade this version", "strategy", v.Name, "version_id", v.ID, "why", err)
+				continue
+			}
+			ordering[v.ID], plumb[v.ID], r.seeded[v.ID] = true, plumbing, true
+			names = append(names, v.Name)
+		}
+	}
+	// ALWAYS, in every mode: a settlement cannot be written without the service actor and the
+	// venue's ledger id, and this is the only function that returns them.
+	setup, err := db.EnsureSimSetup(ctx, engine3, family3, version3, names, seed3Cents)
+	if err != nil {
+		return nil, fmt.Errorf("v3 sim setup: %w", err)
+	}
+	r.setup = setup
+
+	// 2. What is held: every sim bucket of the family's version 3 that is not frozen.
+	held, err := db.HeldBuckets(ctx, family3, version3)
+	if err != nil {
+		return nil, fmt.Errorf("v3 held buckets: %w", err)
+	}
+	if !opts.On && len(held) == 0 {
+		slog.Info("v3 is absent: AC_V3 is off and no v3 bucket exists")
+		return nil, nil
+	}
+	// The model takes ONE drift tolerance (it is a property of the model, the same for every
+	// version): a real version's if there is one, else a plumbing version's, else 0, under which
+	// every difference reads as drift. Nothing may order then, and drift_diff is journaled all the same.
+	var realTol, plumbTol *float64
+	for _, h := range held {
+		b := bucket3{HeldBucket: h}
+		switch {
+		case !opts.On:
+			b.whyNot = "AC_V3 is off: settle-only"
+		case h.VersionStatus != "probation" && h.VersionStatus != "active":
+			b.whyNot = "its version is " + h.VersionStatus + ": settle-only"
+		case !ordering[h.VersionID]:
+			b.whyNot = "refused: " + refused[h.VersionID]
+		default:
+			b.mayOrder, b.plumbing = true, plumb[h.VersionID]
+		}
+		if err := json.Unmarshal(h.Params, &b.params); err != nil || b.params.Name == "" {
+			// Holding and settling read only the name and the exhaustion floor.
+			b.params = k3.Params{Name: h.Strategy, ExhaustedCents: 100} // [CONVENTION, inherited: v2's BankruptAt]
+		}
+		if b.mayOrder {
+			tol := b.params.DriftTol
+			if b.plumbing && plumbTol == nil {
+				plumbTol = &tol
+			} else if !b.plumbing && realTol == nil {
+				realTol = &tol
+			}
+			r.plumbing = r.plumbing || b.plumbing
+			r.feePerFill = r.feePerFill || b.params.FeePerFill // one Paper serves every bucket: the pessimistic reading wins
+		}
+		r.buckets, r.ids = append(r.buckets, b), append(r.ids, h.ID)
+	}
+	driftTol := 0.0
+	if realTol != nil {
+		driftTol = *realTol
+	} else if plumbTol != nil {
+		driftTol = *plumbTol
+	}
+	var order []string
+	cal := map[string]k3.Calibration{}
+	for _, c := range coins {
+		order = append(order, c.Coin)
+		cal[c.Coin], r.coins[c.Coin] = c.Cal, c
+	}
+	if r.model, err = k3.NewModel(order, cal, driftTol); err != nil {
+		return nil, fmt.Errorf("v3 model: %w", err)
+	}
+	var saved savedState3
+	if found, err := db.LoadEngineState(ctx, engine3, &saved); err != nil {
+		slog.Warn("v3 could not load its learned offsets; it starts from the constants", "err", err) // costs no money (plan 5.4, step 6)
+	} else if found {
+		for coin, offsets := range saved.Offsets {
+			r.model.SeedOffsets(coin, offsets)
+		}
+	}
+	// An empty engine and Paper, so that nothing is nil while v3 waits for its first rebuild.
+	r.engine, _ = k3.NewEngine()
+	r.paper = r.newPaper()
+
+	// 3 to 5: the rebuild, the start-up sweep and the close, fenced against a panic.
+	sctx, cancel := context.WithTimeout(ctx, startBudget3)
+	defer cancel()
+	r.firstRebuild(sctx)
+	slog.Info("v3 ready", "on", opts.On, "held", len(r.buckets), "may_order", r.mayOrderCount(), "plumbing", r.plumbing, "state", r.state)
+	return r, nil
+}
+
+// firstRebuild is steps 3 to 5 of NewRunner3. It recovers a panic with the same mechanism as
+// every run-time entry point (caught, deferred first): the runner is then left SUSPENDED with the
+// panic as its reason and its ids known, so heldElsewhere is still right, the value snapshots are
+// refused while it lasts, and Run tries to heal it. The steps after a panic do not run.
+func (r *Runner3) firstRebuild(ctx context.Context) {
+	defer func() { r.caught("start", recover()) }()
+	// 3. The rebuild: this, and nothing before it, establishes what each bucket still holds.
+	if err := r.rebuild(ctx); err != nil {
+		slog.Error("v3 starts SUSPENDED: its first rebuild failed; nothing is swept or closed at this start", "err", err)
+		return
+	}
+	// 4. The start-up sweep, which may settle an old lot and change a bucket's cash.
+	r.sweep(ctx)
+	// 5. Only now, and only if v3 is still not suspended: close what has run out. Never on the cash
+	//    test alone (CloseBucket does not look for open positions; RanOut does).
+	r.closeExhausted(ctx)
+}
+
+func (r *Runner3) newPaper() *broker.Paper {
+	p := broker.NewPaper(5) // [FACT] five levels are recorded
+	p.FeePerFill = r.feePerFill
+	return p
+}
+
+func (r *Runner3) mayOrderCount() int {
+	n := 0
+	for _, b := range r.buckets {
+		if b.mayOrder {
+			n++
+		}
+	}
+	return n
+}
+
+// closeExhausted reaps and freezes, without restaking, every bucket that has run out NOW: ledger
+// cash under the floor AND nothing open, after the rebuild and the start-up sweep. It runs only
+// inside NewRunner3, before anything else can see the runner, which is the one moment the held
+// set may still shrink. A close that fails leaves the bucket held, exhausted, until the next start.
+func (r *Runner3) closeExhausted(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	defer r.fenceLocked("start-up close")
+	if r.state == stateSuspended {
+		return
+	}
+	var keep []bucket3
+	var accounts []*k3.Account
+	for _, b := range r.buckets {
+		a := r.engine.Account(b.ID)
+		if a == nil || !a.RanOut() {
+			keep = append(keep, b)
+			if a != nil {
+				accounts = append(accounts, a)
+			}
+			continue
+		}
+		reason := fmt.Sprintf("ran out: %d cents left and nothing open", a.CashCents)
+		if _, err := r.db.CloseBucket(ctx, r.setup, b.SimBucket, reason, false, 0, 0); err != nil {
+			slog.Error("v3 could not close a bucket that ran out; it stays held and exhausted", "bucket", b.Name, "err", err)
+			keep, accounts = append(keep, b), append(accounts, a)
+			continue
+		}
+		slog.Warn("v3 bucket ran out: reaped, frozen, not replaced", "bucket", b.Name, "left_cents", a.CashCents)
+	}
+	if len(keep) == len(r.buckets) {
+		return
+	}
+	engine, err := r.newEngine(accounts)
+	if err != nil { // cannot happen: these accounts were accepted a moment ago
+		r.suspendLocked("rebuilding the engine after closing a bucket: " + err.Error())
+		return
+	}
+	r.buckets, r.engine = keep, engine
+	r.ids = r.ids[:0:0]
+	for _, b := range keep {
+		r.ids = append(r.ids, b.ID)
+	}
+}
+
+func (r *Runner3) newEngine(accounts []*k3.Account) (*k3.Engine, error) {
+	if r.plumbing {
+		return k3.NewPlumbingEngine(accounts...)
+	}
+	return k3.NewEngine(accounts...)
+}
+
+// BucketIDs is the ids of the buckets v3 holds. Fixed once NewRunner3 has returned.
+func (r *Runner3) BucketIDs() []int64 { return append([]int64{}, r.ids...) }
+
+// savedState3 is all the third engine saves: what the ledger cannot know.
+type savedState3 struct {
+	Offsets map[string][][2]float64 `json:"offsets"` // per coin: {close, measured index offset}
+}
+
+// Seed primes each coin's volatility and index offset from the exchanges, as the second engine's
+// runner does, with the same helper. The two engines ask separately, so their seeds can differ
+// by a minute's candle; the drift gate (View.Drift) sees that and blocks entries until they agree.
+func (r *Runner3) Seed(ctx context.Context, client *kalshi.Client, userAgent string) {
+	for _, c := range r.coins {
+		closes, measured := seedData(ctx, client, userAgent, c.Series, c.Product)
+		if len(closes) > 0 {
+			r.model.SeedVol(c.Coin, closes)
+		}
+		var fresh [][2]float64
+		for _, m := range measured {
+			if !r.model.HasOffsetAt(c.Coin, m[0]) {
+				fresh = append(fresh, m)
+			}
+		}
+		r.model.SeedOffsets(c.Coin, fresh)
+	}
+}
+
+// ---- entry points called from someone else's goroutine ----------------------------------------
+
+// caught is given recover()'s answer by a function every entry point defers FIRST, so that it
+// runs after the entry point's own deferred Unlock. A panic is written down for the next holder of r.mu, which suspends v3 with
+// it (memory may now be anything; the rebuild reads the truth). It never waits for r.mu itself.
+//
+// It is the OUTER fence, for code that runs without r.mu (Inputs, Observe, a rebuild's reads).
+// A panic while r.mu is held is stopped earlier, by fenceLocked, so that no other goroutine can
+// take the lock and act on half-changed memory before v3 is marked suspended.
+func (r *Runner3) caught(where string, p any) bool {
+	if p == nil {
+		return false
+	}
+	note := fmt.Sprintf("a panic in v3's %s: %v", where, p)
+	slog.Error("v3 recovered a panic; it will suspend and rebuild", "where", where, "panic", p, "stack", string(debug.Stack()))
+	r.panicNote.Store(&note)
+	if r.mu.TryLock() {
+		defer r.mu.Unlock()
+		r.absorbLocked()
+	}
+	return true
+}
+
+// fenceLocked is the INNER fence. It is deferred straight after r.mu.Lock() and its deferred
+// Unlock, so it runs BEFORE the Unlock: a panic under the lock suspends v3 while the lock is still
+// held, and the next holder (Book from the snapshot writer, a sweep, the cash check) sees
+// "suspended", never half-folded positions or cash reported as true. The panic stops here; the
+// function it was deferred in returns its zero values, which is why a function whose result means
+// "it worked" (rebuild) sets its own result instead of using this.
+func (r *Runner3) fenceLocked(where string) {
+	if p := recover(); p != nil {
+		r.panickedLocked(where, p)
+	}
+}
+
+// panickedLocked logs a recovered panic and suspends v3 with it. Callers hold r.mu.
+func (r *Runner3) panickedLocked(where string, p any) string {
+	note := fmt.Sprintf("a panic in v3's %s: %v", where, p)
+	slog.Error("v3 recovered a panic under its lock; it suspends and will rebuild", "where", where, "panic", p, "stack", string(debug.Stack()))
+	r.suspendLocked(note)
+	return note
+}
+
+// absorbLocked turns a recovered panic into a suspension. Every holder of r.mu calls it first.
+func (r *Runner3) absorbLocked() {
+	if note := r.panicNote.Swap(nil); note != nil {
+		r.suspendLocked(*note)
+	}
+}
+
+// suspendLocked: memory may be behind the ledger. Nothing is written until a rebuild succeeds,
+// and gen moves so that a rebuild whose reads began before this is thrown away.
+//
+// healAfter is set when v3 BECOMES suspended and is not pushed later by a further suspension:
+// healDelay3 exists to let a write that timed out land or die, and v3 writes nothing while
+// suspended, so no later suspension can start a new such wait. Pushing it on every repeat would
+// let a panic that recurs every second keep v3 (and every engine's snapshots) waiting for ever
+// with no rebuild ever tried.
+func (r *Runner3) suspendLocked(reason string) {
+	if r.state != stateSuspended {
+		r.since, r.healAfter = r.now(), r.now().Add(healDelay3)
+	}
+	r.state, r.reason = stateSuspended, reason
+	r.gen++
+	r.probe = nil
+	slog.Error("v3 SUSPENDED: it writes nothing until it has rebuilt itself from the database", "why", reason)
+}
+
+func (r *Runner3) marketOf(info kalshi.MarketInfo, closes time.Time) k3.Market {
+	m := k3.Market{Ticker: info.Ticker, Close: k3.UnixSeconds(closes)}
+	if info.FloorStrike != nil {
+		m.Strike = *info.FloorStrike
+	}
+	return m
+}
+
+// Inputs computes the model's view of one coin's open round and returns it as the journal map
+// stored with that second's evaluation row. It runs BEFORE v1 and v2 step, so it takes the
+// model's mutex and coinMu only, never r.mu. nil on a panic, or for a coin v3 does not look at.
+func (r *Runner3) Inputs(coin string, info kalshi.MarketInfo, closes, at time.Time, price string, v2in map[string]any) (out map[string]any) {
+	defer func() {
+		if r.caught("Inputs", recover()) {
+			out = nil
+		}
+	}()
+	if _, ok := r.coins[coin]; !ok {
+		return nil
+	}
+	view := r.model.View(coin, r.marketOf(info, closes), f(price), k3.UnixSeconds(at), k3.V2InputsFrom(v2in))
+	r.coinMu.Lock()
+	r.views[coin] = seenView{ticker: info.Ticker, at: at, view: view}
+	r.coinMu.Unlock()
+	return view.Journal()
+}
+
+// Observe takes a trade print for whichever coin uses that product. The model's mutex only.
+func (r *Runner3) Observe(t coinbase.Trade) {
+	defer func() { r.caught("Observe", recover()) }()
+	price, err := strconv.ParseFloat(t.Price, 64)
+	if err != nil {
+		return
+	}
+	for _, c := range r.coins {
+		if c.Product == t.Product {
+			r.model.Observe(c.Coin, price, unix(t.At)) // the same clock reading the second engine's fork takes
+		}
+	}
+}
+
+func (r *Runner3) viewFor(coin, ticker string, at time.Time) k3.View {
+	r.coinMu.Lock()
+	defer r.coinMu.Unlock()
+	if s, ok := r.views[coin]; ok && s.ticker == ticker && s.at.Equal(at) {
+		return s.view
+	}
+	return k3.View{Coin: coin} // not OK: nothing is decided on a view that was not journaled
+}
+
+// Step is one look at one coin's open round, AFTER v1 and v2 have stepped. It returns nothing:
+// no v3 outcome may reach the poller. If r.mu is busy (another coin's write, a settlement, a
+// swap) it gives up at once; that costs one second of one coin, in which the book was not
+// observed, which can only leave the paper holds too high.
+func (r *Runner3) Step(ctx context.Context, coin string, evalID int64, at time.Time, marketID int64, info kalshi.MarketInfo, closes time.Time, q kalshi.Quotes, price string) {
+	defer func() { r.caught("Step", recover()) }()
+	if !r.mu.TryLock() {
+		r.skippedStep.Add(1)
+		return
+	}
+	defer r.mu.Unlock()
+	defer r.fenceLocked("Step")
+	r.absorbLocked()
+	m := r.marketOf(info, closes)
+	m.MarketID, m.EvaluationID = marketID, evalID
+	r.quotes[m.Ticker] = seenQuotes{q: q, at: at, closes: m.Close} // memory only: what Book() marks a bet by
+	if r.state == stateSuspended {
+		return // Run heals. The Paper is replaced by the rebuild, so there is no hold to refresh.
+	}
+	// The holds are refreshed first, on the very book the decision is made on. (The plan returns on
+	// an empty price before this; observing the book needs no price, and skipping it could only
+	// leave the holds too high.)
+	r.paper.ObserveBook(m.Ticker, evalID, at, closes, q)
+	if f(price) == 0 || r.mayOrderCount() == 0 {
+		return // no fresh price, or observe-only / settle-only
+	}
+	now := k3.UnixSeconds(at)
+	decisions, intents := r.engine.Decide(coin, m, q, r.viewFor(coin, m.Ticker, at), now)
+	// Once after EVERY Decide, whatever becomes of the step (kalshi15m3/doc.go): also while paused,
+	// when nothing is sent. It touches soft state only (a dropped exit, the seconds an exit was
+	// wanted and no order went out), never money, so it needs no ledger write to have happened.
+	r.engine.AfterDecide(m.Ticker, decisions)
+	if r.state == statePaused {
+		r.probe = r.probeRecord(evalID, at, marketID, decisions)
+		return
+	}
+
+	reports := make([]broker.Report, 0, len(intents))
+	ids := make([]string, 0, len(intents))
+	for _, in := range intents {
+		rep, err := r.paper.Submit(ctx, in.Order)
+		if err != nil { // only a cancelled context: the service is stopping, and nothing happened
+			_ = r.paper.Void(ids...)
+			return
+		}
+		reports, ids = append(reports, rep), append(ids, in.Order.ClientID)
+	}
+
+	rec := store.StepRecord3{EvaluationID: evalID, At: at, MarketID: marketID}
+	index := make([]int, len(decisions))
+	for i, d := range decisions {
+		// Thinned exactly as runner2.go does it: a decision is journaled when it sent an order, when
+		// its answer changed, and every fifteen seconds regardless. The evaluation row, with v3's
+		// model inputs in it, is stored every second, so any second can be recomputed.
+		key, sig := strconv.FormatInt(d.BucketID, 10)+"|"+coin, d.Side+"|"+d.BlockedBy+"|"+d.Why
+		index[i] = -1
+		if d.Intent < 0 && r.last[key] == sig && now-r.lastAt[key] < thinSeconds3 {
+			continue
+		}
+		r.last[key], r.lastAt[key] = sig, now
+		index[i] = len(rec.Decisions)
+		rec.Decisions = append(rec.Decisions, r.decisionRow(d))
+	}
+	for i, in := range intents {
+		b := r.bucket(in.Order.BucketID)
+		if b == nil {
+			_ = r.paper.Void(ids...)
+			r.suspendLocked(fmt.Sprintf("the engine formed an order for bucket %d, which v3 does not hold", in.Order.BucketID))
+			return
+		}
+		row := store.OrderRow{DecisionIndex: index[in.Decision], BucketID: b.ID, BucketLedgerID: b.LedgerAccountID, ClientID: in.Order.ClientID,
+			Action: string(in.Order.Action), Side: string(in.Order.Side), Qty: in.Order.Qty, Limit: store.PriceText(int64(in.Order.Limit)),
+			Status: string(reports[i].Status), Detail: r.engine.Detail(in, reports[i])}
+		for _, fl := range reports[i].Fills {
+			row.Fills = append(row.Fills, store.FillRow{Qty: fl.Qty, Price: store.PriceText(int64(fl.Price)), PremiumCents: fl.PremiumCents, FeeCents: fl.FeeCents})
+		}
+		rec.Orders = append(rec.Orders, row)
+	}
+	if len(rec.Decisions) == 0 && len(rec.Orders) == 0 {
+		return
+	}
+
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.writeBudget)
+	defer cancel()
+	if !r.saleLookLocked(wctx, marketID, intents, ids) {
+		return
+	}
+	err := r.db.RecordOrders(wctx, r.setup, rec)
+	switch {
+	case err == nil:
+		r.failures = 0
+		if len(intents) == 0 {
+			return
+		}
+		events := r.engine.Apply(intents, reports) // ONLY here: the ledger has these very orders
+		r.paper.Commit(ids...)
+		r.gen++
+		r.noteEvents(events, f(price), now)
+	case len(intents) == 0:
+		// Decisions only: no money was in it, so there is nothing to be unsure about, whatever the
+		// error. Dropped and counted, exactly as v2 tolerates a lost decision-only write.
+		r.refusedLocked(err)
+	case store.DefinitelyRolledBack(err):
+		// The server said no (or the store refused before COMMIT): memory still equals the ledger.
+		if verr := r.paper.Void(ids...); verr != nil {
+			r.suspendLocked("the broker could not take back fills that were not recorded: " + verr.Error())
+			return
+		}
+		r.refusedLocked(err)
+	default:
+		// A deadline or a connection error: the server may still commit. NOT asked about now: asked
+		// straight after a timeout, the database can answer "none" about a commit that lands a
+		// moment later. v3 suspends, and the rebuild, not before healAfter, reads what is true.
+		_ = r.paper.Void(ids...)
+		r.pendingIDs = ids
+		r.suspendLocked("the outcome of a write is unknown: " + err.Error())
+	}
+}
+
+// saleLookLocked is a sale's last look at the ledger, the same look the settlement path takes
+// (plan 5.3), made inside the step's write budget and only on a second whose step sells. It
+// reports whether the step may be written.
+//
+// Why a sale needs it and a buy does not: a sale is recorded straight from memory, and its detail
+// (cost_cents, the basis it releases) is what every later rebuild's self-check takes as the truth.
+// If memory is SHORT when the sale is formed (a write that timed out committed after the rebuild
+// that followed healAfter), that detail is wrong for ever, the rows are append-only, and no
+// rebuild can pass again; if memory holds a lot whose sale already committed late, the step would
+// record a second sale of contracts never held. Both were reproduced on the fake ledger. So for
+// every (bucket, side) being sold, the ledger's net-open quantity must equal memory's contracts:
+// on any difference the orders are voided, v3 suspends, and nothing is written.
+//
+// What it cannot close: a late commit that lands AFTER this read and before the step's own
+// commit. Only healDelay3 [CONVENTION] narrows that; the minute's cash check then suspends v3.
+//
+// A read that fails voids the orders and counts as a refused write: nothing was written, so
+// memory still equals the ledger, and three in a row pause v3 as any refusal does.
+func (r *Runner3) saleLookLocked(ctx context.Context, marketID int64, intents []k3.Intent, ids []string) bool {
+	type lot struct {
+		key    [2]string
+		ticker string
+	}
+	var sold []lot
+	memory := map[[2]string]int{}
+	for _, in := range intents {
+		if in.Order.Action != broker.Sell {
+			continue
+		}
+		key := store.LotKey(in.Order.BucketID, string(in.Order.Side))
+		if _, seen := memory[key]; seen {
+			continue
+		}
+		held := 0
+		if a := r.engine.Account(in.Order.BucketID); a != nil {
+			if p := a.Position(in.Order.Ticker, string(in.Order.Side)); p != nil {
+				held = p.Contracts
+			}
+		}
+		memory[key] = held
+		sold = append(sold, lot{key, in.Order.Ticker})
+	}
+	if len(sold) == 0 {
+		return true
+	}
+	open, err := r.db.OpenQty(ctx, marketID, r.ids)
+	if err != nil {
+		_ = r.paper.Void(ids...)
+		r.refusedLocked(fmt.Errorf("a sale's last look at the ledger could not be read, so nothing was sent: %w", err))
+		return false
+	}
+	for _, l := range sold {
+		if got := open[l.key]; got != memory[l.key] {
+			_ = r.paper.Void(ids...)
+			r.suspendLocked(fmt.Sprintf("selling %s %s for bucket %s: memory holds %d contracts and the ledger %d; nothing was written",
+				l.ticker, l.key[1], l.key[0], memory[l.key], got))
+			return false
+		}
+	}
+	return true
+}
+
+// refusedLocked counts a write that certainly did not happen; the third in a row pauses v3.
+// Paused is NOT halted: every refused write rolled back, so memory equals the ledger, the book
+// is true and the value snapshots go on.
+func (r *Runner3) refusedLocked(err error) {
+	r.failures++
+	slog.Warn("v3 write refused; memory still equals the ledger", "in_a_row", r.failures, "err", err)
+	if r.failures >= pauseAfter3 && r.state == stateRunning {
+		r.state, r.reason, r.since = statePaused, "the database is refusing v3's writes: "+err.Error(), r.now()
+		slog.Error("v3 PAUSED: no orders until a write-probe succeeds", "why", r.reason)
+	}
+}
+
+func (r *Runner3) bucket(id int64) *bucket3 {
+	for i := range r.buckets {
+		if r.buckets[i].ID == id {
+			return &r.buckets[i]
+		}
+	}
+	return nil
+}
+
+func (r *Runner3) decisionRow(d k3.Decision) store.DecisionRow {
+	row := store.DecisionRow{BucketID: d.BucketID, ModelProb: d.ModelProb, MarketProb: d.MarketProb, Edge: d.Edge, Side: d.Side,
+		Action: d.Action, BlockedBy: d.BlockedBy, Why: d.Why}
+	if b := r.bucket(d.BucketID); b != nil {
+		row.VersionID = b.VersionID
+	}
+	if d.Requested > 0 {
+		n := d.Requested
+		row.SizeAlone = &n
+	}
+	return row
+}
+
+// probeRecord is a decisions-only record of what v3 would have journaled this second, kept while
+// paused for Run's write-probe. It carries the real probabilities, so a probe that succeeds
+// leaves an honest journal row, and it says that nothing was sent.
+func (r *Runner3) probeRecord(evalID int64, at time.Time, marketID int64, decisions []k3.Decision) *store.StepRecord3 {
+	if len(decisions) == 0 {
+		return nil
+	}
+	rec := &store.StepRecord3{EvaluationID: evalID, At: at, MarketID: marketID}
+	for _, d := range decisions {
+		row := r.decisionRow(d)
+		if row.Action != "none" {
+			row.Action, row.BlockedBy, row.Why, row.SizeAlone = "none", "v3 paused", "v3 is paused: it wanted to "+d.Action+" ("+d.Why+") and sent nothing", nil
+		}
+		rec.Decisions = append(rec.Decisions, row)
+	}
+	return rec
+}
+
+func (r *Runner3) noteEvents(events []k3.Event, price, now float64) {
+	for _, e := range events {
+		switch e.Kind {
+		case "inconsistent":
+			r.suspendLocked("the engine could not fold an answer it was given: " + e.Note)
+		case "bought", "sold":
+			key := entryKey(e.BucketID, e.Ticker, e.Side)
+			kind := "bet"
+			if e.Kind == "sold" {
+				kind = "sold"
+			} else if _, ok := r.entryPrice[key]; !ok {
+				r.entryPrice[key] = price
+			}
+			r.markers = append(r.markers, Marker{T: now, Price: price, Coin: e.Coin, Side: upDown(e.Side), Strategy: e.Strategy, Engine: "v3", World: "real", Kind: kind})
+			if len(r.markers) > markersKept3 {
+				r.markers = r.markers[len(r.markers)-markersKept3:]
+			}
+			slog.Info("sim trade", "engine", "v3", "strategy", e.Strategy, "coin", e.Coin, "kind", e.Kind, "side", e.Side,
+				"contracts", e.Contracts, "left", e.Left, "cash_cents", e.CashCents, "why", e.Why)
+		case "settled":
+			slog.Info("sim settlement", "engine", "v3", "strategy", e.Strategy, "coin", e.Coin, "ticker", e.Ticker, "side", e.Side,
+				"contracts", e.Contracts, "won", e.Won, "payout_cents", e.CashCents, "blocked_seconds", e.BlockedSeconds)
+		case "exhausted":
+			slog.Warn("v3 account ran out: it orders no more, stays held, and is closed at the next start", "strategy", e.Strategy, "cash_cents", e.CashCents)
+		}
+	}
+}
+
+func entryKey(bucketID int64, ticker, side string) string {
+	return fmt.Sprintf("%d|%s|%s", bucketID, ticker, side)
+}
+
+func upDown(side string) string {
+	if side == "yes" {
+		return "UP"
+	}
+	return "DOWN"
+}
+
+// Settled is the poller's one call about a round's result. The model learns the index gap from
+// it whatever happens next (the model's mutex only). The money side gives up at once if r.mu is
+// busy or v3 is suspended: market.result was stored before this call, and the sweep reads it.
+func (r *Runner3) Settled(ctx context.Context, coin string, marketID int64, info kalshi.MarketInfo, closes time.Time) {
+	defer func() { r.caught("Settled", recover()) }()
+	if _, ok := r.coins[coin]; ok {
+		if at := k3.UnixSeconds(closes); !r.model.HasOffsetAt(coin, at) {
+			r.model.NoteSettlement(coin, at, info.ExpirationValue)
+			if r.model.HasOffsetAt(coin, at) {
+				r.stateDirty.Store(true) // Run saves it: no database write of v3's state on the poller's goroutine
+			}
+		}
+	}
+	if !r.mu.TryLock() {
+		r.skippedSettled.Add(1)
+		return
+	}
+	defer r.mu.Unlock()
+	defer r.fenceLocked("Settled")
+	r.absorbLocked()
+	if r.state == stateSuspended {
+		return
+	}
+	r.settleLocked(ctx, marketID, info.Ticker, info.Result)
+}
+
+// settleLocked books one market's result for every bucket that holds it. Callers hold r.mu and
+// have checked that v3 is NOT suspended: a settlement written from a memory that is short can
+// never be corrected (unique (market_id, bucket_id, side) refuses a second row).
+func (r *Runner3) settleLocked(ctx context.Context, marketID int64, ticker, result string) {
+	rows := r.engine.SettleRows(ticker, result)
+	if len(rows) == 0 {
+		if result == "yes" || result == "no" {
+			r.forgetLocked(ticker)
+		}
+		return
+	}
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.writeBudget)
+	defer cancel()
+	// The last look: what the LEDGER says is net open, against what memory is about to settle.
+	open, err := r.db.OpenQty(wctx, marketID, r.ids)
+	if err != nil {
+		slog.Warn("v3 could not take its last look before a settlement; nothing written, the next sweep tries again", "ticker", ticker, "err", err)
+		return
+	}
+	var write []store.SettlementRow
+	for _, row := range rows {
+		if got := open[store.LotKey(row.BucketID, row.Side)]; got != row.Qty {
+			r.suspendLocked(fmt.Sprintf("settling %s %s for bucket %d: memory holds %d contracts and the ledger %d; nothing was written", ticker, row.Side, row.BucketID, row.Qty, got))
+			return
+		}
+		b := r.bucket(row.BucketID)
+		if b == nil {
+			r.suspendLocked(fmt.Sprintf("a position in bucket %d, which v3 does not hold", row.BucketID))
+			return
+		}
+		write = append(write, store.SettlementRow{BucketID: b.ID, BucketLedgerID: b.LedgerAccountID, Side: row.Side, Qty: row.Qty, PayoutCents: row.PayoutCents})
+	}
+	err = r.db.RecordSettlements(wctx, r.setup, marketID, r.now(), write)
+	if err != nil {
+		// Unlike an order, a settlement is idempotent by its unique key, so the database MAY be
+		// asked: a late commit, or a retry that hit the unique index, makes the rows findable.
+		//
+		// The lookup and the partial re-write get a FRESH budget of the same size: when the write
+		// failed by running out of time, wctx is already spent, and asking with it would fail at
+		// once and turn every settlement timeout into a suspension. The lookup and the re-write share
+		// the fresh budget, so r.mu may be held for up to about two budgets in all. Nothing on a
+		// poller's path waits on r.mu (Step and Settled use TryLock); Book, Heal and Snapshot may.
+		qctx, qcancel := context.WithTimeout(context.WithoutCancel(ctx), r.writeBudget)
+		defer qcancel()
+		found, qerr := r.db.SettlementsRecorded(qctx, marketID, r.ids)
+		if qerr != nil {
+			r.suspendLocked("a settlement's outcome is unknown and could not be looked up: " + qerr.Error())
+			return
+		}
+		var missing []store.SettlementRow
+		for _, row := range write {
+			if !found[store.LotKey(row.BucketID, row.Side)] {
+				missing = append(missing, row)
+			}
+		}
+		switch {
+		case len(missing) == 0: // it had committed after all
+		case len(missing) == len(write):
+			slog.Warn("v3 settlement not written; the next sweep tries again", "ticker", ticker, "err", err)
+			return
+		default:
+			// Some rows exist and some do not (RecordSettlements is all or nothing, so this takes a
+			// second writer). Writing the whole set again would fail on the unique key for ever, so
+			// only what is missing is written.
+			if err := r.db.RecordSettlements(qctx, r.setup, marketID, r.now(), missing); err != nil {
+				slog.Warn("v3 settlement partly written; the next sweep tries the rest again", "ticker", ticker, "err", err)
+				return
+			}
+		}
+	}
+	events := r.engine.ApplySettlement(ticker, result)
+	r.gen++
+	r.forgetLocked(ticker)
+	r.noteEvents(events, 0, unix(r.now()))
+}
+
+func (r *Runner3) forgetLocked(ticker string) {
+	r.paper.Forget(ticker)
+	delete(r.quotes, ticker)
+	for key := range r.entryPrice {
+		if strings.Contains(key, "|"+ticker+"|") {
+			delete(r.entryPrice, key)
+		}
+	}
+}
+
+// ---- v3's own goroutine: heal, probe, sweep, cash check, prune --------------------------------
+
+// Run is v3's goroutine. It is started whenever v3 holds a bucket or is on, also with AC_V3 off.
+// It and Heal are the only callers, besides Book and Snapshot, that may WAIT on r.mu.
+func (r *Runner3) Run(ctx context.Context) {
+	t := time.NewTicker(tick3)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			r.Tick(ctx)
+		}
+	}
+}
+
+// Tick is one pass of Run: rebuild if suspended (and due), probe if paused, and once a minute
+// the sweep, the cash check and the pruning. In a tick that finds v3 suspended the order is
+// rebuild FIRST, and the sweep follows in the same tick only if that rebuild succeeded.
+func (r *Runner3) Tick(ctx context.Context) {
+	defer func() { r.caught("Run", recover()) }()
+	state, due := r.stateNow()
+	healed := false
+	switch {
+	case state == stateSuspended && due:
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rebuildBudget3)
+		err := r.rebuild(rctx)
+		cancel()
+		if err != nil {
+			slog.Warn("v3 rebuild did not succeed; it stays suspended and tries again", "err", err)
+		}
+		healed = err == nil
+	case state == statePaused:
+		r.writeProbe(ctx)
+	}
+	if state, _ = r.stateNow(); state == stateSuspended {
+		return // nothing else runs while suspended
+	}
+	r.mu.Lock()
+	minute := healed || r.now().Sub(r.lastSweep) >= sweepEvery3
+	if minute {
+		r.lastSweep = r.now()
+	}
+	r.mu.Unlock()
+	if minute {
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rebuildBudget3)
+		defer cancel()
+		r.sweep(sctx)
+		r.cashCheck(sctx)
+		r.prune()
+	}
+	if r.stateDirty.Swap(false) {
+		r.saveState(ctx)
+	}
+}
+
+func (r *Runner3) stateNow() (state string, healDue bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.absorbLocked()
+	return r.state, !r.now().Before(r.healAfter)
+}
+
+// Heal is called by the value-snapshot writer just before it reads the books: rebuild FIRST if
+// suspended (and due); then, only if v3 is not or no longer suspended, sweep, so that a round
+// that closed during the suspension is settled in the same call that lifts the halt. A failed
+// rebuild means no sweep. Every read is made outside r.mu.
+func (r *Runner3) Heal(ctx context.Context) {
+	defer func() { r.caught("Heal", recover()) }()
+	if state, due := r.stateNow(); state == stateSuspended {
+		if !due {
+			return
+		}
+		if err := r.rebuild(ctx); err != nil {
+			slog.Warn("v3 could not heal before the value snapshot", "err", err)
+			return
+		}
+	}
+	r.sweep(ctx)
+}
+
+// writeProbe tries one decisions-only write while paused; the first that succeeds resumes v3.
+func (r *Runner3) writeProbe(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	defer r.fenceLocked("write-probe")
+	r.absorbLocked()
+	if r.state != statePaused || r.probe == nil {
+		return // no step has offered an evaluation row to hang the probe on yet
+	}
+	rec := *r.probe
+	r.probe = nil
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.writeBudget)
+	defer cancel()
+	if err := r.db.RecordOrders(wctx, r.setup, rec); err != nil {
+		slog.Warn("v3 write-probe failed; it stays paused", "err", err)
+		return
+	}
+	r.state, r.reason, r.failures = stateRunning, "", 0
+	slog.Info("v3 RESUMED: the database accepted a write-probe")
+}
+
+// sweep settles, from market.result, every open position whose close has passed, in EVERY held
+// bucket. The poller tells an engine about a result exactly once; v3 does not depend on that
+// call. Never while suspended. It needs no book, no model and no version status, so it runs with
+// AC_V3 off and for a bucket whose version was benched or retired with a bet open.
+func (r *Runner3) sweep(ctx context.Context) {
+	due := func() map[int64]string { // market id -> ticker
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		defer r.fenceLocked("sweep")
+		r.absorbLocked()
+		if r.state == stateSuspended {
+			return nil
+		}
+		out := map[int64]string{}
+		at := k3.UnixSeconds(r.now())
+		for _, a := range r.engine.Accounts {
+			for _, p := range a.Open() {
+				if p.Close <= at {
+					out[p.MarketID] = p.Ticker
+				}
+			}
+		}
+		return out
+	}()
+	if len(due) == 0 {
+		return
+	}
+	ids := make([]int64, 0, len(due))
+	for id := range due {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	results, err := r.db.MarketResults(ctx, ids) // outside r.mu
+	if err != nil {
+		slog.Warn("v3 sweep could not read results; it tries again", "err", err)
+		return
+	}
+	for _, id := range ids {
+		result, ok := results[id]
+		if !ok {
+			continue
+		}
+		if ctx.Err() != nil { // the caller's budget is spent (Heal has 3 s): the rest waits for the next sweep
+			return
+		}
+		func() {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			defer r.fenceLocked("sweep")
+			r.absorbLocked()
+			if r.state != stateSuspended { // memory is settled from under the lock, so the gap since the read is harmless
+				r.settleLocked(ctx, id, due[id], result)
+			}
+		}()
+	}
+}
+
+// cashCheck compares every held bucket's cash in memory with the ledger's sum. The read is made
+// outside r.mu and compared under it only if gen has not moved meanwhile; if it has, the check
+// is simply repeated next minute. A difference suspends, and the rebuild reads the truth: this
+// is what catches a commit that landed later than every other guard looked.
+func (r *Runner3) cashCheck(ctx context.Context) {
+	if len(r.ids) == 0 {
+		return
+	}
+	r.mu.Lock()
+	r.absorbLocked()
+	gen, suspended := r.gen, r.state == stateSuspended
+	r.mu.Unlock()
+	if suspended {
+		return
+	}
+	ledger, err := r.db.BucketCash(ctx, r.ids)
+	if err != nil {
+		slog.Warn("v3 cash check could not read the ledger; it tries again next minute", "err", err)
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	defer r.fenceLocked("cash check")
+	r.absorbLocked()
+	if r.state == stateSuspended || r.gen != gen {
+		return
+	}
+	for _, a := range r.engine.Accounts {
+		if a.CashCents != ledger[a.BucketID] {
+			r.suspendLocked(fmt.Sprintf("cash check: bucket %d has %d cents in memory and %d in the ledger", a.BucketID, a.CashCents, ledger[a.BucketID]))
+			return
+		}
+	}
+}
+
+// prune forgets windows that are over and empty, the journal-thinning keys nobody has used for an
+// hour, and every round that closed more than an hour ago [CONVENTION: only a memory bound] in
+// which no account holds a position.
+//
+// Forgetting a round includes the Paper's book, holds and order records for it. Settlement is
+// the only other place that does that, and a round whose position was sold out early, or which
+// never had one, is never settled; nor is one whose single Settled call was skipped. Without this
+// the Paper would grow by a market (and its orders) every round for as long as the service runs.
+// A round in which a position is still held is left alone: the sweep settles it, and forgets it then.
+func (r *Runner3) prune() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	defer r.fenceLocked("prune")
+	now := k3.UnixSeconds(r.now())
+	r.engine.Prune(now)
+	for key, at := range r.lastAt {
+		if now-at > 3600 {
+			delete(r.lastAt, key)
+			delete(r.last, key)
+		}
+	}
+	held := map[string]bool{}
+	for _, a := range r.engine.Accounts {
+		for _, p := range a.Open() {
+			held[p.Ticker] = true
+		}
+	}
+	for ticker, q := range r.quotes {
+		if q.closes+3600 < now && !held[ticker] {
+			r.forgetLocked(ticker) // the Paper's market and orders, the quotes, the entry prices
+		}
+	}
+}
+
+func (r *Runner3) saveState(ctx context.Context) {
+	state := savedState3{Offsets: map[string][][2]float64{}}
+	for coin := range r.coins {
+		state.Offsets[coin] = r.model.Offsets(coin)
+	}
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeBudget3)
+	defer cancel()
+	if err := r.db.SaveEngineState(wctx, engine3, state); err != nil {
+		r.stateDirty.Store(true)                                                                 // try again next tick
+		slog.Warn("v3 could not save its learned offsets; no money depends on them", "err", err) // plan 5.4, step 6
+	}
+}
+
+// ---- the rebuild ------------------------------------------------------------------------------
+
+var errGenMoved = errors.New("v3's state moved while the rebuild was reading; the result was thrown away")
+
+// fresh is a rebuilt memory, not yet swapped in.
+type fresh struct {
+	engine *k3.Engine
+	paper  *broker.Paper
+	fills  int
+	note   string
+}
+
+// rebuild reads everything about money from the database into a FRESH engine and Paper, outside
+// r.mu, and swaps them in under r.mu only if gen is what it was when the reads began (the
+// pattern of Runner2.RefreshCapital). It never creates, adds or drops a bucket, and it reads no
+// version status: what is held and what may order were fixed by NewRunner3. It does not touch
+// the model.
+//
+// Two rebuilds may run at once (Run's Tick and the snapshot writer's Heal both see "suspended and
+// due"). The one that swaps second finds gen moved by the first. If the first HEALED v3 (it is no
+// longer suspended), the second returns nil and leaves the first one's report alone: v3 is healed,
+// the caller may go on to sweep, and /api/status keeps the report that says what was found. Only
+// while v3 is still suspended is a thrown-away rebuild an error.
+func (r *Runner3) rebuild(ctx context.Context) (err error) {
+	started := r.now()
+	var gen uint64
+	var pending []string
+	func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		defer r.fenceLocked("rebuild")
+		r.absorbLocked()
+		gen, pending = r.gen, append([]string{}, r.pendingIDs...)
+	}()
+
+	got, err := r.read(ctx, pending)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	defer func() { // the inner fence, with a result: a panic here is a rebuild that did not succeed
+		if p := recover(); p != nil {
+			err = errors.New(r.panickedLocked("rebuild", p))
+		}
+	}()
+	r.absorbLocked()
+	report := rebuildReport{At: r.now(), Took: r.now().Sub(started)}
+	switch {
+	case r.gen != gen && r.state != stateSuspended: // whatever this one's reads found
+		slog.Info("v3 rebuild overtaken by another that already healed it; this one's reads are thrown away", "its_err", err)
+		return nil
+	case err != nil:
+		report.Reason = err.Error()
+	case r.gen != gen:
+		err = errGenMoved
+		report.Reason = err.Error()
+	default:
+		report.OK, report.Fills, report.Note = true, got.fills, got.note
+		r.engine, r.paper = got.engine, got.paper
+		r.state, r.reason, r.failures, r.pendingIDs, r.probe = stateRunning, "", 0, nil, nil
+		r.gen++
+		slog.Info("v3 rebuilt from the database", "fills", got.fills, "took", report.Took.String(), "note", got.note)
+	}
+	r.rebuilt = report
+	return err
+}
+
+// read is the rebuild's reads and its fold (plan 5.4, steps 1 to 7). It touches nothing of r
+// that can change.
+func (r *Runner3) read(ctx context.Context, pending []string) (*fresh, error) {
+	out := &fresh{paper: r.newPaper()}
+	// 1. Cash: the ledger's sum IS CashCents. There is no saved cash to disagree with.
+	cash, err := r.db.BucketCash(ctx, r.ids)
+	if err != nil {
+		return nil, fmt.Errorf("reading the buckets' cash: %w", err)
+	}
+	// 2. Fills: of markets with no result yet, and of lots that are NET open and never settled.
+	fills, err := r.db.BucketFills(ctx, r.ids)
+	if err != nil {
+		return nil, fmt.Errorf("reading the fills: %w", err)
+	}
+	// The two reads are not one snapshot. If the cash moved between them (a late commit landing
+	// right now), the fills may or may not contain it: this attempt proves nothing. Try again.
+	again, err := r.db.BucketCash(ctx, r.ids)
+	if err != nil {
+		return nil, fmt.Errorf("reading the buckets' cash again: %w", err)
+	}
+	for _, id := range r.ids {
+		if cash[id] != again[id] {
+			return nil, fmt.Errorf("cash check: bucket %d's ledger cash moved from %d to %d cents while the rebuild was reading", id, cash[id], again[id])
+		}
+	}
+	accounts := make([]*k3.Account, 0, len(r.buckets))
+	for _, b := range r.buckets {
+		accounts = append(accounts, k3.NewAccount(b.params, b.ID, cash[b.ID], b.mayOrder))
+	}
+	if out.engine, err = r.newEngine(accounts); err != nil {
+		return nil, err
+	}
+
+	// Group the fills by order, oldest first, and fold each order through the engine's one fold.
+	type lot struct {
+		bucket       int64
+		ticker, side string
+	}
+	type order struct {
+		first store.BucketFill
+		fills []broker.Fill
+	}
+	var orders []*order
+	byID := map[int64]*order{}
+	now := r.now()
+	for _, fl := range fills {
+		units, err := store.ParsePrice4(fl.Price)
+		if err != nil {
+			return nil, fmt.Errorf("fill %d: %w", fl.FillID, err)
+		}
+		premium := -fl.BucketCents - fl.FeeCents // a buy's entry is -(premium + fee)
+		if fl.Action == "sell" {
+			premium = fl.BucketCents + fl.FeeCents // a sale's is premium - fee; 0 when the fill has no entry
+		}
+		o := byID[fl.OrderID]
+		if o == nil {
+			o = &order{first: fl}
+			byID[fl.OrderID], orders = o, append(orders, o)
+		}
+		o.fills = append(o.fills, broker.Fill{Seq: len(o.fills) + 1, Qty: fl.Qty, Price: broker.Price(units), PremiumCents: premium, FeeCents: fl.FeeCents})
+		// 5. Paper holds, for markets still open: every contract ever taken starts held at the price
+		//    it was taken at, which errs toward holding too much.
+		if fl.Result == "" && fl.ClosesAt.After(now) {
+			out.paper.RestoreHold(fl.BucketID, fl.Ticker, broker.Action(fl.Action), broker.Side(fl.Side), broker.Price(units), fl.Qty)
+		}
+	}
+	want := map[lot]int64{} // 4. what each position's cost must fold to, from the rows alone
+	for _, o := range orders {
+		var detail map[string]any
+		if err := json.Unmarshal(o.first.Detail, &detail); err != nil {
+			return nil, fmt.Errorf("order %d: its detail cannot be read: %w", o.first.OrderID, err)
+		}
+		booked, err := k3.BookedFromRow(o.first.BucketID, o.first.MarketID, o.first.Action, o.first.Side, k3.UnixSeconds(o.first.At), detail, o.fills)
+		if err != nil {
+			return nil, fmt.Errorf("order %d: %w", o.first.OrderID, err)
+		}
+		for _, e := range out.engine.FoldRecorded(booked) {
+			if e.Kind == "inconsistent" {
+				return nil, fmt.Errorf("order %d does not fold: %s", o.first.OrderID, e.Note)
+			}
+		}
+		key := lot{o.first.BucketID, booked.Ticker, o.first.Side}
+		if o.first.Action == "buy" {
+			for _, fl := range o.fills {
+				want[key] += fl.PremiumCents + fl.FeeCents
+			}
+		} else {
+			released, ok := detail["cost_cents"].(float64)
+			if !ok {
+				return nil, fmt.Errorf("order %d: a sale's detail lacks cost_cents", o.first.OrderID)
+			}
+			want[key] -= int64(released)
+		}
+		out.fills += len(o.fills)
+	}
+	// 4. Self-check: v2's rule, kept, with a way back (a failure leaves v3 suspended, and it tries again).
+	for key, cents := range want {
+		var got int64
+		if a := out.engine.Account(key.bucket); a != nil {
+			if p := a.Position(key.ticker, key.side); p != nil {
+				got = p.CostCents
+			}
+		}
+		if got != cents {
+			return nil, fmt.Errorf("self-check: bucket %d %s %s folds to a cost of %d cents and its rows say %d", key.bucket, key.ticker, key.side, got, cents)
+		}
+	}
+	// 7. Exhausted, LAST, from what the steps above found: never from cash alone.
+	for _, a := range out.engine.Accounts {
+		a.Exhausted = a.RanOut()
+	}
+	// The report: did the step that suspended v3 commit after all? It decides nothing.
+	if len(pending) > 0 {
+		if found, err := r.db.OrdersRecorded(ctx, pending); err != nil {
+			out.note = "whether the step that suspended v3 had committed could not be read: " + err.Error()
+		} else {
+			out.note = fmt.Sprintf("the step that suspended v3 had %d of its %d orders in the ledger", len(found), len(pending))
+		}
+	}
+	return out, nil
+}
+
+// ---- /api/status ------------------------------------------------------------------------------
+
+// Snapshot is the "v3" block of /api/status. It waits on r.mu (a status page may wait out a
+// write; a poller may not), and it asks the database, outside the lock, what the versions'
+// statuses are NOW, to compare them with what was loaded at start (restartNotes): a status
+// change takes effect at the next restart (D18).
+func (r *Runner3) Snapshot(ctx context.Context) map[string]any {
+	notes := r.restartNotes(ctx)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.absorbLocked()
+	mode := r.state
+	if r.state == stateRunning {
+		switch {
+		case len(r.buckets) == 0:
+			mode = "observe-only"
+		case r.mayOrderCount() == 0:
+			mode = "settle-only"
+		}
+	}
+	doc := map[string]any{"engine": "v3", "on": r.opts.On, "state": r.state, "mode": mode, "reason": r.reason, "plumbing": r.plumbing,
+		"fault_injection_built": FaultInjectionBuilt, "failures_in_a_row": r.failures,
+		"skipped_busy": map[string]any{"step": r.skippedStep.Load(), "settled": r.skippedSettled.Load()}, "restart_notes": notes}
+	if r.state != stateRunning {
+		doc["since"] = r.since
+	}
+	if r.state == stateSuspended {
+		doc["heal_after"] = r.healAfter
+	}
+	rb := r.rebuilt
+	doc["last_rebuild"] = map[string]any{"at": rb.At, "ok": rb.OK, "took_ms": rb.Took.Milliseconds(), "fills": rb.Fills, "note": rb.Note, "problem": rb.Reason}
+	buckets := []map[string]any{}
+	for _, b := range r.buckets {
+		doc := map[string]any{"id": b.ID, "name": b.Name, "strategy": b.Strategy, "status_loaded": b.VersionStatus, "may_order": b.mayOrder,
+			"why_not": b.whyNot, "plumbing": b.plumbing}
+		if a := r.engine.Account(b.ID); a != nil {
+			positions, holds := []map[string]any{}, map[string]any{}
+			for _, p := range a.Open() {
+				positions = append(positions, map[string]any{"coin": p.Coin, "ticker": p.Ticker, "side": p.Side, "contracts": p.Contracts,
+					"cost_cents": p.CostCents, "closes": p.Close, "exiting": p.Exiting, "blocked_seconds": p.BlockedSeconds})
+			}
+			for ticker := range r.quotes {
+				for _, l := range []broker.Ladder{broker.YesBids, broker.NoBids} {
+					if n := r.paper.TotalHeld(b.ID, ticker, l); n > 0 {
+						holds[ticker+" "+string(l)] = n
+					}
+				}
+			}
+			windows := []map[string]any{}
+			for _, w := range a.Windows {
+				windows = append(windows, map[string]any{"close": w.Close, "equity_cents": w.EquityCents, "k_max": w.KMax, "open_cents": w.OpenCents,
+					"lost_cents": w.LostCents, "used_cents": w.Used()})
+			}
+			sort.Slice(windows, func(i, j int) bool { return windows[i]["close"].(int64) < windows[j]["close"].(int64) })
+			doc["cash_cents"], doc["bets"], doc["exhausted"], doc["positions"], doc["windows"], doc["holds"] = a.CashCents, a.Bets, a.Exhausted, positions, windows, holds
+		}
+		buckets = append(buckets, doc)
+	}
+	doc["buckets"] = buckets
+	return doc
+}
+
+// restartNotes compares the versions' stored statuses with what the runner loaded at start, and
+// says, for each approved version that is not trading, WHY, from what NewRunner3 recorded rather
+// than by inference:
+//
+//	"<name>: approved, but AC_V3 is off"
+//	"<name>: refused at start: <why>: a restart alone will not change this"   vet said no at this start
+//	"<name>: its bucket ran out and is frozen: not traded, not replaced" seeded at this start, not held
+//	"<name>: approved, but the next start will refuse it: <why>"         approved while running; vet says no
+//	"<name>: approved, waiting for restart"                              approved while running; vet says yes
+//	"<strategy>: no longer tradable: settle-only after restart"          ordering now, no longer approved
+//
+// A version seeded at this start with no bucket that may order can only have had its bucket
+// frozen (reaped at this start, or in an earlier one: EnsureSimSetup leaves a frozen bucket alone
+// and HeldBuckets skips it). A bucket whose close failed stays held and may order, so it is loaded.
+func (r *Runner3) restartNotes(ctx context.Context) (notes []string) {
+	r.notesMu.Lock() // its own lock, held across this read: only status pages wait on it
+	defer r.notesMu.Unlock()
+	if r.notes != nil && r.now().Sub(r.notesAt) < notesFor3 {
+		return r.notes
+	}
+	defer func() { r.notes, r.notesAt = notes, r.now() }()
+	qctx, cancel := context.WithTimeout(ctx, writeBudget3)
+	defer cancel()
+	notes = []string{}
+	tradable, err := r.db.TradableVersions(qctx, family3, version3)
+	if err != nil {
+		return append(notes, "the versions' statuses could not be read: "+err.Error())
+	}
+	now := map[int64]bool{}
+	loaded := map[int64]bool{}
+	for _, b := range r.buckets { // immutable: no lock needed
+		loaded[b.VersionID] = loaded[b.VersionID] || b.mayOrder
+	}
+	for _, v := range tradable {
+		now[v.ID] = true
+		switch {
+		case loaded[v.ID]:
+		case !r.opts.On:
+			notes = append(notes, v.Name+": approved, but AC_V3 is off")
+		case r.refused[v.ID] != "":
+			notes = append(notes, v.Name+": refused at start: "+r.refused[v.ID]+": a restart alone will not change this")
+		case r.seeded[v.ID]:
+			notes = append(notes, v.Name+": its bucket ran out and is frozen: not traded, not replaced")
+		default:
+			if _, _, err := r.opts.vet(v.Params); err != nil {
+				notes = append(notes, v.Name+": approved, but the next start will refuse it: "+err.Error())
+			} else {
+				notes = append(notes, v.Name+": approved, waiting for restart")
+			}
+		}
+	}
+	for _, b := range r.buckets {
+		if b.mayOrder && !now[b.VersionID] {
+			notes = append(notes, b.Strategy+": no longer tradable: settle-only after restart")
+		}
+	}
+	return notes
+}

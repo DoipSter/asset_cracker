@@ -1332,8 +1332,8 @@ index. Apply to prod; release.
 **S4. `kalshi15m3`.** Tests 14-26 with a placeholder lambda in TEST fixtures only. Not imported by `main`. Merge.
 
 **S5. `runner3.go`, groups, `main.go` wiring, `AC_V3` default off.** Tests 27-43 (32a included) and 43a. Dev: run
-`tools/dev-v3-plumbing.sql` (versions with hypothesis "DEV PLUMBING, not a trial", lambda and stale_cost labelled
-test values, status `probation`; never in a migration, never on prod), `AC_V3=on`, at least four settlements
+`tools/dev-v3-plumbing.sql` (strategies "Scalper (dev plumbing)" at `probation` and "Value (dev plumbing)" at `draft`,
+hypothesis "DEV PLUMBING, not a trial", lambda and stale_cost labelled test values; never in a migration, never on prod), `AC_V3=on`, at least four settlements
 **[CONVENTION: enough to see each path once]**, then:
   - `fill_checks` zero; every v3 fill within the displayed size at its level in the evaluation row of THAT second
     (`e.market_id = o.market_id and e.at = o.placed_at`, exact join; a level not displayed at all must also fail:
@@ -1391,8 +1391,9 @@ plumbing rows. Release. (Before v3 trades on prod, so the next-second comparison
 
 **S7. Measure, register, approve, switch on.** When TRAIN is complete: `measure3 train` on prod as
 `assetcracker_ro`; commit `train-result.json` and `frozen-params.json`. When TEST is complete: `measure3 test`,
-once; commit. R1 and R2 pass -> `measure3 -emit-migration` writes 0013; apply to dev (it overwrites the plumbing
-rows, by design; dev history before that is never evidence); 24 hours **[CONVENTION]** on dev with S5's checks;
+once; commit. R1 and R2 pass -> `measure3 -emit-migration` writes 0013; on dev, first set the plumbing versions to `retired`
+(they are separate strategies, "Scalper (dev plumbing)" and "Value (dev plumbing)", so 0013 never touches their rows
+or buckets; dev history before that is never evidence), then apply 0013; 24 hours **[CONVENTION]** on dev with S5's checks;
 apply to prod; Brad runs `approve-version.sh prod`; restart with `AC_V3=on` (the restart is what makes the
 approval take effect, and what seeds the two buckets BEFORE v2 reads its capital). Fail -> 6.5, written up on the evidence page.
 

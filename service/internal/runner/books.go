@@ -19,7 +19,7 @@ import (
 // Position is one open bet.
 type Position struct {
 	Strategy   string // without the "Anti " prefix: World says which of the pair it is
-	Engine     string // v1 or v2
+	Engine     string // v1, v2 or v3
 	World      string // real, or anti for an anti-world twin
 	Coin       string
 	Side       string // UP or DOWN
@@ -42,10 +42,15 @@ type Marker struct {
 
 // BucketBook is one live bucket as its engine sees it right now.
 type BucketBook struct {
-	BucketID       int64
-	Name           string // the bucket's name in the database, with its life if it has one
-	Strategy       string
-	Engine, World  string
+	BucketID      int64
+	Name          string // the bucket's name in the database, with its life if it has one
+	Strategy      string
+	Engine, World string
+	// Version is the strategy version's number (1, 2 or 3), which decides the composition group the
+	// bucket belongs to. It is the same number the ledger's side carries (store.BucketCapital.Version),
+	// so a bucket's value and its contribution always land in the same group. 0 means whoever built
+	// the book did not say, and the engine label decides (versionOf).
+	Version        int
 	Retired        bool // a twin that ran out: its bucket is frozen and it places no more bets
 	Life           int
 	CashCents      int64
@@ -96,7 +101,7 @@ func (r *Runner) Book() Book {
 	m := r.trader.Market
 	for _, a := range r.trader.Accounts {
 		sb := r.setup.Buckets[a.Params.Name]
-		b := BucketBook{BucketID: sb.ID, Name: sb.Name, Strategy: a.Params.Name, Engine: "v1", World: "real", Life: store.LifeOf(sb.Name),
+		b := BucketBook{BucketID: sb.ID, Name: sb.Name, Strategy: a.Params.Name, Engine: "v1", World: "real", Version: 1, Life: store.LifeOf(sb.Name),
 			CashCents: cents(a.Cash), Bets: a.Bets}
 		for _, lot := range a.Log {
 			if lot.Status != "open" {
@@ -190,7 +195,7 @@ func (r *Runner2) book() Book {
 	for _, a := range r.trader.Accounts {
 		sb := r.setup.Buckets[a.Params.Name]
 		w := world(a.Params.Anti)
-		b := BucketBook{BucketID: sb.ID, Name: sb.Name, Strategy: plain(a.Params.Name), Engine: "v2", World: w, Retired: a.Retired,
+		b := BucketBook{BucketID: sb.ID, Name: sb.Name, Strategy: plain(a.Params.Name), Engine: "v2", World: w, Version: 2, Retired: a.Retired,
 			Life: store.LifeOf(sb.Name), CashCents: cents(a.Cash), Bets: a.Bets}
 		if mark, ok := r.hwm[a.Params.Name]; ok {
 			b.HighWaterCents = &mark
@@ -292,18 +297,44 @@ func (r *Runner2) Policy() store.SkimPolicy {
 	return r.policy
 }
 
-// The four groups the home page's composition is made of, in the order it lists them.
-var Groups = []string{"strategies", "anti", "v1", "money"}
+// The five groups the home page's composition is made of, in the order it lists them.
+//
+// The third engine has a group of its own (owner decision D5 of docs/honest-fills-v3.md).
+// "strategies" against "anti" is a PAIRED comparison of the same six names, each with its twin;
+// the third engine registers no twins, so two unpaired buckets inside "strategies" would break
+// the pairing and make that group's history incomparable with its own past. The group is listed
+// and written down whether or not a third-engine bucket exists: with none it is all zeros.
+var Groups = []string{"strategies", "anti", "v1", "v3", "money"}
 
-// groupOf says which group a bucket belongs to.
+// groupOf says which group a bucket belongs to, from its strategy version's number and whether
+// the version is an anti-world twin. Version 1 is the first engine and 3 the third, whatever
+// their params say; everything else (today only version 2) is one of the paired six or its twin.
 func groupOf(version int, anti bool) string {
 	switch {
 	case version == 1:
 		return "v1"
+	case version == 3:
+		return "v3"
 	case anti:
 		return "anti"
 	}
 	return "strategies"
+}
+
+// versionOf is a held bucket's strategy version. The engine that built the book says it in
+// BucketBook.Version. A book that does not (one built by hand in a test, or by code older than
+// the field) is read from its engine label, which is how every book was read before the third
+// engine: "v1" is 1, "v3" is 3, anything else 2.
+func versionOf(b BucketBook) int {
+	switch {
+	case b.Version != 0:
+		return b.Version
+	case b.Engine == "v1":
+		return 1
+	case b.Engine == "v3":
+		return 3
+	}
+	return 2
 }
 
 // Line is one scope's figures at one moment: a row of value_snapshot before it has a time.
@@ -371,12 +402,12 @@ func SnapshotRefusal(books []Book, now time.Time) error {
 
 // Value marks every book to market and lays it beside what the ledger says was put in.
 //
-// The three bucket groups are the live buckets' cash and marked bets. The money group is the
+// The bucket groups (every group but "money") are the live buckets' cash and marked bets. The money group is the
 // four set-aside buckets (winnings, replenishment and the two reserves). A group's contribution
 // covers every bucket it has ever had, frozen ones too: a strategy that ran out and was staked
 // again shows its first life's loss as a loss, not as a fresh $1,000 earned. The money group's
-// contribution is whatever came from outside and is not in a bucket group, so the four always
-// add up to the total's, and the four earned figures add up to the total earned.
+// contribution is whatever came from outside and is not in a bucket group, so the groups always
+// add up to the total's, and their earned figures add up to the total earned.
 //
 // A live bucket that no engine holds (its series was switched to recording only, or the second
 // engine is off) still has its cash in the ledger and its seed in the contributions, so it is
@@ -404,11 +435,7 @@ func Value(books []Book, capital store.Capital, coins []string) Valuation {
 			if b.Retired { // its bucket is frozen and empty; only its contribution, above, remains
 				continue
 			}
-			version := 2
-			if b.Engine == "v1" {
-				version = 1
-			}
-			g := groups[groupOf(version, b.World == "anti")]
+			g := groups[groupOf(versionOf(b), b.World == "anti")]
 			g.ValueCents, g.CashCents, g.AtRiskCents = g.ValueCents+b.ValueCents(), g.CashCents+b.CashCents, g.AtRiskCents+b.AtRiskCents
 			g.Unmarked, g.Count = g.Unmarked+b.Unmarked, g.Count+1
 			v.Buckets = append(v.Buckets, Line{Scope: "bucket", Key: b.Name, ValueCents: b.ValueCents(), CashCents: b.CashCents,
@@ -442,7 +469,14 @@ func Value(books []Book, capital store.Capital, coins []string) Valuation {
 	money := groups["money"]
 	money.ValueCents = m.Winnings + m.Replenishment + m.TaxReserve + m.FeeReserve
 	money.CashCents, money.Count = money.ValueCents, 4
-	money.ContributedCents = m.External - groups["strategies"].ContributedCents - groups["anti"].ContributedCents - groups["v1"].ContributedCents
+	// Everything from outside that is not in a bucket group. Taken off in a loop over Groups, so a
+	// group added later cannot be forgotten here and counted twice in the total.
+	money.ContributedCents = m.External
+	for _, key := range Groups {
+		if key != "money" {
+			money.ContributedCents -= groups[key].ContributedCents
+		}
+	}
 
 	v.Total = Line{Scope: "total", Key: "all"}
 	for _, key := range Groups {

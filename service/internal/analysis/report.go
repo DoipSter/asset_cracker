@@ -13,7 +13,7 @@ var Coins = []string{"BTC", "ETH", "SOL", "XRP", "DOGE"}
 type Bucket struct {
 	ID, VersionID int64
 	Strategy      string // "Scalper"; a twin carries its original's name and World "anti"
-	Engine        string // "v1" or "v2"
+	Engine        string // "v" and the strategy version's number: "v1", "v2", or "v3" for the third engine
 	World         string // "real" or "anti"
 	Frozen        bool
 	Replaced      bool // ran out and was staked again: the next life is another bucket

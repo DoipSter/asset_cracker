@@ -32,6 +32,7 @@ The balance sheet. Cheap: served from memory and the once-a-minute value snapsho
     { "key": "strategies", "label": "Strategies",       "buckets": 6,  "value_cents": 598000,  "earned_cents": -2100 },
     { "key": "anti",       "label": "Anti-world twins", "buckets": 6,  "value_cents": 534000,  "earned_cents": -3900 },   // a measurement, not a competitor: say so
     { "key": "v1",         "label": "First engine",     "buckets": 12, "value_cents": 172000,  "earned_cents": 400 },
+    { "key": "v3",         "label": "Third engine",     "buckets": 0,  "value_cents": 0,       "earned_cents": 0 },     // honest fills; all zeros until it is staked
     { "key": "money",      "label": "Money buckets",    "buckets": 4,  "value_cents": 0,       "earned_cents": 0 }
   ],
   "assets": [
@@ -81,10 +82,22 @@ How the figures are made (added when the API was built, 2026-09-21; all additive
   at or before the start of the range. It can therefore be a few minutes older than the range
   asked for, late in a round when a losing side had no bid, and older still if the service was
   down then. `ALL` likewise starts from the first fully priced snapshot.
-- `composition[].earned_cents` add up to `total.earned_cents`. A group's figure is null if its
-  snapshot for that moment is missing (it is written in the same batch as the total, so this
-  should not happen). The money buckets earn nothing by construction: what is in them was moved
-  there, not made there.
+- `composition` is five lines, always in the order strategies, anti, v1, v3, money, and always all
+  five: a group with no buckets is sent with `buckets: 0` and zeros, not left out. The third
+  engine (`v3`, fills limited to what the recorded book displayed) has a group of its own
+  because "strategies" against "anti" is a paired comparison of the same six names, and the third
+  engine has no twins; inside "strategies" it would break the pairing. A page should render
+  whatever lines it is sent, in the order sent.
+- `composition[].earned_cents` add up to `total.earned_cents`. **Zero-baseline rule:** a group
+  that has no row in the snapshot batch the range is compared with did not exist then (every
+  batch holds every group of the release that wrote it, so every batch written before the third
+  engine's release has no `v3` row). It is compared with value 0 and contributed 0, so its figure
+  is everything it has earned to date, `value - contributed`, and the lines still add up to the
+  total. The service applies the rule only after checking that the group rows it did find add up
+  to that batch's total, in value and in contributed; if they do not, the batch has lost rows some
+  other way and a group missing from it is null (rows are written in one all-or-nothing batch, so
+  this should not happen). The money buckets earn nothing by construction: what is in them was
+  moved there, not made there.
 - `assets[].earned_cents` is what was realised on ROUNDS OF THAT COIN THAT SETTLED since `since`:
   everything those rounds paid the buckets (settlements and early sales) less what the buckets
   paid for them, fees included, from the ledger. A round counts only once every bucket that
@@ -137,7 +150,9 @@ The chart box for one asset and the stake held in it.
 }
 ```
 
-`world` is `real` for a strategy and `anti` for its anti-world twin. `engine` is `v1` or `v2`.
+`world` is `real` for a strategy and `anti` for its anti-world twin. `engine` is `v1`, `v2` or
+`v3` (the third engine, whose orders fill only against the recorded book's displayed size), on
+positions, markers, buckets and the analysis rows alike: it is "v" and the strategy version's number.
 `strategy` is the name the pair shares: the twin of Scalper is `"strategy": "Scalper", "world": "anti"`,
 not "Anti Scalper". (A bucket's `name` in api/buckets keeps the engine's own name.)
 
@@ -175,7 +190,7 @@ was staked again took its earlier life's bets with it.
 Added when built: `simulated: true`; `unmarked_bets` per bucket. `equity_cents` is cash plus open
 bets at the bid, the same marking as api/home (so it is a little above the widget's equity, which
 takes the selling fee off). `high_water_cents` is null for the first engine, which takes no
-sustainment allocation and keeps no mark. `bets` is the buys that filled at least one contract, as the database has recorded them for that
+sustainment allocation and keeps no mark, and for any bucket whose engine reports none. `bets` is the buys that filled at least one contract, as the database has recorded them for that
 bucket. A frozen bucket shows the cash the ledger says it holds, which after reaping is 0. `life`
 is read from the bucket's name. `events[].note` is the stored detail put into words; a part the
 stored detail does not have is left out of the note, not shown as $0.00.

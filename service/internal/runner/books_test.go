@@ -40,8 +40,8 @@ func TestCompositionAddsUpToTheTotal(t *testing.T) {
 	books, capital := world1()
 	v := Value(books, capital, []string{"BTC", "ETH", "SOL", "XRP", "DOGE"})
 
-	if len(v.Groups) != 4 {
-		t.Fatalf("%d groups, want 4", len(v.Groups))
+	if len(v.Groups) != 5 {
+		t.Fatalf("%d groups, want 5", len(v.Groups))
 	}
 	var sum Line
 	for i, g := range v.Groups {
@@ -62,6 +62,7 @@ func TestCompositionAddsUpToTheTotal(t *testing.T) {
 		"strategies": {ValueCents: 98_900, CashCents: 98_000, AtRiskCents: 2_000, ContributedCents: 198_659, Unmarked: 1, Count: 1},
 		"anti":       {ValueCents: 101_000, CashCents: 101_000, ContributedCents: 200_000, Count: 1}, // the retired twin's cash is not counted; its seed is
 		"v1":         {ValueCents: 14_620, CashCents: 14_000, AtRiskCents: 500, ContributedCents: 15_000, Count: 1},
+		"v3":         {}, // no third-engine bucket exists: the group is there, and all zeros
 		"money":      {ValueCents: 1_341, CashCents: 1_341, ContributedCents: 1_341, Count: 4},
 	}
 	for _, g := range v.Groups {
@@ -124,7 +125,7 @@ func TestEarnedAddsUpAcrossARestake(t *testing.T) {
 	if want := int64(50 - 98_900); total != want || groups != want {
 		t.Errorf("earned: total %d, groups %d, want %d", total, groups, want)
 	}
-	if n := len(after.Snapshots(at, true)); n != 1+4+len(after.Buckets)+len(after.Coins) {
+	if n := len(after.Snapshots(at, true)); n != 1+len(Groups)+len(after.Buckets)+len(after.Coins) {
 		t.Errorf("a detailed batch has %d rows", n)
 	}
 }
@@ -213,5 +214,119 @@ func TestSnapshotRefusal(t *testing.T) {
 	err = SnapshotRefusal(halted, now)
 	if err == nil || errors.Is(err, ErrAwaitingSettlement) || !strings.Contains(err.Error(), "v2 is halted") {
 		t.Errorf("a halted engine: %v", err)
+	}
+}
+
+// world3 is world1 after the third engine's two buckets were staked: $1,000 each came from
+// outside through the common pool, and one of them has since bought a bet.
+func world3() ([]Book, store.Capital) {
+	books, capital := world1()
+	books = append(books, Book{Engine: "v3", Buckets: []BucketBook{
+		{BucketID: 50, Name: "kalshi15m3 Scalper v3", Strategy: "Scalper", Engine: "v3", World: "real", Version: 3, CashCents: 97_400, AtRiskCents: 2_600, MarkedCents: 2_450, Bets: 1},
+		{BucketID: 51, Name: "kalshi15m3 Value v3", Strategy: "Value", Engine: "v3", World: "real", Version: 3, CashCents: 100_000},
+	}, Positions: []Position{{Coin: "BTC", Engine: "v3", CostCents: 2_600, ValueCents: ptr(2_450)}}})
+	capital.Buckets = append(capital.Buckets,
+		store.BucketCapital{ID: 50, Name: "kalshi15m3 Scalper v3", Status: "active", Version: 3, ContributedCents: 100_000},
+		store.BucketCapital{ID: 51, Name: "kalshi15m3 Value v3", Status: "active", Version: 3, ContributedCents: 100_000})
+	capital.Money.External += 200_000
+	return books, capital
+}
+
+func sumLines(lines []Line) Line {
+	var sum Line
+	for _, g := range lines {
+		sum.ValueCents, sum.CashCents, sum.AtRiskCents = sum.ValueCents+g.ValueCents, sum.CashCents+g.CashCents, sum.AtRiskCents+g.AtRiskCents
+		sum.ContributedCents, sum.Unmarked, sum.Count = sum.ContributedCents+g.ContributedCents, sum.Unmarked+g.Unmarked, sum.Count+g.Count
+	}
+	return sum
+}
+
+// The third engine's buckets are a group of their own, the five groups add up to the total, and
+// staking them changes no other group by a cent: the money group's contribution in particular,
+// which is "everything from outside that no bucket group has" and must take the new group off too.
+func TestFiveGroupsAddUpToTheTotal(t *testing.T) {
+	coins := []string{"BTC", "ETH", "SOL", "XRP", "DOGE"}
+	before0, capital0 := world1()
+	before := Value(before0, capital0, coins)
+	books, capital := world3()
+	v := Value(books, capital, coins)
+
+	if got := strings.Join(Groups, " "); got != "strategies anti v1 v3 money" {
+		t.Fatalf("groups are %q", got)
+	}
+	sum := sumLines(v.Groups)
+	sum.Scope, sum.Key = "total", "all"
+	if sum != v.Total {
+		t.Errorf("groups add up to %+v, total is %+v", sum, v.Total)
+	}
+	if v.Total.ContributedCents != capital.Money.External {
+		t.Errorf("total contributed %d, want what came from outside, %d", v.Total.ContributedCents, capital.Money.External)
+	}
+	want := Line{Scope: "group", Key: "v3", ValueCents: 97_400 + 2_450 + 100_000, CashCents: 197_400, AtRiskCents: 2_600, ContributedCents: 200_000, Count: 2}
+	if v.Groups[3] != want {
+		t.Errorf("third engine group: %+v, want %+v", v.Groups[3], want)
+	}
+	for i, g := range v.Groups {
+		if g.Key != "v3" && g != before.Groups[i] {
+			t.Errorf("staking the third engine changed %s: %+v, was %+v", g.Key, g, before.Groups[i])
+		}
+	}
+	// Staking earned nothing; the one bet is 150 cents under water at the bid.
+	if got := v.Total.ValueCents - v.Total.ContributedCents - (before.Total.ValueCents - before.Total.ContributedCents); got != -150 {
+		t.Errorf("the third engine's arrival reads as %d cents earned, want -150", got)
+	}
+}
+
+// A third-engine bucket goes to its own group by its version NUMBER, from whichever side names
+// it: the engine's book (the Version field, or the engine label when a book does not set the
+// field) and the ledger's capital. A bucket in one group by value and another by contribution
+// would read as a gain in the first and the same loss in the second.
+func TestThirdEngineBucketsNeverLandInStrategies(t *testing.T) {
+	books, capital := world3()
+	for i := range books[2].Buckets {
+		books[2].Buckets[i].Version = 0 // a book that says only "v3"
+	}
+	v := Value(books, capital, []string{"BTC"})
+	if g := v.Groups[3]; g.Count != 2 || g.ValueCents != 199_850 || g.ContributedCents != 200_000 {
+		t.Errorf("by engine label: %+v", g)
+	}
+	if g := v.Groups[0]; g.Count != 1 || g.ContributedCents != 198_659 {
+		t.Errorf("strategies took a third-engine bucket: %+v", g)
+	}
+
+	// The third engine is not running at all (AC_V3 off and the runner not built): its live
+	// buckets are counted at their ledger cash, in the same group.
+	capital.Buckets[5].CashCents, capital.Buckets[6].CashCents = 97_400, 100_000
+	off := Value(books[:2], capital, []string{"BTC"})
+	if g := off.Groups[3]; g.Key != "v3" || g.Count != 2 || g.ValueCents != 197_400 || g.ContributedCents != 200_000 {
+		t.Errorf("unheld: %+v", g)
+	}
+	for _, c := range []struct {
+		version int
+		anti    bool
+		want    string
+	}{{1, false, "v1"}, {2, false, "strategies"}, {2, true, "anti"}, {3, false, "v3"}, {3, true, "v3"}, {4, false, "strategies"}} {
+		if got := groupOf(c.version, c.anti); got != c.want {
+			t.Errorf("groupOf(%d, %v) = %q, want %q", c.version, c.anti, got, c.want)
+		}
+	}
+}
+
+// With no third-engine bucket anywhere, the other four groups and the total are exactly what
+// they were before the group existed, and the batch gains exactly one all-zero row.
+func TestNoThirdEngineBucketsLeavesTheOtherGroupsAlone(t *testing.T) {
+	books, capital := world1()
+	v := Value(books, capital, []string{"BTC", "ETH", "SOL", "XRP", "DOGE"})
+	if g := v.Groups[3]; g != (Line{Scope: "group", Key: "v3"}) {
+		t.Errorf("an empty third engine group is %+v, want all zeros", g)
+	}
+	four := sumLines([]Line{v.Groups[0], v.Groups[1], v.Groups[2], v.Groups[4]})
+	four.Scope, four.Key = "total", "all"
+	if four != v.Total {
+		t.Errorf("the four older groups add up to %+v, total is %+v", four, v.Total)
+	}
+	rows := v.Snapshots(time.Unix(1_790_000_000, 0), false)
+	if len(rows) != 6 || rows[4].Scope != "group" || rows[4].Key != "v3" || rows[4].ValueCents != 0 || rows[4].ContributedCents != 0 || rows[4].AtRiskCents != 0 {
+		t.Errorf("snapshot rows: %+v", rows)
 	}
 }

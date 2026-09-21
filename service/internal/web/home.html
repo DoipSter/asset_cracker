@@ -82,6 +82,7 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;margin:0;cu
 .memo{font:11px/1.5 var(--sans);color:var(--mute);margin:5px 0 0;display:flex;flex-wrap:wrap;gap:0 9px}
 .memo .f{font-size:11px;color:var(--ink)}.memo .f.up{color:var(--up)}.memo .f.dn{color:var(--dn)}
 .memo i{font-family:var(--serif)}
+.row.quiet,.row.quiet .f{color:var(--mute)}
 .row.sum{border-bottom:0;border-top:1px solid var(--ink);font-weight:700;margin-top:-1px}
 .row.sub{padding:4px 0;border-bottom:0}
 .row.sub span:first-child{color:var(--mute);font-size:12.5px}
@@ -300,6 +301,8 @@ function usd(c){c=num(c);if(c==null)return"—";var s="$"+grp(Math.abs(c)/100,2)
 function sgn(c){c=num(c);if(c==null)return"—";return c>0?"+"+usd(c):usd(c)}
 function fig(c,dollar,plus){c=num(c);if(c==null)return"—"+IP;var s=(dollar?"$":"")+grp(Math.abs(c)/100,2);return c<0?"("+s+")":(plus&&c>0?"+":"")+s+IP}
 function cls(v){v=num(v);return v==null||v===0?"mu":v>0?"up":"dn"}
+/* the engine tag beside a strategy's name. The second engine is the untagged default, as it always was; the first and the third (and any later one) are named, because "Scalper" alone would be two different things */
+function etag(e){e=str(e);return e&&e!=="v2"?'<span class="tag">'+esc(e)+"</span>":""}
 function pct(p,d){p=num(p);if(p==null)return"—";var s=Math.abs(p).toFixed(d==null?2:d)+"%";return p<0?"("+s+")":p>0?"+"+s:s}
 function px(v,d){v=num(v);d=num(d);return v==null?"—":grp(v,d==null?2:Math.max(0,Math.min(10,d)))}
 function fx(v,d){v=num(v);return v==null?"—":v.toFixed(d)}
@@ -400,6 +403,8 @@ function renderAlerts(){var h=S.home||{},out="",raw=arr(h.halted),hn=haltedNames
   setHTML($("alerts"),out)}
 
 /* ---------- home: lede, composition, rail ---------- */
+/* words of the page's own for composition lines, by key; the label is the API's, these are only the fallback and the small note under a line */
+var COMP_LABELS={v3:"Third engine"},COMP_NOTES={anti:"a measurement, not a competitor",v3:"honest fills: only what the recorded book displayed"};
 function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.total:{};renderDateline();renderAlerts();
   var v=num(t.value_cents);
   if(v==null)setHTML($("total"),"—");else{var s=grp(Math.abs(v)/100,2),i=s.lastIndexOf(".");setHTML($("total"),(v<0?"(":"")+'<span class="cur">$</span>'+s.slice(0,i)+"<small>"+s.slice(i)+(v<0?")":"")+"</small>")}
@@ -413,8 +418,12 @@ function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.to
   var sp=sparkPath(h.series,300,34);
   setHTML($("spark"),sp?'<svg class="spark" viewBox="0 0 300 34" preserveAspectRatio="none" role="img" aria-label="Total value over the period"><line x1="0" x2="300" y1="'+sp.y0.toFixed(1)+'" y2="'+sp.y0.toFixed(1)+'" stroke="var(--rule)" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/><path d="'+sp.d+'" fill="none" stroke="var(--ink)" stroke-opacity=".55" stroke-width="1.25" vector-effect="non-scaling-stroke"/></svg>':"");
   var rows='<div class="row hd"><span class="k">Composition</span><span class="k e">Earned</span><span class="k v">Value</span></div>';
-  rows+=objs(h.composition).map(function(r){var anti=r.key==="anti";
-    return'<div class="row"><span>'+esc(r.label||r.key||"—")+(num(r.buckets)!=null?' <span class="n">'+r.buckets+"</span>":"")+'</span><span class="f e '+cls(r.earned_cents)+'">'+fig(r.earned_cents,0,1)+'</span><span class="f v">'+fig(r.value_cents)+"</span>"+(anti?'<span class="note">a measurement, not a competitor</span>':"")+"</div>"}).join("");
+  /* the lines are whatever the API sends, in its order; a line the page has no words for still shows, under its label or key.
+     A group that has never had anything in it (the third engine before it is staked: no live bucket, value 0, earned 0) is a quiet line:
+     all grey, figures as sent. buckets counts LIVE buckets only, so a group whose buckets all ran out and were frozen also has 0 of them,
+     but its earned figure is its real result: that line is drawn normally, its loss in the loss colour, and says the buckets are closed */
+  rows+=objs(h.composition).map(function(r){var note=COMP_NOTES[r.key],b0=num(r.buckets)===0,none=b0&&!num(r.value_cents)&&!num(r.earned_cents),closed=b0&&!none;
+    return'<div class="row'+(none?" quiet":"")+'"><span>'+esc(r.label||COMP_LABELS[r.key]||r.key||"—")+(num(r.buckets)!=null?' <span class="n">'+r.buckets+"</span>":"")+'</span><span class="f e '+cls(r.earned_cents)+'">'+fig(r.earned_cents,0,1)+'</span><span class="f v">'+fig(r.value_cents)+"</span>"+(note?'<span class="note">'+note+(none&&r.key==="v3"?" · no buckets yet":closed?" · all buckets closed":"")+"</span>":"")+"</div>"}).join("");
   rows+='<div class="row sum"><span>Total value</span><span class="f e '+c+'">'+fig(e,0,1)+'</span><span class="f v">'+fig(t.value_cents,1)+'</span></div><hr class="dbl" style="margin:0">';
   rows+='<p class="memo"><i>Memo, outside the sum:</i><span>at risk <span class="f">'+fig(t.at_risk_cents)+'</span></span><span>unrealised <span class="f '+cls(t.unrealized_cents)+'">'+fig(t.unrealized_cents,0,1)+'</span></span><span>venue fees paid <span class="f">'+fig((h.money||{}).venue_fees_paid_cents)+"</span></span></p>";
   setHTML($("comp"),rows);renderRail()}
@@ -462,7 +471,7 @@ function renderBox(){var a=assetOf(S.coin)||{},d=S.asset||{};
   else{var CAP=5,show=S.allBets||keys.length<=CAP+1?keys:keys.slice(0,CAP);
     out+="<table><thead><tr><th>Open bets, by strategy</th><th>Cost</th><th>Now</th></tr></thead><tbody>";
     show.forEach(function(k){var o=g[k],p=o.p,dn=o.nov||o.nocost?null:o.val-o.cost;
-      out+="<tr><td>"+esc(str(p.strategy)||"—")+(p.world==="anti"?'<span class="tag">anti</span>':"")+(p.engine==="v1"?'<span class="tag">v1</span>':"")+
+      out+="<tr><td>"+esc(str(p.strategy)||"—")+(p.world==="anti"?'<span class="tag">anti</span>':"")+etag(p.engine)+
         "<small>"+esc(str(p.side)||"—")+" · "+(o.ct?o.ct:"—")+" @ "+(o.ct&&!o.noc?fx(o.pw/o.ct,2):"—")+'</small></td><td class="f">'+fig(o.nocost?null:o.cost)+'</td><td class="f '+cls(dn)+'">'+(o.nov?"—"+IP:fig(o.val))+"</td></tr>"});
     out+="</tbody></table>";
     if(keys.length>CAP+1)out+='<button type="button" class="more" data-k="more">'+(S.allBets?"Show fewer":"Show all "+keys.length+" lines")+"</button>"}
@@ -481,7 +490,7 @@ function renderCaption(){var a=assetOf(S.coin)||{},d=S.asset||{},r=d.round&&type
     else out="No prices on record for this range yet."}
   setHTML($("cap"),out);
   var mk=objs(d.markers).filter(function(m){return num(m.t)!=null&&num(m.price)!=null}),names={};mk.forEach(function(m){if(str(m.strategy))names[m.strategy]=1});var ini=initials(Object.keys(names).sort()),near=nearMarkers();
-  if(near.length)setHTML($("leg"),"<b>At "+clock(near[0].t,1)+":</b> "+near.slice(0,6).map(function(m){return esc(str(m.strategy)||"—")+(m.world==="anti"?" (anti)":"")+" "+(m.kind&&m.kind!=="bet"?"sold ":"")+esc(str(m.side))}).join(" · ")+(near.length>6?" · and "+(near.length-6)+" more":""));
+  if(near.length)setHTML($("leg"),"<b>At "+clock(near[0].t,1)+":</b> "+near.slice(0,6).map(function(m){return esc(str(m.strategy)||"—")+(m.world==="anti"?" (anti)":"")+(str(m.engine)&&m.engine!=="v2"?" ("+esc(m.engine)+")":"")+" "+(m.kind&&m.kind!=="bet"?"sold ":"")+esc(str(m.side))}).join(" · ")+(near.length>6?" · and "+(near.length-6)+" more":""));
   else setHTML($("leg"),mk.length?"▲ bet UP · ▼ bet DOWN · □ early sale · hollow = anti-world twin · ×n = several together; touch the chart to read them"+(Object.keys(ini).length?" · ":"")+Object.keys(ini).map(function(n){return"<b>"+esc(ini[n])+"</b> "+esc(n)}).join(", "):"")}
 
 function drawChart(){var cv=$("cv");if(!cv||S.pane!=="home")return;var W=cv.clientWidth,H=cv.clientHeight;if(!W||!H)return;
@@ -557,12 +566,13 @@ function bucketRow(b,D){var eq=num(b.equity_cents),seed=num(b.seed_cents),hw=num
 function pc(bps){return(bps/100).toFixed(bps%100?2:0)+"%"}
 function renderBuckets(){var el=$("p-buckets"),d=S.buckets;
   if(!d){setHTML(el,'<p class="empty" style="margin-top:14px">'+(S.fail.buckets?"No answer from api/buckets yet. Trying again shortly.":"Reading the buckets…")+"</p>");return}
-  var bs=objs(d.buckets),G=[["strategies","Strategies","",[]],["anti","Anti-world twins","a measurement, not a competitor",[]],["v1","First engine","v1",[]]],D=.1;
-  bs.forEach(function(b){G[b.engine==="v1"?2:b.world==="anti"?1:0][3].push(b);var s=num(b.seed_cents);if(s&&b.status!=="frozen"){[b.equity_cents,b.high_water_cents].forEach(function(v){if(num(v)!=null)D=Math.max(D,Math.abs(v/s-1))})}});
+  var bs=objs(d.buckets),G=[["strategies","Strategies","",[]],["anti","Anti-world twins","a measurement, not a competitor",[]],["v1","First engine","v1",[]],["v3","Third engine","v3 · honest fills",[]]],D=.1;
+  /* the third engine's group, and its jump button, are shown only when it has buckets: before it is staked the pane is exactly the three groups it always was */
+  bs.forEach(function(b){G[b.engine==="v3"?3:b.engine==="v1"?2:b.world==="anti"?1:0][3].push(b);var s=num(b.seed_cents);if(s&&b.status!=="frozen"){[b.equity_cents,b.high_water_cents].forEach(function(v){if(num(v)!=null)D=Math.max(D,Math.abs(v/s-1))})}});
   var cut=D*1.05>.5;D=Math.min(.5,Math.ceil(D*1.05*20)/20);
   var out='<div class="lede"><span class="k">The money story</span><h2 style="font-size:26px;margin-top:3px">Buckets</h2><p class="what">Bar: equity against seed. The centre tick <b style="font-style:normal">|</b> is the seed, the fill runs from it to equity, and the bracket <b style="font-style:normal">]</b> marks high water. Every bar spans ±'+Math.round(D*100)+"% of seed"+(cut?"; a bar that reaches the edge is cut off there":"")+". “Allocated” is the sustainment allocation taken to date.</p>"+[d.buckets_error,d.capital_error].filter(str).map(function(m){return'<p class="what"><b>Not current.</b> '+esc(m)+"</p>"}).join("")+
-    '<div class="jump" role="group" aria-label="Jump to">'+[["g0","Strategies"],["g1","Anti-world"],["g2","First engine"],["rule","Allocation rule"],["money","Set aside"],["ev","Notices"]].map(function(j){return'<button type="button" data-k="j'+j[0]+'" data-j="j-'+j[0]+'">'+j[1]+"</button>"}).join("")+'</div></div><div class="cols">';
-  G.forEach(function(g,gi){var eq=0,seed=0,al=0,live=0,fz=0;g[3].forEach(function(b){al+=num(b.allocated_cents)||0;if(b.status==="frozen"){fz++;return}live++;eq+=num(b.equity_cents)||0;seed+=num(b.seed_cents)||0});
+    '<div class="jump" role="group" aria-label="Jump to">'+[["g0","Strategies"],["g1","Anti-world"],["g2","First engine"]].concat(G[3][3].length?[["g3","Third engine"]]:[],[["rule","Allocation rule"],["money","Set aside"],["ev","Notices"]]).map(function(j){return'<button type="button" data-k="j'+j[0]+'" data-j="j-'+j[0]+'">'+j[1]+"</button>"}).join("")+'</div></div><div class="cols">';
+  G.forEach(function(g,gi){if(g[0]==="v3"&&!g[3].length)return;var eq=0,seed=0,al=0,live=0,fz=0;g[3].forEach(function(b){al+=num(b.allocated_cents)||0;if(b.status==="frozen"){fz++;return}live++;eq+=num(b.equity_cents)||0;seed+=num(b.seed_cents)||0});
     out+='<details class="grp sec" id="j-g'+gi+'" data-g="'+g[0]+'"'+(S.fold[g[0]]?"":" open")+'><summary data-k="sum'+gi+'"><h2>'+g[1]+(g[2]?" <small>"+g[2]+"</small>":"")+'</h2><span class="f">'+(g[3].length?usd(eq):"—")+"</span></summary>"+
       (g[3].length?g[3].map(function(b){return bucketRow(b,D)}).join("")+'<div class="gsum"><span>'+live+" live bucket"+(live===1?"":"s")+(fz?" · "+fz+" closed":"")+"<small>live seed "+usd(seed)+" · allocated to date "+usd(al)+'</small></span><span class="f">'+usd(eq)+"</span></div>":'<p class="empty">None deployed.</p>')+"</details>"});
   out+="</div>";
@@ -632,7 +642,7 @@ function renderEvidence(){var el=$("p-evidence"),d=S.analysis;
   var f=d.fills&&typeof d.fills==="object"?d.fills:{},fr=objs(f.by_strategy),sold=fr.filter(function(r){return num(r.sells)>0}),none=fr.filter(function(r){return!(num(r.sells)>0)});
   out+='<div><div class="sec" style="margin-top:10px"><span class="k">Fill realism</span><h2>Would those sales have filled?</h2><p class="what">'+esc(str(f.what))+"</p>";
   if(sold.length){var nod=0,tot=0;out+='<div class="scroll"><table><thead><tr><th>Strategy</th><th>Sells</th><th>Beyond bid</th><th>Sale P&amp;L</th><th>If capped</th></tr></thead><tbody>'+sold.map(function(r){nod+=num(r.sells_without_depth)||0;tot+=r.sells;
-      return"<tr><td>"+esc(str(r.strategy)||"—")+(r.world==="anti"?'<span class="tag">anti</span>':"")+(r.engine==="v1"?'<span class="tag">v1</span>':"")+'</td><td class="f">'+r.sells+(num(r.sells_without_depth)?'<span class="mu">†</span>':'<span class="ip">†</span>')+'</td><td class="f">'+(num(r.share_beyond)==null?"—":Math.round(r.share_beyond*100)+"%")+'</td><td class="f '+cls(r.sale_pnl_cents)+'">'+fig(r.sale_pnl_cents)+'</td><td class="f '+cls(r.sale_pnl_capped_cents)+'">'+fig(r.sale_pnl_capped_cents)+"</td></tr>"}).join("")+"</tbody></table></div>";
+      return"<tr><td>"+esc(str(r.strategy)||"—")+(r.world==="anti"?'<span class="tag">anti</span>':"")+etag(r.engine)+'</td><td class="f">'+r.sells+(num(r.sells_without_depth)?'<span class="mu">†</span>':'<span class="ip">†</span>')+'</td><td class="f">'+(num(r.share_beyond)==null?"—":Math.round(r.share_beyond*100)+"%")+'</td><td class="f '+cls(r.sale_pnl_cents)+'">'+fig(r.sale_pnl_cents)+'</td><td class="f '+cls(r.sale_pnl_capped_cents)+'">'+fig(r.sale_pnl_capped_cents)+"</td></tr>"}).join("")+"</tbody></table></div>";
     if(nod)out+='<p class="what">† '+nod+" of "+tot+" sales were made before order-book depth was recorded. They are counted, never guessed at, so “if capped” covers only the rest.</p>"}
   if(none.length)out+='<p class="what" style="font-style:normal"><b>No early sales yet:</b> '+none.map(sname).join(" · ")+".</p>";
   if(!fr.length)out+='<p class="empty">No early sales on record yet.</p>';

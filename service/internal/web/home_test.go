@@ -59,6 +59,7 @@ func TestEarned(t *testing.T) {
 type fakeHistory struct {
 	totals []store.ValueSnapshot
 	fail   error
+	groups map[string]store.ValueSnapshot // the group rows of every batch; nil means the one lone row below
 }
 
 func (f fakeHistory) SnapshotAt(_ context.Context, _, _ string, t time.Time) (store.ValueSnapshot, bool, error) {
@@ -77,7 +78,16 @@ func (f fakeHistory) FirstSnapshot(context.Context, string, string) (store.Value
 	return f.totals[0], true, f.fail
 }
 
-func (f fakeHistory) SnapshotsTakenAt(_ context.Context, _ string, _ []string, at time.Time) (map[string]store.ValueSnapshot, error) {
+func (f fakeHistory) SnapshotsTakenAt(_ context.Context, _ string, keys []string, at time.Time) (map[string]store.ValueSnapshot, error) {
+	if f.groups != nil {
+		out := map[string]store.ValueSnapshot{}
+		for _, k := range keys { // like the database: only the keys asked for
+			if g, ok := f.groups[k]; ok {
+				out[k] = g
+			}
+		}
+		return out, nil
+	}
 	return map[string]store.ValueSnapshot{"strategies": {At: at, ValueCents: 600_000, ContributedCents: 600_000}}, nil
 }
 
@@ -188,7 +198,7 @@ func TestHomeBeforeAnythingExists(t *testing.T) {
 	if len(got.Series) != 1 || got.Series[0] != [2]int64{1_790_000_000, 0} {
 		t.Errorf("series %v, want only the value right now", got.Series)
 	}
-	if len(got.Composition) != 4 || got.Composition[0].Earned == nil || *got.Composition[0].Earned != 0 {
+	if len(got.Composition) != 5 || got.Composition[0].Earned == nil || *got.Composition[0].Earned != 0 || got.Composition[3].Key != "v3" {
 		t.Errorf("composition: %+v", got.Composition)
 	}
 	var order []string
@@ -258,9 +268,10 @@ func TestHomeAddsUp(t *testing.T) {
 	if len(got.Halted) != 1 || !strings.HasPrefix(got.Halted[0], "v1 KXBTC15M: ") {
 		t.Errorf("halted: %v", got.Halted)
 	}
-	// The fake history has a "strategies" group at that moment and no other: a group with no
-	// snapshot to compare with reports null, not a made-up zero.
-	if got.Composition[0].Earned == nil || got.Composition[2].Earned != nil {
+	// The fake history has a "strategies" group at that moment and no other, and that lone row
+	// does not add up to the batch's total: the batch is not whole, so a group with no snapshot
+	// to compare with reports null, not a made-up zero. The zero-baseline rule does not apply.
+	if got.Composition[0].Earned == nil || got.Composition[2].Earned != nil || got.Composition[3].Earned != nil {
 		t.Errorf("composition earned: %+v", got.Composition)
 	}
 	btc := got.Assets[0]
@@ -309,6 +320,11 @@ func TestBucketDocs(t *testing.T) {
 	}
 	if frozen["equity_cents"] != int64(0) || frozen["status"] != "frozen" || frozen["life"] != 1 {
 		t.Errorf("frozen: %v", frozen)
+	}
+	third := bucketDocs([]store.BucketRow{{ID: 50, Name: "kalshi15m3 Scalper v3", Status: "active", Strategy: "Scalper", Version: 3, Life: 1, CashCents: 100_000, SeedCents: 100_000}},
+		[]runner.Book{{Engine: "v3", Buckets: []runner.BucketBook{{BucketID: 50, Engine: "v3", World: "real", Version: 3, CashCents: 97_400, AtRiskCents: 2_600, MarkedCents: 2_450}}}})[0]
+	if third["engine"] != "v3" || third["world"] != "real" || third["equity_cents"] != int64(99_850) || third["high_water_cents"] != (*int64)(nil) {
+		t.Errorf("third engine: %v", third)
 	}
 	raw, _ := json.Marshal(bucketDocs(nil, nil))
 	if string(raw) != "[]" {
@@ -548,5 +564,180 @@ func TestRecordingError(t *testing.T) {
 		if c.want != "" && c.r.LastProblem != "" && !strings.Contains(got, c.r.LastProblem) {
 			t.Errorf("%s: the writer's reason is missing from %q", c.name, got)
 		}
+	}
+}
+
+// fourGroupWorld is a service with no third-engine bucket anywhere: one first-engine bucket, a
+// second-engine original and its twin, and the money buckets; and a value history whose batch of
+// two hours ago has the four groups a release before the third engine wrote.
+func fourGroupWorld(now time.Time) ([]runner.Book, store.Capital, fakeHistory) {
+	v, e := int64(620), int64(900)
+	books := []runner.Book{
+		{Engine: "v1", Series: "KXBTC15M", Buckets: []runner.BucketBook{{BucketID: 1, Name: "KXBTC15M Value v1", Strategy: "Value", Engine: "v1", World: "real", CashCents: 14_000, AtRiskCents: 500, MarkedCents: 620}},
+			Positions: []runner.Position{{Strategy: "Value", Engine: "v1", World: "real", Coin: "BTC", CostCents: 500, ValueCents: &v}}},
+		{Engine: "v2", Buckets: []runner.BucketBook{
+			{BucketID: 30, Name: "kalshi15m2 Model v2", Strategy: "Model", Engine: "v2", World: "real", CashCents: 98_000, AtRiskCents: 1_200, MarkedCents: 900},
+			{BucketID: 20, Name: "kalshi15m2 Anti Model v2", Strategy: "Model", Engine: "v2", World: "anti", CashCents: 101_000},
+		}, Positions: []runner.Position{{Strategy: "Model", Engine: "v2", World: "real", Coin: "ETH", CostCents: 1_200, ValueCents: &e}}},
+	}
+	capital := store.Capital{ReadAt: now, Money: store.MoneyBuckets{Winnings: 1_000, Replenishment: 41, TaxReserve: 300, External: 216_341},
+		Buckets: []store.BucketCapital{{ID: 1, Version: 1, ContributedCents: 15_000}, {ID: 30, Version: 2, ContributedCents: 100_000}, {ID: 20, Version: 2, Anti: true, ContributedCents: 100_000}}}
+	at := now.Add(-2 * time.Hour)
+	hist := fakeHistory{totals: []store.ValueSnapshot{{At: at, ValueCents: 216_000, ContributedCents: 216_341}},
+		groups: map[string]store.ValueSnapshot{
+			"strategies": {At: at, ValueCents: 99_500, ContributedCents: 100_000},
+			"anti":       {At: at, ValueCents: 100_200, ContributedCents: 100_000},
+			"v1":         {At: at, ValueCents: 14_959, ContributedCents: 15_000},
+			"money":      {At: at, ValueCents: 1_341, ContributedCents: 1_341}}}
+	return books, capital, hist
+}
+
+// withThirdEngine stakes the third engine's two buckets in that world ($1,000 each, from
+// outside) and gives one of them a bet that is 150 cents under water at the bid.
+func withThirdEngine(books []runner.Book, capital store.Capital) ([]runner.Book, store.Capital) {
+	b := int64(2_450)
+	books = append(books, runner.Book{Engine: "v3", Buckets: []runner.BucketBook{
+		{BucketID: 50, Name: "kalshi15m3 Scalper v3", Strategy: "Scalper", Engine: "v3", World: "real", Version: 3, CashCents: 97_400, AtRiskCents: 2_600, MarkedCents: 2_450},
+		{BucketID: 51, Name: "kalshi15m3 Value v3", Strategy: "Value", Engine: "v3", World: "real", Version: 3, CashCents: 100_000},
+	}, Positions: []runner.Position{{Strategy: "Scalper", Engine: "v3", World: "real", Coin: "BTC", CostCents: 2_600, ValueCents: &b}}})
+	capital.Buckets = append(capital.Buckets, store.BucketCapital{ID: 50, Version: 3, ContributedCents: 100_000}, store.BucketCapital{ID: 51, Version: 3, ContributedCents: 100_000})
+	capital.Money.External += 200_000
+	return books, capital
+}
+
+type compositionDoc struct {
+	Total struct {
+		Value  int64  `json:"value_cents"`
+		Earned *int64 `json:"earned_cents"`
+	}
+	Composition []struct {
+		Key, Label string
+		Buckets    int
+		Value      int64  `json:"value_cents"`
+		Earned     *int64 `json:"earned_cents"`
+	}
+}
+
+func composed(t *testing.T, books []runner.Book, capital store.Capital, hist fakeHistory, now time.Time) (compositionDoc, []byte) {
+	t.Helper()
+	w, err := loadWindow(context.Background(), hist, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(homeDoc(testSources(books, capital), "1H", w, now, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc compositionDoc
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	return doc, raw
+}
+
+// THE RELEASE CHECK. homeBeforeThirdEngine is the document that commit fdef006, the last one
+// before the fifth group, served for fourGroupWorld: it was produced by running that commit's
+// homeDoc on the same books, capital and history, not written by hand. With no third-engine
+// bucket the document of today must be that one, byte for byte, plus exactly one composition line.
+const homeBeforeThirdEngine = `{"as_of":1790000000,"assets":[{"change_pct":null,"coin":"BTC","colour":"#F7931A","decimals":2,"earned_cents":-420,"name":"Bitcoin","open_bets":1,"price":81234.56,"price_age_s":0.2,"round":{"closes":1790000700,"strike":81300.12,"ticker":"KXBTC15M-26SEP210345-45","yes_ask":0.43,"yes_bid":0.41},"sign":"₿","stake_cents":500,"stake_value_cents":620,"unmarked_bets":0},{"change_pct":null,"coin":"ETH","colour":"#8FA2F2","decimals":2,"earned_cents":0,"name":"Ethereum","open_bets":1,"price":null,"price_age_s":null,"round":null,"sign":"Ξ","stake_cents":1200,"stake_value_cents":900,"unmarked_bets":0},{"change_pct":null,"coin":"SOL","colour":"#14F195","decimals":4,"earned_cents":0,"name":"Solana","open_bets":0,"price":null,"price_age_s":null,"round":null,"sign":"≡","stake_cents":0,"stake_value_cents":0,"unmarked_bets":0},{"change_pct":null,"coin":"XRP","colour":"#4FC3F7","decimals":4,"earned_cents":0,"name":"XRP","open_bets":0,"price":null,"price_age_s":null,"round":null,"sign":"✕","stake_cents":0,"stake_value_cents":0,"unmarked_bets":0},{"change_pct":null,"coin":"DOGE","colour":"#E3C044","decimals":6,"earned_cents":0,"name":"Dogecoin","open_bets":0,"price":null,"price_age_s":null,"round":null,"sign":"Ð","stake_cents":0,"stake_value_cents":0,"unmarked_bets":0}],"composition":[{"buckets":1,"earned_cents":-600,"key":"strategies","label":"Strategies","value_cents":98900},{"buckets":1,"earned_cents":800,"key":"anti","label":"Anti-world twins","value_cents":101000},{"buckets":1,"earned_cents":-339,"key":"v1","label":"First engine","value_cents":14620},{"buckets":4,"earned_cents":0,"key":"money","label":"Money buckets","value_cents":1341}],"halted":[],"healthy":true,"money":{"deployed_cents":213000,"fee_reserve_cents":0,"replenishment_cents":41,"tax_reserve_cents":300,"venue_fees_paid_cents":0,"winnings_cents":1000},"release":"test","series":[[1789992800,216000],[1790000000,215861]],"simulated":true,"total":{"at_risk_cents":1700,"contributed_cents":216341,"earned_cents":-139,"earned_pct":-0.06435185185185185,"lifetime_earned_cents":-480,"range":"1H","since":1789992800,"unmarked_bets":0,"unrealized_cents":-180,"value_cents":215861,"window_complete":true}}`
+
+const emptyThirdEngineLine = `{"buckets":0,"earned_cents":0,"key":"v3","label":"Third engine","value_cents":0},`
+
+func TestNoThirdEngineBucketsLeavesTheDocumentAsItWas(t *testing.T) {
+	now := time.Unix(1_790_000_000, 0)
+	books, capital, hist := fourGroupWorld(now)
+
+	// Compared with a batch a release before the third engine wrote: four group rows.
+	_, raw := composed(t, books, capital, hist, now)
+	if n := strings.Count(string(raw), emptyThirdEngineLine); n != 1 {
+		t.Fatalf("the empty third engine line appears %d times in %s", n, raw)
+	}
+	if got := strings.Replace(string(raw), emptyThirdEngineLine, "", 1); got != homeBeforeThirdEngine {
+		t.Errorf("with the third engine's line taken out the document is not the one served before it existed:\n got %s\nwant %s", got, homeBeforeThirdEngine)
+	}
+	if !strings.Contains(string(raw), `"key":"v1","label":"First engine","value_cents":14620},`+emptyThirdEngineLine+`{"buckets":4,"earned_cents":0,"key":"money"`) {
+		t.Errorf("the third engine's line is not between the first engine and the money buckets: %s", raw)
+	}
+
+	// And with a batch this release wrote: the same four rows and an all-zero fifth.
+	hist.groups["v3"] = store.ValueSnapshot{At: hist.totals[0].At}
+	_, again := composed(t, books, capital, hist, now)
+	if string(again) != string(raw) {
+		t.Errorf("a batch with an all-zero third engine row changed the document:\n got %s\nwant %s", again, raw)
+	}
+}
+
+func TestFiveGroupsAddUpToTheTotal(t *testing.T) {
+	now := time.Unix(1_790_000_000, 0)
+	books, capital, hist := fourGroupWorld(now)
+	books, capital = withThirdEngine(books, capital)
+	// A batch written after the third engine was staked: five rows, and the total with it.
+	hist.totals[0].ValueCents, hist.totals[0].ContributedCents = 216_000+200_000, 216_341+200_000
+	hist.groups["v3"] = store.ValueSnapshot{At: hist.totals[0].At, ValueCents: 200_000, ContributedCents: 200_000}
+
+	doc, raw := composed(t, books, capital, hist, now)
+	var keys []string
+	var value, earnedSum int64
+	for _, c := range doc.Composition {
+		keys = append(keys, c.Key)
+		value += c.Value
+		if c.Earned == nil {
+			t.Fatalf("%s earned null: %s", c.Key, raw)
+		}
+		earnedSum += *c.Earned
+	}
+	if strings.Join(keys, " ") != "strategies anti v1 v3 money" {
+		t.Errorf("composition order: %v", keys)
+	}
+	if value != doc.Total.Value || doc.Total.Value != 215_861+199_850 {
+		t.Errorf("composition adds up to %d, total is %d", value, doc.Total.Value)
+	}
+	if doc.Total.Earned == nil || earnedSum != *doc.Total.Earned || earnedSum != -139-150 {
+		t.Errorf("composition earned adds up to %d, total earned %v, want -289", earnedSum, doc.Total.Earned)
+	}
+	third := doc.Composition[3]
+	if third.Label != "Third engine" || third.Buckets != 2 || third.Value != 199_850 || *third.Earned != -150 {
+		t.Errorf("third engine line: %+v", third)
+	}
+}
+
+// The zero-baseline rule. A range that starts before the third engine existed is compared with
+// a batch that has no row for it. Its earned figure is then everything it has earned (value less
+// contributed), never null and never the false step of its whole stake; and the five lines still
+// add up to the total's earned, which is measured against the same batch.
+func TestARangeFromBeforeTheThirdEngineShowsFigures(t *testing.T) {
+	now := time.Unix(1_790_000_000, 0)
+	books, capital, hist := fourGroupWorld(now)
+	books, capital = withThirdEngine(books, capital) // the batch of two hours ago stays a four-group one
+
+	doc, raw := composed(t, books, capital, hist, now)
+	var earnedSum int64
+	for _, c := range doc.Composition {
+		if c.Earned == nil {
+			t.Fatalf("%s earned null over a range that starts before the third engine: %s", c.Key, raw)
+		}
+		earnedSum += *c.Earned
+	}
+	if third := doc.Composition[3]; third.Key != "v3" || *third.Earned != -150 {
+		t.Errorf("third engine earned %d, want -150 (199,850 marked less 200,000 put in), not its stake", *third.Earned)
+	}
+	if doc.Total.Earned == nil || *doc.Total.Earned != -139-150 || earnedSum != *doc.Total.Earned {
+		t.Errorf("total earned %v, composition adds up to %d, want -289", doc.Total.Earned, earnedSum)
+	}
+	for i, want := range []int64{-600, 800, -339} {
+		if got := *doc.Composition[i].Earned; got != want {
+			t.Errorf("%s earned %d, want %d: the third engine's arrival must not move it", doc.Composition[i].Key, got, want)
+		}
+	}
+	if money := doc.Composition[4]; money.Key != "money" || *money.Earned != 0 {
+		t.Errorf("money earned %d: the third engine's seed came from outside and must not read as the money buckets' loss", *money.Earned)
+	}
+
+	// The rule rests on the batch being whole. One whose rows do not add up to its total has
+	// lost something, and a group missing from it is unknown, not new.
+	delete(hist.groups, "anti")
+	doc, _ = composed(t, books, capital, hist, now)
+	if doc.Composition[3].Earned != nil || doc.Composition[1].Earned != nil || doc.Composition[0].Earned == nil {
+		t.Errorf("a batch that does not add up: %+v", doc.Composition)
 	}
 }

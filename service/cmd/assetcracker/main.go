@@ -25,6 +25,7 @@ import (
 	"github.com/doipster/asset_cracker/service/internal/health"
 	"github.com/doipster/asset_cracker/service/internal/kalshi"
 	"github.com/doipster/asset_cracker/service/internal/kalshi15m2"
+	"github.com/doipster/asset_cracker/service/internal/kalshi15m3"
 	"github.com/doipster/asset_cracker/service/internal/runner"
 	"github.com/doipster/asset_cracker/service/internal/store"
 	"github.com/doipster/asset_cracker/service/internal/web"
@@ -124,9 +125,51 @@ func run() error {
 	for _, r := range runners {
 		heldByV1 = append(heldByV1, r.BucketIDs()...)
 	}
+	// The third engine, BEFORE the second: the buckets it holds must be in the list the second
+	// engine's first capital read is given, or a freshly seeded v3 bucket would read as $1,000
+	// earned. The list never changes while the service runs. It is built also with AC_V3 off,
+	// because a bet v3 already holds must still be valued and settled; with AC_V3 off and no v3
+	// bucket there is no third engine (run3 stays nil) and the service behaves as it did before.
+	// Not being able to FIND OUT what v3 holds is a failed start (docs/honest-fills-v3.md, 5.4).
+	var coins3 []runner.Coin3
+	coin3Of := map[string]string{} // series -> coin, for the ones v3 looks at
+	for _, in := range instruments {
+		if on, _ := in.Spec["v3"].(bool); !on || in.Source != "kalshi" {
+			continue
+		}
+		num := func(key string, fallback float64) float64 {
+			if v, ok := in.Spec[key].(float64); ok {
+				return v
+			}
+			return fallback
+		}
+		priceFrom, _ := in.Spec["price_from"].(string)
+		coins3 = append(coins3, runner.Coin3{Coin: in.Underlying, Series: in.Symbol, Product: strings.TrimPrefix(priceFrom, "coinbase:"),
+			Cal: kalshi15m3.Calibration{OffsetPct: num("index_offset_pct", 0.000057), SDPct: num("index_sd_pct", 0.000144),
+				DefaultSigma: num("default_sigma", 8e-5), Decimals: int(num("decimals", 2))}})
+		coin3Of[in.Symbol] = in.Underlying
+	}
+	faults := runner.Faults{Every: cfg.V3Faults.Every, Run: cfg.V3Faults.Run, Kind: cfg.V3Faults.Kind, DelayCommit: cfg.V3Faults.DelayCommit, Ops: cfg.V3Faults.Ops}
+	switch {
+	case faults.On() && !runner.FaultInjectionBuilt:
+		slog.Warn("AC_V3_FAIL_* is set and IGNORED: this binary was not built with the faultinject tag")
+	case faults.On() && !strings.HasSuffix(cfg.DatabaseName(), "_dev"):
+		return fmt.Errorf("fault injection is switched on against database %q, which is not a *_dev one: refusing to start", cfg.DatabaseName())
+	}
+	run3, err := runner.NewRunner3(ctx, runner.WrapStore3(db, faults), coins3, runner.Options3{On: cfg.V3, DatabaseName: cfg.DatabaseName()})
+	if err != nil {
+		return err
+	}
+	heldElsewhere := heldByV1
+	if run3 != nil {
+		heldElsewhere = append(append([]int64{}, heldByV1...), run3.BucketIDs()...)
+		run3.Seed(ctx, client, cfg.UserAgent)
+		wg.Add(1)
+		go func() { defer wg.Done(); run3.Run(ctx) }() // heal, write-probe, sweep, cash check: v3's own goroutine
+	}
 	var run2 *runner.Runner2
 	if len(coins2) > 0 {
-		if run2, err = runner.NewRunner2(ctx, db, coins2, heldByV1); err != nil {
+		if run2, err = runner.NewRunner2(ctx, db, coins2, heldElsewhere); err != nil {
 			return err
 		}
 		run2.Seed(ctx, client, cfg.UserAgent)
@@ -148,6 +191,11 @@ func run() error {
 				}
 				if run2 != nil {
 					run2.Observe(t)
+				}
+				if run3 != nil {
+					// After v1's and v2's. It takes the model's own small mutex only, never the lock v3
+					// holds across a database write, so a slow database cannot back this stream up.
+					safely("v3 observe", func() { run3.Observe(t) })
 				}
 				select {
 				case trades <- t:
@@ -175,7 +223,8 @@ func run() error {
 		priceFrom, _ := in.Spec["price_from"].(string) // "coinbase:BTC-USD"
 		p := &kalshi.Poller{
 			Client: client, Series: in.Symbol, Round: round,
-			Sink: &sink{db: db, instrumentID: in.ID, latest: latest, product: strings.TrimPrefix(priceFrom, "coinbase:"), run: runners[in.Symbol], run2: run2, coin: coinOf[in.Symbol]},
+			Sink: &sink{db: db, instrumentID: in.ID, latest: latest, product: strings.TrimPrefix(priceFrom, "coinbase:"), run: runners[in.Symbol], run2: run2, coin: coinOf[in.Symbol],
+				run3: run3, coin3: coin3Of[in.Symbol]},
 		}
 		pollers[in.Symbol] = p
 		wg.Add(1)
@@ -233,7 +282,7 @@ func run() error {
 	// runs (it seeds, reaps and takes allocations; the first engine does none of these), so its
 	// book and the capital are read under one hold of its lock and can never be from either side
 	// of such an event.
-	capitalWithoutV2 := ledgerCapital(db, heldByV1)
+	capitalWithoutV2 := ledgerCapital(db, heldElsewhere)
 	src.Books = func() ([]runner.Book, store.Capital, bool) {
 		books := []runner.Book{}
 		for _, in := range instruments { // in instrument order, so the list does not shuffle between calls
@@ -241,12 +290,26 @@ func run() error {
 				books = append(books, r.Book())
 			}
 		}
+		// The third engine's book is read apart from the capital, and may be: v3 seeds, reaps and
+		// allocates nothing while the service runs, so the capital cannot move because of it.
+		var capital store.Capital
+		var ok bool
 		if run2 == nil {
-			capital, ok := capitalWithoutV2()
-			return books, capital, ok
+			capital, ok = capitalWithoutV2()
+		} else {
+			var book runner.Book
+			book, capital, ok = run2.BookAndCapital()
+			books = append(books, book)
 		}
-		book, capital, ok := run2.BookAndCapital()
-		return append(books, book), capital, ok
+		if run3 != nil {
+			// This runs on the snapshot writer's goroutine, which has no recover: the second fence.
+			// Book stops its own panics; if one got past it anyway, the book says HALTED, so the
+			// minute is refused rather than written without v3's buckets in it.
+			book := runner.Book{Engine: "v3", Halted: "a panic escaped v3's Book"}
+			safely("v3 book", func() { book = run3.Book() })
+			books = append(books, book)
+		}
+		return books, capital, ok
 	}
 	src.Markers = func(coin string, since float64) []runner.Marker {
 		var out []runner.Marker
@@ -255,6 +318,9 @@ func run() error {
 		}
 		if run2 != nil {
 			out = append(out, run2.Markers(coin, since)...)
+		}
+		if run3 != nil {
+			safely("v3 markers", func() { out = append(out, run3.Markers(coin, since)...) })
 		}
 		return out
 	}
@@ -324,7 +390,7 @@ func run() error {
 			case <-ctx.Done():
 				return
 			case now := <-t.C:
-				err := snapshotValues(ctx, db, src, run2, now)
+				err := snapshotValues(ctx, db, src, run2, run3, now)
 				switch {
 				case errors.Is(err, runner.ErrAwaitingSettlement): // routine: a minute that fell between a close and its settlement
 					slog.Warn("value snapshot skipped", "why", err)
@@ -354,6 +420,15 @@ func run() error {
 				doc["engines"] = engines
 				if run2 != nil {
 					doc["v2"] = run2.Snapshot()
+				}
+				// The third engine: state, what may order per bucket, skipped_busy, the last rebuild,
+				// the paper holds, and what is waiting for a restart.
+				if run3 != nil {
+					sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+					doc["v3"] = run3.Snapshot(sctx)
+					cancel()
+				} else {
+					doc["v3"] = map[string]any{"engine": "v3", "state": "absent", "on": cfg.V3, "reason": "AC_V3 is off and no v3 bucket exists"}
 				}
 				return doc
 			}, src)
@@ -399,7 +474,15 @@ func ledgerCapital(db *store.Store, held []int64) func() (store.Capital, bool) {
 // gap in the chart is honest where a false step is not. So nothing is written while the
 // contributed figure might be stale, while an engine is halted, or while an open bet's round
 // has closed and not yet settled (runner.SnapshotRefusal says why for the last two).
-func snapshotValues(ctx context.Context, db *store.Store, src web.Sources, run2 *runner.Runner2, now time.Time) error {
+func snapshotValues(ctx context.Context, db *store.Store, src web.Sources, run2 *runner.Runner2, run3 *runner.Runner3, now time.Time) error {
+	if run3 != nil {
+		// A suspended v3 blocks every engine's snapshot, so it is given the chance to heal first:
+		// rebuild, and only if that succeeded, settle what closed meanwhile. The same 3 s the
+		// capital read below gets. Its reads are made outside v3's lock.
+		hctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		safely("v3 heal", func() { run3.Heal(hctx) })
+		cancel()
+	}
 	if run2 != nil {
 		if _, fresh := run2.Capital(); !fresh {
 			// Its own short budget: the engine's lock is not held across this read, but a
@@ -467,6 +550,21 @@ type sink struct {
 	run          *runner.Runner  // version 1 on this series, or nil
 	run2         *runner.Runner2 // version 2, shared by every coin it trades
 	coin         string          // set when version 2 trades this series
+	run3         *runner.Runner3 // version 3, or nil; nothing of it is ever returned to the poller
+	coin3        string          // set when version 3 looks at this series
+}
+
+// safely runs one call into the third engine on someone else's goroutine. The runner's entry
+// points recover their own panics and suspend v3; this is the second fence, so that whatever
+// goes wrong in v3 the poller, the price stream and the snapshot writer never see it. Nothing in
+// the first two engines' paths recovers a panic, so one that escaped would take the service down.
+func safely(what string, fn func()) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("a panic escaped the third engine and was stopped here", "in", what, "panic", p)
+		}
+	}()
+	fn()
 }
 
 // price is the latest trade price, or "" if it is stale: a stale price is worse than none.
@@ -492,8 +590,19 @@ func (s *sink) SaveQuotes(ctx context.Context, at time.Time, marketID int64, m k
 	if t, ok := s.latest.Get(s.product); ok {
 		model["price_age_s"] = at.Sub(t.At).Seconds() // how old the print the model is pricing off is, by the exchange's clock
 	}
+	var v2in map[string]any
 	if s.run2 != nil && s.coin != "" {
-		model["v2"] = s.run2.Inputs(s.coin)
+		v2in = s.run2.Inputs(s.coin)
+		model["v2"] = v2in
+	}
+	if s.run3 != nil && s.coin3 != "" {
+		// Before the insert, and so before v1 and v2 step: it takes the model's small mutex only. It
+		// journals v3's model inputs every second, also when v3 may place no order.
+		safely("v3 inputs", func() {
+			if in := s.run3.Inputs(s.coin3, m, closes, at, price, v2in); in != nil {
+				model["v3"] = in
+			}
+		})
 	}
 	evalID, err := s.db.InsertEvaluation(ctx, at, marketID, price, q, model)
 	if err != nil {
@@ -507,6 +616,11 @@ func (s *sink) SaveQuotes(ctx context.Context, at time.Time, marketID int64, m k
 		if err := s.run2.Step(ctx, s.coin, evalID, at, marketID, m, closes, q, price); err != nil && first == nil {
 			first = err
 		}
+	}
+	if s.run3 != nil && s.coin3 != "" {
+		// LAST, whatever v1 and v2 returned, and nothing comes back: it gives up at once if v3's lock
+		// is busy (counted as skipped_busy in /api/status).
+		safely("v3 step", func() { s.run3.Step(ctx, s.coin3, evalID, at, marketID, m, closes, q, price) })
 	}
 	return first
 }
@@ -527,6 +641,12 @@ func (s *sink) SaveResult(ctx context.Context, marketID int64, m kalshi.MarketIn
 		if err2 := s.run2.Settled(ctx, s.coin, marketID, m, closes, s.price()); err == nil {
 			err = err2
 		}
+	}
+	if s.run3 != nil {
+		// LAST. For every series, not only v3's coins: a settle-only bucket may hold a bet on a coin
+		// whose flag was since removed. If v3 is busy or suspended this does nothing, and the sweep
+		// settles the position from market.result, which RecordResult stored above.
+		safely("v3 settled", func() { s.run3.Settled(ctx, s.coin3, marketID, m, closes) })
 	}
 	return true, err
 }
