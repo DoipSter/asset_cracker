@@ -90,6 +90,15 @@ TAB = 16  # the side button sticks out this far past the phone's right edge
 # of the coin pills below. They used to sit in the pills' row, where the world toggle landed
 # on top of the first coin.
 TOP_ROW_Y = 36
+
+# The chart card, split between the price plot and the order book beneath it. One place, so
+# the two cannot drift into each other: PLOT_FOOT is the low/high caption line between them.
+PLOT_L, PLOT_R, PLOT_T, PLOT_B = 46, W - 46, 322, 470
+PLOT_FOOT = 486
+DEPTH_T, DEPTH_B = 500, 566
+# How far either side of the touch the book panel looks. Wide enough to hold the walls that
+# actually matter and narrow enough that they are not a smear against the axis.
+DEPTH_SPAN_PCT = 0.004
 SIDE = 360  # the side panel is a square this big
 
 
@@ -274,6 +283,68 @@ def stream_prices(on_price, on_offline, product="BTC-USD"):
             on_offline()
             time.sleep(2)
     _poll_prices(on_price, on_offline, product)
+
+
+BOOK_PRUNE_PCT = 0.02  # keep only levels within this much of spot; the rest is scenery
+
+
+def book_feed(on_book, on_offline, product="BTC-USD"):
+    """Coinbase's aggregated order book, live.
+
+    Uses `level2_batch` rather than `level2`: the latter requires credentials and refuses an
+    anonymous subscription outright. The batched one carries the same data every ~50ms.
+
+    Hands the caller a plain {price: size} pair of dicts. It never yields the raw 40,000-level
+    snapshot -- levels further than BOOK_PRUNE_PCT from the touch are dropped as they arrive,
+    because nothing draws them and keeping them costs memory on five coins at once.
+    """
+    failures = 0
+    while failures < 3:
+        bids, asks = {}, {}
+        try:
+            sock = _ws_connect()
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.settimeout(20)
+            _ws_send(sock, json.dumps(
+                {"type": "subscribe", "product_ids": [product],
+                 "channels": ["level2_batch"]}).encode())
+            last_sent = 0.0
+            while True:
+                msg = json.loads(_ws_read(sock))
+                kind = msg.get("type")
+                if kind == "error":
+                    raise ConnectionError(msg.get("message", "subscribe refused"))
+                if kind == "snapshot":
+                    bids = {float(p): float(q) for p, q in msg.get("bids", []) if float(q)}
+                    asks = {float(p): float(q) for p, q in msg.get("asks", []) if float(q)}
+                elif kind == "l2update":
+                    for side, price, size in msg.get("changes", []):
+                        book = bids if side == "buy" else asks
+                        price, size = float(price), float(size)
+                        if size:
+                            book[price] = size
+                        else:
+                            book.pop(price, None)  # a zero size means the level is gone
+                else:
+                    continue
+                if not bids or not asks:
+                    continue
+                failures = 0
+                mid = (max(bids) + min(asks)) / 2
+                lo, hi = mid * (1 - BOOK_PRUNE_PCT), mid * (1 + BOOK_PRUNE_PCT)
+                for book in (bids, asks):
+                    for level in [x for x in book if not lo <= x <= hi]:
+                        del book[level]
+                # The feed batches every ~50ms; redrawing that often would swamp the canvas
+                # for a panel nobody can read changing 20 times a second.
+                now = time.monotonic()
+                if now - last_sent >= 0.5:
+                    last_sent = now
+                    on_book(dict(bids), dict(asks))
+        except Exception:
+            failures += 1
+            on_offline()
+            time.sleep(2)
 
 
 KALSHI_HOST = "api.elections.kalshi.com"
@@ -720,6 +791,8 @@ class Monitor(Drawing, tk.Toplevel):
         self.ptb_close = 0  # when that 15-minute window ends (unix time)
         self.history = []  # closes for the current range
         self.window_pts = collections.deque(maxlen=2400)  # (second, price), ~40 minutes
+        self.book = ({}, {})  # (bids, asks) from the live level2 feed, price -> size
+        self._book_dirty = False
         self.high = self.low = None
         self.online = False
         self.last_alert_price = None
@@ -755,6 +828,7 @@ class Monitor(Drawing, tk.Toplevel):
         self._draw_tab()
         self._draw_bell_button()
         self._draw_world_button()
+        self._draw_depth()  # says it is waiting until the first snapshot lands
         self._draw_range_pills()
         self._draw_price()
         self._draw_ptb()
@@ -1052,7 +1126,7 @@ class Monitor(Drawing, tk.Toplevel):
         """The 15M view: the live Kalshi window from open to close, with the price to
         beat and a marker for every bet the selected strategy placed in it."""
         c = self.canvas
-        left, right, top, bottom = 46, W - 46, 322, 518
+        left, right, top, bottom = PLOT_L, PLOT_R, PLOT_T, PLOT_B
         if self.ptb is None or not self.window_pts:
             self.text(W / 2, 420, "Loading window…", 14, MUTED, weight="", tags="chart")
             return
@@ -1143,8 +1217,8 @@ class Monitor(Drawing, tk.Toplevel):
             stamp = datetime.fromtimestamp(t).strftime("%I:%M %p").lstrip("0")
             self.text(x, 530, stamp, 10, MUTED, weight="", anchor=anchor, tags="chart")
         ps = [p * lift for _, p in pts]
-        self.text(46, 552, f"Low  ${min(ps):,.{dec}f}", 11, MUTED, anchor="w", tags="chart")
-        self.text(W - 46, 552, f"High  ${max(ps):,.{dec}f}", 11, MUTED, anchor="e", tags="chart")
+        self.text(46, PLOT_FOOT, f"Low  ${min(ps):,.{dec}f}", 11, MUTED, anchor="w", tags="chart")
+        self.text(W - 46, PLOT_FOOT, f"High  ${max(ps):,.{dec}f}", 11, MUTED, anchor="e", tags="chart")
 
     def _draw_minute_chart(self):
         """The 1M view: the last sixty seconds, one point per second, straight off the feed.
@@ -1154,7 +1228,7 @@ class Monitor(Drawing, tk.Toplevel):
         straight line. The target is still drawn when it happens to fall inside the band.
         """
         c = self.canvas
-        left, right, top, bottom = 46, W - 46, 322, 518
+        left, right, top, bottom = PLOT_L, PLOT_R, PLOT_T, PLOT_B
         start = self.now() - 60
         pts = [(t, p) for t, p in self.window_pts if t >= start]
         if len(pts) < 2:
@@ -1202,12 +1276,12 @@ class Monitor(Drawing, tk.Toplevel):
             self.text(right, y - 8, f"Price to beat  ${self.ptb:,.{dec}f}", 10, MUTED,
                       weight="", anchor="e", tags="chart")
 
-        self.text(46, 552, f"Low  ${min(levels):,.{dec}f}", 11, MUTED, anchor="w",
+        self.text(46, PLOT_FOOT, f"Low  ${min(levels):,.{dec}f}", 11, MUTED, anchor="w",
                   tags="chart")
-        self.text(W - 46, 552, f"High  ${max(levels):,.{dec}f}", 11, MUTED, anchor="e",
+        self.text(W - 46, PLOT_FOOT, f"High  ${max(levels):,.{dec}f}", 11, MUTED, anchor="e",
                   tags="chart")
         # 60 would be a full minute with no missed seconds; fewer means a quiet or laggy feed
-        self.text(W / 2, 552, f"{len(pts)}/60 ticks", 11, MUTED, weight="", tags="chart")
+        self.text(W / 2, PLOT_FOOT, f"{len(pts)}/60 ticks", 11, MUTED, weight="", tags="chart")
 
     def _draw_chart(self):
         c = self.canvas
@@ -1218,7 +1292,7 @@ class Monitor(Drawing, tk.Toplevel):
         if self.range_key == "1M":
             self._draw_minute_chart()
             return
-        left, right, top, bottom = 46, W - 46, 322, 518
+        left, right, top, bottom = PLOT_L, PLOT_R, PLOT_T, PLOT_B
         pts = list(self.history)
         if len(pts) < 2:
             msg = "Loading chart…" if self.online or self.price is None else "No data"
@@ -1250,10 +1324,83 @@ class Monitor(Drawing, tk.Toplevel):
 
         if self.low is not None:  # on the index's scale, to match the headline price
             dec, lift = self.asset["decimals"], 1 + self.state.offset_pct
-            self.text(46, 552, f"Low  ${self.low * lift:,.{dec}f}", 11, MUTED, anchor="w",
+            self.text(46, PLOT_FOOT, f"Low  ${self.low * lift:,.{dec}f}", 11, MUTED, anchor="w",
                       tags="chart")
-            self.text(W - 46, 552, f"High  ${self.high * lift:,.{dec}f}", 11, MUTED, anchor="e",
+            self.text(W - 46, PLOT_FOOT, f"High  ${self.high * lift:,.{dec}f}", 11, MUTED, anchor="e",
                       tags="chart")
+
+    def _draw_depth(self):
+        """The live order book, as a cumulative depth staircase under the price chart.
+
+        Cumulative rather than per-level: a single price band's size jumps around constantly
+        as orders are posted and pulled, while the running total either side is the thing
+        that actually tells you which way the book leans. Walking outward from the touch,
+        each step adds that level's size, so the height at any price is everything resting
+        between there and the middle.
+        """
+        c = self.canvas
+        c.delete("depth")
+        bids, asks = self.book
+        mid_y = (DEPTH_T + DEPTH_B) / 2
+        if not bids or not asks:
+            self.text(W / 2, mid_y, "waiting for the order book\u2026", 10, MUTED,
+                      weight="", tags="depth")
+            return
+
+        mid = (max(bids) + min(asks)) / 2
+        span = mid * DEPTH_SPAN_PCT
+        dec = self.asset["decimals"]
+
+        def walk(book, outward):
+            """(price, running total) from the touch outward, clipped to the span."""
+            levels = sorted((p for p in book if abs(p - mid) <= span), reverse=not outward)
+            run, out = 0.0, []
+            for price in levels:
+                run += book[price]
+                out.append((price, run))
+            return out
+
+        down = walk(bids, False)   # bids, descending away from mid
+        up = walk(asks, True)      # asks, ascending away from mid
+        peak = max([t for _, t in down + up] or [0.0])
+        if peak <= 0:
+            return
+
+        def X(price):
+            return PLOT_L + (PLOT_R - PLOT_L) * (price - (mid - span)) / (2 * span)
+
+        def Y(total):
+            return DEPTH_B - (DEPTH_B - DEPTH_T - 14) * (total / peak)
+
+        for side, colour, tint in ((down, UP, UP_TINT), (up, DOWN, DOWN_TINT)):
+            if len(side) < 2:
+                continue
+            steps = []
+            for price, total in side:
+                steps += [X(price), Y(total)]        # a staircase: across, then up
+            c.create_polygon(self.pts(steps + [X(side[-1][0]), DEPTH_B, X(mid), DEPTH_B]),
+                             fill=tint, outline="", tags="depth")
+            c.create_line(*self.pts(steps), fill=colour, width=self.px(1.8),
+                          joinstyle="round", tags="depth")
+
+        c.create_line(*self.pts([X(mid), DEPTH_T + 12, X(mid), DEPTH_B]), fill=GRID,
+                      width=self.px(1), dash=(self.px(3), self.px(3)), tags="depth")
+
+        bid_total = down[-1][1] if down else 0.0
+        ask_total = up[-1][1] if up else 0.0
+        lean = "bid" if bid_total > ask_total else "ask"
+        self.text(PLOT_L, DEPTH_T + 4, f"{bid_total:,.0f} bid", 9, UP, weight="",
+                  anchor="w", tags="depth")
+        self.text(W / 2, DEPTH_T + 4,
+                  f"book \u00b1{span / mid * 100:.2f}%  \u00b7  {lean}-heavy", 9, MUTED,
+                  weight="", tags="depth")
+        self.text(PLOT_R, DEPTH_T + 4, f"{ask_total:,.0f} ask", 9, DOWN, weight="",
+                  anchor="e", tags="depth")
+        self.text(PLOT_L, DEPTH_B + 12, f"${mid - span:,.{dec}f}", 9, MUTED, weight="",
+                  anchor="w", tags="depth")
+        self.text(W / 2, DEPTH_B + 12, f"${mid:,.{dec}f}", 9, TEXT, weight="", tags="depth")
+        self.text(PLOT_R, DEPTH_B + 12, f"${mid + span:,.{dec}f}", 9, MUTED, weight="",
+                  anchor="e", tags="depth")
 
     def _draw_status(self):
         self.canvas.delete("status")
@@ -1325,6 +1472,15 @@ class Monitor(Drawing, tk.Toplevel):
         threading.Thread(
             target=stream_prices,
             args=(on_price, lambda: self.results.put(("offline",)), self.asset["product"]),
+            daemon=True,
+        ).start()
+        # The book runs on its own socket rather than sharing the trade feed's. A snapshot of
+        # 40,000 levels arriving on the same connection would stall the price stream, and
+        # prices are the thing that must not stutter.
+        threading.Thread(
+            target=book_feed,
+            args=(lambda bids, asks: self.results.put(("book", bids, asks)),
+                  lambda: None, self.asset["product"]),
             daemon=True,
         ).start()
 
@@ -1407,6 +1563,9 @@ class Monitor(Drawing, tk.Toplevel):
             self._chart_dirty = False
             self._chart_drawn_at = time.monotonic()
             self._draw_chart()
+        if self._book_dirty:  # the feed already throttles itself to twice a second
+            self._book_dirty = False
+            self._draw_depth()
         open_panels = self.hub.open_panels()
         if open_panels and time.monotonic() - self._panel_drawn_at > 0.25:
             self._panel_drawn_at = time.monotonic()
@@ -1543,6 +1702,9 @@ class Monitor(Drawing, tk.Toplevel):
         elif kind == "offsets":
             self.trader.seed_offsets(self.coin, msg[1])
             self._redraw_for_offset()
+        elif kind == "book":
+            self.book = (msg[1], msg[2])
+            self._book_dirty = True
         elif kind == "offline":
             if self.online:
                 self._set_live(False)
