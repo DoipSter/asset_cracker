@@ -271,13 +271,25 @@ tick tables by time and set a retention policy.
    transfers; state survives a restart and is checked against the ledger. Not yet: human
    weights applied, breakers, reaping and replacement, a broker interface a live
    broker could share.
-5. Metrics and the promotion gate; trials registry.
+5. Metrics and the promotion gate; trials registry. **Started 2026-09-21**
+   (`service/internal/analysis`, `GET api/analysis`): the model scored against the market's own
+   mid price (Brier, by time to close and by coin), every early sale re-priced to the size that
+   was really displayed at the bid, and a leaderboard per strategy version across all its lives.
+   The unit of inference is the 15-minute window, not the bet. A verdict needs 30 windows and a
+   |t| corrected for the number of versions tried (Bonferroni over the measured row count of
+   `strategy_version`); both are stated conventions, carried in the JSON. A round is only
+   counted once its payouts reconcile with what each bucket held. Not yet: log loss, bootstrap
+   intervals, drawdown, a power calculation for the sample floor, the gate as configuration,
+   gate decisions stored in `metric_snapshot`.
 6. API and the Flutter client. **Started 2026-09-21**: the home page's read-only API
-   (`docs/api-home.md`: `api/home`, `api/asset`, `api/buckets`) and the once-a-minute
-   `value_snapshot` history behind its "earned over a range" (migration 0010). Built and unit
-   tested on the Mac; its SQL has NOT yet been run against a database. The phone widget moved to
-   `/widget`; `/` is a placeholder until the designed home page is dropped in. Not yet:
-   the page itself, anything that writes.
+   (`docs/api-home.md`: `api/home`, `api/asset`, `api/buckets`, `api/analysis`) and the
+   once-a-minute `value_snapshot` history behind "earned over a range" (migration 0010). The
+   home page at `/` is the balance sheet: total value, earned over the chosen time scale, a
+   ruled asset rail with the chart and stake box to its right (at phone width too), and
+   separate Buckets and Evidence panes; the phone widget moved to `/widget`. Run against the
+   Pi's dev database through two settlements on 2026-09-21: every statement executed, the
+   earned arithmetic matched the snapshot rows, the ledger summed to zero. NOT yet released to
+   prod as of that night. Not yet: the Flutter client, anything that writes.
 7. MCP, read-only; then proposals.
 8. More sources and instrument types.
 9. Live broker behind the gates in section 11.
