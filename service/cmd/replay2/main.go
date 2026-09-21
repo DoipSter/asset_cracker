@@ -5,8 +5,8 @@
 //	go run ./cmd/replay2 ../tools/parity/fixtures/<v2 recording>
 //
 // Passes (exit 0) when: every step agrees with the Python's trace (for each original strategy the
-// same side and the same bet/no-bet call on that coin; the coin's index offset and volatility
-// identical; probabilities and edges within tolerance; and ALL TWELVE accounts' cash identical,
+// same side and the same bet/no-bet call on that coin; the coin's index offset identical;
+// volatility, probabilities and edges within tolerance; and ALL TWELVE accounts' cash identical,
 // which is what catches a twin or a bankruptcy going differently); the trade log and the
 // early-sales log are identical line for line; and the saved state agrees.
 //
@@ -136,7 +136,7 @@ func run(folder string) error {
 	case len(trace) == 0:
 		fmt.Println("no trace.jsonl(.gz) in the folder: steps not compared")
 	case len(stepErrors) == 0:
-		fmt.Printf("steps match (%d compared; offsets, volatility and all twelve balances identical; largest gaps: %s)\n", checked, gaps(worst))
+		fmt.Printf("steps match (%d compared; index offsets and all twelve balances identical; largest gaps: %s)\n", checked, gaps(worst))
 	default:
 		ok = false
 		fmt.Printf("STEPS DIFFER. First: %s\n", strings.Join(stepErrors, "\n  then: "))
@@ -248,7 +248,13 @@ func checkStep(t *k.Trader, want traceRow, worst map[string]float64) string {
 		return g <= tolerance
 	}
 	c := t.Coins[want.Coin]
-	if c.Sigma2 != want.Sigma2 {
+	// Volatility is not compared bit for bit. Its update computes 1 - 0.5^(dt/300), and Go's pow
+	// differs from the platform C library's by up to one unit in the last place (measured in
+	// internal/pyfloat); subtracting from 1 magnifies that about a hundredfold, to around 1e-14 of
+	// the weight. The estimate is a moving average, so the error does not accumulate.
+	rel := math.Abs(c.Sigma2-want.Sigma2) / want.Sigma2
+	worst["sigma2 (relative)"] = math.Max(worst["sigma2 (relative)"], rel)
+	if rel > tolerance {
 		return fmt.Sprintf("sigma2 python %v go %v", want.Sigma2, c.Sigma2)
 	}
 	if got := c.OffsetPct(); got != want.Offset {
@@ -284,7 +290,7 @@ func checkStep(t *k.Trader, want traceRow, worst map[string]float64) string {
 
 func gaps(w map[string]float64) string {
 	var parts []string
-	for _, name := range []string{"p_model", "p_up", "edge"} {
+	for _, name := range []string{"sigma2 (relative)", "p_model", "p_up", "edge"} {
 		parts = append(parts, fmt.Sprintf("%s %.1e", name, w[name]))
 	}
 	return strings.Join(parts, ", ")

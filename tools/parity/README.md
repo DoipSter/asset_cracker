@@ -14,6 +14,14 @@ early-sales log and final state that replay produced. The Go port is compared wi
 Python given exactly these calls. No account ran out in it; that path is covered by unit tests
 in `service/internal/kalshi15m2`.
 
+`fixtures/2026-09-20_v2_50min/` is the whole of that run: 31,139 calls, 14,802 steps, 272 bets,
+69 early sales, 199 settlements. It is the one that showed volatility cannot be held to bit
+equality: on some DOGE steps the two engines differ around the fifteenth significant digit
+(largest relative gap 1.2e-15), because the update computes `1 - 0.5^(dt/300)`, Go's `pow`
+differs from the platform C library's by up to one unit in the last place, and the subtraction
+magnifies it. Every decision, all twelve balances on every step, both logs and the final state
+are identical. Volatility, like the probabilities, is compared to 1e-12.
+
 Phase 1 of `docs/flutter-port-scope.md`. It answers one question: given the same inputs, does
 an engine make the same trades? First for the Python against itself, later for the Dart port
 against the Python.
