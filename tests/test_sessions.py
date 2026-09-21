@@ -133,7 +133,8 @@ class TheIndexOfRuns(unittest.TestCase):
     def test_the_index_covers_both_worlds(self):
         t = h.new_trader(quiet=False)
         t.save(force=True)
-        self.assertEqual(int(rows(t.sessions_path)[0]["strategies"]), 12)
+        self.assertEqual(int(rows(t.sessions_path)[0]["strategies"]),
+                         len(kt.ALL_STRATEGIES))
 
 
 class ResetStartsANewRun(unittest.TestCase):

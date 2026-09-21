@@ -60,13 +60,24 @@ def dying_position(case, flat_bid=None, **params):
 
 class OffByDefault(unittest.TestCase):
 
-    def test_no_shipped_strategy_cuts_losses(self):
-        """If this starts failing, someone enabled a stop. That may be right -- but it needs
-        the numbers in research/backtest_stops.py to have changed first."""
+    def test_no_round_holding_strategy_cuts_losses(self):
+        """The measurement was made on strategies that hold a position for most of a round,
+        and for those a stop was worse by $105-$207 over a month. If one of them starts
+        cutting, research/backtest_stops.py needs new numbers first.
+
+        The candle strategies are exempt on purpose: they hold for seconds, which is a
+        different proposition, and finding out is what they are for.
+        """
         for s in kt.STRATEGIES:
+            if s.get("kind") == "candle":
+                continue
             with self.subTest(strategy=s["name"]):
                 self.assertNotIn("stop_loss", s)
                 self.assertNotIn("stop_tau", s)
+
+    def test_the_candle_strategies_are_the_only_ones_cutting(self):
+        cutting = {s["name"] for s in kt.STRATEGIES if "stop_loss" in s}
+        self.assertEqual(cutting, {"Candle", "Candle Open", "Candle Step"})
 
     def test_a_losing_position_is_held_to_settlement(self):
         """The behaviour the default produces, stated plainly: a position that dies is held

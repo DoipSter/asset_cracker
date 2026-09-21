@@ -62,6 +62,8 @@ WINDOW_CAP = 0.35  # ...or more than this share of the account into one window
 # keep raising the ceiling on its own stakes, so a bad round costs more the better things
 # have been going. A quarter of $1000 is $250 at risk, and it stays $250 at any balance.
 TOTAL_CAP = 0.25
+ROUND_SECONDS = 900  # every 15-minute round, used to work out how far into one we are
+CANDLE_WINDOW = 60  # the momentum a candle strategy trades is measured over this many seconds
 MIN_GAP = 20  # default seconds between bets in the same round; a strategy may override
 MIN_HOLD = 15  # default seconds before a bet may be sold again
 EXIT_MARGIN = 0.02  # an early sale must beat our estimate of the hold value by this
@@ -117,6 +119,25 @@ STRATEGIES = [
     {"name": "Favorite", "blurb": "Backs the favorite late",
      "shrink": 1.0, "min_edge": 0.0, "max_bets": 1, "exit": "hold",
      "tau": (MIN_TAU, 240), "band": (0.62, 0.88)},
+    # Three candle strategies, identical but for when they may open. Keeping everything
+    # else the same is the point: the three-way result is about timing, not about tuning.
+    # stop_loss is on here despite measuring worse on the Scalper, because these hold for
+    # seconds rather than a round -- see research/backtest_stops.py for that finding.
+    {"name": "Candle", "blurb": "Rides the minute, banks and cuts fast", "kind": "candle",
+     "shrink": 1.0, "min_edge": 0.0, "max_bets": 20, "exit": "ev",
+     "min_move": 0.0004, "min_gap": 5, "min_hold": 3, "max_stake": 0.02,
+     "take_capture": 0.5, "stop_loss": 0.4,
+     "tau": (MIN_TAU, 900), "band": (0.10, 0.90)},
+    {"name": "Candle Open", "blurb": "Same, but only the first 2.5 min", "kind": "candle",
+     "shrink": 1.0, "min_edge": 0.0, "max_bets": 20, "exit": "ev",
+     "min_move": 0.0004, "min_gap": 5, "min_hold": 3, "max_stake": 0.02,
+     "take_capture": 0.5, "stop_loss": 0.4, "window": "early", "cutoff": 150,
+     "tau": (MIN_TAU, 900), "band": (0.10, 0.90)},
+    {"name": "Candle Step", "blurb": "Same, in 2.5-minute bursts", "kind": "candle",
+     "shrink": 1.0, "min_edge": 0.0, "max_bets": 20, "exit": "ev",
+     "min_move": 0.0004, "min_gap": 5, "min_hold": 3, "max_stake": 0.02,
+     "take_capture": 0.5, "stop_loss": 0.4, "window": "interval", "every": 150, "burst": 30,
+     "tau": (MIN_TAU, 900), "band": (0.10, 0.90)},
     {"name": "Lottery", "blurb": "Cheap longshots after a vol spike", "kind": "lottery",
      "shrink": 1.0, "min_edge": 0.0, "max_bets": 1, "exit": "hold",
      "tau": (LOTTERY["min_tau"], 900), "band": (0.0, LOTTERY["max_ask"])},
@@ -361,6 +382,8 @@ class Account:
             return []
         if prm.get("kind") == "lottery":
             return self._lottery(market, price, now, p_model, paused, ctx or {})
+        if prm.get("kind") == "candle":
+            return self._candle(market, price, now, paused, ctx or {})
 
         mid = (yb + ya) / 2 if yb > 0 else ya
         p_up = mid + prm["shrink"] * (p_model - mid)  # blend with what the market believes
@@ -385,6 +408,74 @@ class Account:
         if paused or tau < MIN_TAU:
             return events
         return events + self._entries(market, now, price, best, tau)
+
+    @staticmethod
+    def _candle_open(prm, tau):
+        """Is this strategy allowed to open a position right now?
+
+        `elapsed` rather than `tau`, because the windows are described from the start of the
+        round: "the first two and a half minutes", "every two and a half minutes".
+        """
+        elapsed = ROUND_SECONDS - tau
+        window = prm.get("window")
+        if window == "early":
+            return elapsed <= prm.get("cutoff", 150)
+        if window == "interval":
+            every = prm.get("every", 150)
+            return elapsed % every < prm.get("burst", 30)
+        return True
+
+    def _candle(self, market, price, now, paused, ctx):
+        """Buy the side the last minute moved toward, then let the exits do the rest.
+
+        No view on where the price is going beyond the last sixty seconds: if it rose, buy
+        UP; if it fell, buy DOWN. Selling is handled by _exits, which these strategies drive
+        with both a take_capture and a stop_loss -- bank a gain, cut a loser, hold nothing
+        for long.
+        """
+        prm = self.params
+        tau = market["close"] - now
+        move = ctx.get("candle")
+        self.views[market.get("coin")] = None if move is None else {
+            "side": "UP" if move > 0 else "DOWN", "conf": min(1.0, abs(move) * 400),
+            "why": "candle",
+        }
+        if paused or move is None or not prm["tau"][0] <= tau <= prm["tau"][1]:
+            return []
+        if not self._candle_open(prm, tau):
+            return []
+        if abs(move) < prm["min_move"]:
+            return []
+
+        here = self.open_lots(market["ticker"])
+        if len(here) >= prm["max_bets"]:
+            return []
+        if here and now - max(lot["t"] for lot in here) < prm.get("min_gap", MIN_GAP):
+            return []
+        side = "UP" if move > 0 else "DOWN"
+        held = {lot["side"] for lot in here}
+        if held and side not in held:
+            return []  # Kalshi nets a market, so a second side would just offset the first
+
+        ask = market["yes_ask"] if side == "UP" else market["no_ask"]
+        size = market["yes_ask_size"] if side == "UP" else market["no_ask_size"]
+        if ask <= 0 or not prm["band"][0] <= ask <= prm["band"][1]:
+            return []
+        cost = min(0.99, ask + SLIPPAGE)
+        # The fee has to be inside the unit price, or the last contract of a bet pushes the
+        # total past the cap by however much its fee came to.
+        unit = cost + FEE_RATE * cost * (1 - cost)
+        room = TOTAL_CAP * START_BALANCE - self.committed()
+        stake = min(prm.get("max_stake", MAX_STAKE) * self.cash, room)
+        n = min(int(stake // unit), int(size))
+        while n > 0 and n * cost + kalshi_fee(n, cost) > self.cash:
+            n -= 1
+        if n < 1:
+            return []
+        # It is buying momentum, not a mispricing, so the "edge" it records is the move that
+        # triggered it rather than a probability gap it does not claim to have.
+        option = {"side": side, "cost": cost, "size": size, "p": 0.5, "edge": abs(move)}
+        return [self._bet(market, option, n, price, now)]
 
     def _lottery(self, market, price, now, p_model, paused, ctx):
         """Buy the cheap side when it's much likelier than its price and volatility just
@@ -769,6 +860,18 @@ class CoinState:
         late = sum(b.get("volume", 0) for b in bars if m["close"] - b.get("t", 0) <= 60)
         return late / total
 
+    def candle_move(self, now, window=CANDLE_WINDOW):
+        """How far the price has moved over the last `window` seconds, as a fraction.
+
+        Taken from the per-second ring rather than from minute closes, because a strategy
+        that trades in seconds cannot wait for a minute boundary to tell it what just
+        happened. Returns None until there are enough ticks to mean anything.
+        """
+        recent = [(sec, p) for sec, p in self._ring if sec >= now - window]
+        if len(recent) < 10 or not recent[0][1]:
+            return None
+        return recent[-1][1] / recent[0][1] - 1
+
     def tail_context(self, market, price, tau):
         """What the Lottery strategy needs: how much volatility has just spiked (last ~5
         minutes vs the last 45), and the chance of UP from a model that respects the spike."""
@@ -926,6 +1029,7 @@ class KalshiTrader:
                            c.known_avg(market["close"]) if tau < 60 else None,
                            c.offset_pct, c.sd_pct)
         ctx = c.tail_context(market, price, tau)
+        ctx["candle"] = c.candle_move(now)
         events = []
         for acct in self.accounts.values():
             if acct.params.get("anti"):

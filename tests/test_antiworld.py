@@ -43,7 +43,7 @@ class OwnMoney(unittest.TestCase):
 
     def test_twelve_separate_banks(self):
         t = h.new_trader()
-        self.assertEqual(len(t.accounts), 12)
+        self.assertEqual(len(t.accounts), len(kt.ALL_STRATEGIES))
         for name, acct in t.accounts.items():
             with self.subTest(strategy=name):
                 self.assertEqual(acct.cash, kt.START_BALANCE)

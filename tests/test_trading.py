@@ -73,9 +73,12 @@ class ProfitTaking(unittest.TestCase):
             if lot.get("why") == "capture":
                 self.assertGreater(lot["payout"], lot["cost"], lot)
 
-    def test_other_strategies_are_untouched(self):
-        opted_in = [s["name"] for s in kt.STRATEGIES if "take_capture" in s]
-        self.assertEqual(opted_in, ["Scalper"])
+    def test_only_strategies_that_opt_in_bank_gains(self):
+        """The model-driven six hold to settlement unless the market overpays; the Scalper
+        and the candle strategies opt into banking a gain instead."""
+        opted_in = {s["name"] for s in kt.STRATEGIES if "take_capture" in s}
+        self.assertEqual(opted_in,
+                         {"Scalper", "Candle", "Candle Open", "Candle Step"})
 
 
 class ExposureCap(unittest.TestCase):
