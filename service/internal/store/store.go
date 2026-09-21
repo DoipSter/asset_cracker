@@ -114,20 +114,31 @@ type Market struct {
 	ClosesAt *time.Time
 }
 
-// UpsertMarket records a market and returns its id. Strike and times are filled in if they
-// were missing before; a result is never touched here.
-func (s *Store) UpsertMarket(ctx context.Context, instrumentID int64, m Market) (int64, error) {
-	var id int64
-	err := s.pool.QueryRow(ctx, `
+const sqlUpsertMarket = `
 		insert into market (instrument_id, ticker, strike, opens_at, closes_at)
 		values ($1, $2, $3, $4, $5)
 		on conflict (instrument_id, ticker) do update
 		   set strike    = coalesce(market.strike, excluded.strike),
 		       opens_at  = coalesce(market.opens_at, excluded.opens_at),
 		       closes_at = coalesce(market.closes_at, excluded.closes_at)
-		returning id`, instrumentID, m.Ticker, m.Strike, m.OpensAt, m.ClosesAt).Scan(&id)
+		returning id`
+
+// UpsertMarket records a market and returns its id. Strike and times are filled in if they
+// were missing before; a result is never touched here.
+func (s *Store) UpsertMarket(ctx context.Context, instrumentID int64, m Market) (int64, error) {
+	var id int64
+	err := s.pool.QueryRow(ctx, sqlUpsertMarket, instrumentID, m.Ticker, m.Strike, m.OpensAt, m.ClosesAt).Scan(&id)
 	return id, err
 }
+
+// FifteenMinuteSeries keeps a query that joins `instrument i` to the 15-minute series: the only
+// instruments whose spec says their rounds last 900 seconds (migrations 0002 and 0006). The
+// above/below ladders of migration 0014 have no round_seconds and so never match. Every query
+// that lists or counts markets across instruments for the analysis or the status page carries
+// it: thousands of ladder markets a day would otherwise flood the analysis' 100-markets-per-
+// refresh reads, and an hourly ladder market closing at :00 shares its close with a 15-minute
+// window and would keep that window out of the evidence while it waits for its result.
+const FifteenMinuteSeries = `i.spec @> '{"round_seconds": 900}'::jsonb`
 
 // RecordResult stores how a market settled. It writes only if no result is stored yet, and
 // reports whether this call was the one that stored it, so a settlement is acted on once.
@@ -207,13 +218,18 @@ type RoundSummary struct {
 	Snapshots       int64      `json:"snapshots"`
 }
 
-// RecentRounds lists the newest rounds across every series, newest first.
-func (s *Store) RecentRounds(ctx context.Context, limit int) ([]RoundSummary, error) {
-	rows, err := s.pool.Query(ctx, `
+// sqlRecentRounds is scoped to the 15-minute series: a weekly ladder market closes days ahead
+// and would otherwise take every place in the list.
+const sqlRecentRounds = `
 		select i.symbol, m.ticker, m.strike::float8, m.closes_at, m.result, m.settlement_value::float8,
 		       (select count(*) from evaluation e where e.market_id = m.id and e.at >= m.closes_at - interval '1 hour')
 		  from market m join instrument i on i.id = m.instrument_id
-		 order by m.closes_at desc nulls last, m.ticker limit $1`, limit)
+		 where ` + FifteenMinuteSeries + `
+		 order by m.closes_at desc nulls last, m.ticker limit $1`
+
+// RecentRounds lists the newest rounds across every 15-minute series, newest first.
+func (s *Store) RecentRounds(ctx context.Context, limit int) ([]RoundSummary, error) {
+	rows, err := s.pool.Query(ctx, sqlRecentRounds, limit)
 	if err != nil {
 		return nil, err
 	}

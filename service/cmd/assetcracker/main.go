@@ -54,10 +54,12 @@ func run() error {
 	if err := db.EnsurePartitions(ctx, time.Now()); err != nil {
 		return err
 	}
-	instruments, err := db.ActiveInstruments(ctx)
+	all, err := db.ActiveInstruments(ctx)
 	if err != nil {
 		return fmt.Errorf("instruments: %w", err)
 	}
+	// The ladders are recorded by their own recorder (below) and are in nothing else.
+	instruments, ladders := splitLadders(all)
 
 	started := time.Now()
 	latest := coinbase.NewLatest()
@@ -231,6 +233,20 @@ func run() error {
 		go func() { defer wg.Done(); p.Run(ctx) }()
 	}
 
+	// Kalshi's longer ladders: RECORD ONLY, one recorder per series on its own goroutine, started
+	// 12 s apart and sharing one pacer (at most five requests a second among them). Not in the
+	// health check, the status document or the home page; nothing trades them.
+	pace := kalshi.NewPacer(200 * time.Millisecond)
+	for i, in := range ladders {
+		priceFrom, _ := in.Spec["price_from"].(string) // "coinbase:BTC-USD"
+		rec := &kalshi.LadderRecorder{Client: client, Series: in.Symbol, Pace: pace,
+			Sink:  &ladderSink{db: db, instrumentID: in.ID},
+			Price: freshPrice(latest, strings.TrimPrefix(priceFrom, "coinbase:")),
+			Start: 5*time.Second + time.Duration(i)*12*time.Second}
+		wg.Add(1)
+		go func() { defer wg.Done(); rec.Run(ctx) }()
+	}
+
 	// Keep next month's partitions ahead of need.
 	wg.Add(1)
 	go func() {
@@ -249,7 +265,7 @@ func run() error {
 		}
 	}()
 
-	slog.Info("asset cracker service running", "version", version, "instruments", len(instruments), "health", "http://"+cfg.HTTPAddr+"/healthz")
+	slog.Info("asset cracker service running", "version", version, "instruments", len(instruments), "ladders_recorded", len(ladders), "health", "http://"+cfg.HTTPAddr+"/healthz")
 	// What the running service knows right now. The health check and the status page share it.
 	live := func(hctx context.Context) (map[string]any, bool) {
 		ok := db.Ping(hctx) == nil

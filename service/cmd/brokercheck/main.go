@@ -65,6 +65,7 @@ import (
 
 	"github.com/doipster/asset_cracker/service/internal/analysis"
 	"github.com/doipster/asset_cracker/service/internal/kalshi"
+	"github.com/doipster/asset_cracker/service/internal/store"
 )
 
 // Document is what -json writes. No slice in it is ever null.
@@ -211,21 +212,26 @@ const (
 
 	// The close of the first settled market: the default lower bound, read and not guessed.
 	// market is small (a few hundred rows a day) and not partitioned.
-	sqlFirstClose = `select min(closes_at) from market where result in ('yes', 'no') and closes_at is not null`
+	// Like the analysis, only the 15-minute series (store.FifteenMinuteSeries).
+	sqlFirstClose = `select min(m.closes_at) from market m join instrument i on i.id = m.instrument_id
+		 where m.result in ('yes', 'no') and m.closes_at is not null and ` + store.FifteenMinuteSeries
 
 	// store.AnalysisMarkets' listing, with the ticker and an upper bound.
 	sqlMarkets = `
 		select m.id, m.ticker, i.underlying, m.closes_at, m.result
 		  from market m join instrument i on i.id = m.instrument_id
 		 where m.result in ('yes', 'no') and m.closes_at is not null and m.closes_at >= $1 and m.closes_at < $2
+		   and ` + store.FifteenMinuteSeries + `
 		 order by m.closes_at, m.id`
 
 	// store.AnalysisOpenWindows' rule, word for word, bounded to the range ($1 = now).
 	sqlOpenWindows = `
-		select distinct extract(epoch from m.closes_at)::bigint from market m
+		select distinct extract(epoch from m.closes_at)::bigint
+		  from market m join instrument i on i.id = m.instrument_id
 		 where m.result is null and m.closes_at < $1
 		   and (m.closes_at > $1 - interval '1 hour'
 		        or exists (select 1 from trade_order o where o.market_id = m.id))
+		   and ` + store.FifteenMinuteSeries + `
 		   and m.closes_at >= $2 and m.closes_at < $3`
 
 	// store.AnalysisBuckets' listing, without the ledger account.

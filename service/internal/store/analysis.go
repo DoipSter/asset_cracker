@@ -16,12 +16,36 @@ import (
 // index. A settled round is read once its settlement rows are in (AnalysisWindow) and never
 // again; the caller caches it.
 
+// The analysis reads ONLY the 15-minute series (FifteenMinuteSeries, in store.go). Its three
+// listings of markets are these; AnalysisWindow reads only the markets AnalysisMarkets listed,
+// and AnalysisUnsettled starts from trade_order, which a ladder market never has.
+const (
+	sqlAnalysisSettledCount = `
+		select count(*) from market m join instrument i on i.id = m.instrument_id
+		 where m.result in ('yes', 'no') and m.closes_at is not null and ` + FifteenMinuteSeries
+
+	sqlAnalysisMarkets = `
+		select m.id, i.underlying, extract(epoch from m.closes_at)::bigint, m.result
+		  from market m join instrument i on i.id = m.instrument_id
+		 where m.result in ('yes', 'no') and m.closes_at is not null and m.closes_at >= $1
+		   and ` + FifteenMinuteSeries + `
+		 order by m.closes_at, m.id`
+
+	sqlAnalysisOpenWindows = `
+		select distinct extract(epoch from m.closes_at)::bigint
+		  from market m join instrument i on i.id = m.instrument_id
+		 where m.result is null and m.closes_at < $1
+		   and (m.closes_at > $1 - interval '1 hour'
+		        or exists (select 1 from trade_order o where o.market_id = m.id))
+		   and ` + FifteenMinuteSeries
+)
+
 // AnalysisSettledCount is how many rounds have a result: the measured figure the caller checks
 // its own list of settled markets against, so that a listing bounded by time can never quietly
 // fall short. It counts exactly what AnalysisMarkets lists.
 func (s *Store) AnalysisSettledCount(ctx context.Context) (int, error) {
 	var n int
-	err := s.pool.QueryRow(ctx, `select count(*) from market where result in ('yes', 'no') and closes_at is not null`).Scan(&n)
+	err := s.pool.QueryRow(ctx, sqlAnalysisSettledCount).Scan(&n)
 	return n, err
 }
 
@@ -32,11 +56,7 @@ func (s *Store) AnalysisSettledCount(ctx context.Context) (int, error) {
 // stamped over an hour before the newest already seen was never listed. The market table is
 // small (a few hundred rows a day) and not partitioned.
 func (s *Store) AnalysisMarkets(ctx context.Context, closedSince time.Time) ([]analysis.Market, error) {
-	rows, err := s.pool.Query(ctx, `
-		select m.id, i.underlying, extract(epoch from m.closes_at)::bigint, m.result
-		  from market m join instrument i on i.id = m.instrument_id
-		 where m.result in ('yes', 'no') and m.closes_at is not null and m.closes_at >= $1
-		 order by m.closes_at, m.id`, closedSince)
+	rows, err := s.pool.Query(ctx, sqlAnalysisMarkets, closedSince)
 	if err != nil {
 		return nil, err
 	}
@@ -68,11 +88,7 @@ func (s *Store) AnalysisTrials(ctx context.Context) (int, error) {
 // round nobody bet on is asked about for an hour and then never again, and after that hour it
 // no longer keeps the rest of its window out. It is simply missing from the scorecard.
 func (s *Store) AnalysisOpenWindows(ctx context.Context, now time.Time) (map[int64]bool, error) {
-	rows, err := s.pool.Query(ctx, `
-		select distinct extract(epoch from m.closes_at)::bigint from market m
-		 where m.result is null and m.closes_at < $1
-		   and (m.closes_at > $1 - interval '1 hour'
-		        or exists (select 1 from trade_order o where o.market_id = m.id))`, now)
+	rows, err := s.pool.Query(ctx, sqlAnalysisOpenWindows, now)
 	if err != nil {
 		return nil, err
 	}
