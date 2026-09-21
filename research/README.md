@@ -14,6 +14,25 @@ python analyse_week.py    # volume, settlement margins, late-money test
 python confound.py        # controls the headline finding for round closeness
 ```
 
+Backtesting the trading engine itself, against a month of recorded rounds:
+
+```bash
+python fetch_rounds.py KXBTC15M BTC-USD bt30_btc.json   # ~20 min, resumable, ~2.6 MB
+python backtest_exits.py                                # compares exit rules
+python backtest_exits.py 672                            # just the last seven days
+```
+
+`backtest_stops.py` asks whether the Scalper should cut its losses, and concludes it should
+not — with the caveat that one-minute bars cannot fairly test a price stop, which it measures
+rather than asserts.
+
+`backtest_exits.py` drives the real `kalshi_trader` rather than a reimplementation of it,
+so what it measures is what the app does. It produced the numbers in the commit that added
+`take_capture`; they can be reproduced by running it.
+
+The `.json` files are gitignored. They are caches of public APIs, rebuildable with the
+scripts above, not source.
+
 ## What the week showed
 
 ### Volume is overwhelmingly Bitcoin, and overwhelmingly late
@@ -104,5 +123,12 @@ with a few live brackets around spot.
 | `scrape_week.py` | Pulls 15-min rounds (with per-minute volume), hourly brackets, above/below, and Coinbase spot |
 | `analyse_week.py` | Volume distribution, settlement margins, the late-money test |
 | `confound.py` | Conditions the late-money test on round closeness |
+| `fetch_rounds.py` | Downloads a month of one coin's settled rounds with per-minute quotes |
+| `backtest_exits.py` | Compares exit rules, driving the real engine — produced the `take_capture` numbers |
+| `backtest_stops.py` | Asks whether the Scalper should cut its losses (it should not) |
+| `backtest_antiworld.py` | Runs each strategy against its mirror |
+| `sessions.py` | Browses past runs of the app: `python sessions.py [last|<id>]` |
+| `font_probe.py` | Checks a glyph renders rather than drawing as a box — run before adding a coin |
 
-`week_data.json` is gitignored — regenerate it with `scrape_week.py`.
+The `.json` caches are gitignored — regenerate them with `scrape_week.py` and
+`fetch_rounds.py`.

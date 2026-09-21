@@ -1,5 +1,7 @@
 # Asset Cracker
 
+[![tests](https://github.com/DoipSter/asset_cracker/actions/workflows/tests.yml/badge.svg)](https://github.com/DoipSter/asset_cracker/actions/workflows/tests.yml)
+
 A phone-shaped desktop widget for Kalshi's 15-minute crypto prediction markets — the ones
 Coinbase Predictions runs on. Live prices, the round's "price to beat", and six paper-trading
 strategies competing on real market data.
@@ -18,7 +20,7 @@ keeps imaginary balances.
   close with a marker for every bet placed, at the price and moment it went in.
 - **Two side panels**, one per coin, that slide out from either edge and can both be open at once.
   Each has an Account view, a bet Log, and a Strategies leaderboard.
-- **Six strategies**, each with its own $150, trading the same live market so you can see which
+- **Six strategies**, each with its own $1,000, trading the same live market so you can see which
   approach actually works.
 
 ## Does it make money?
@@ -94,7 +96,7 @@ Full numbers and method in [`research/README.md`](research/README.md).
 | `Value` | Blends the model with the market's own odds, one bet, holds to settlement |
 | `Model` | Trusts the model more, up to 3 bets per round |
 | `Late` | Only bets in the last 2.5 minutes |
-| `Scalper` | Up to 3 bets, sells early when the odds turn against it |
+| `Scalper` | Up to 25 bets a round, one every 8s, banks gains once a bid has covered 80% of the way to $1 |
 | `Favorite` | Backs the favorite late, at 62–88¢ |
 | `Lottery` | Cheap longshots after a volatility spike (see above — it loses) |
 
@@ -148,10 +150,178 @@ of the index, and roughly $8 of round-to-round noise is irreducible.
 | `asset_cracker.py` | The app: feeds, window, charts, side panels |
 | `kalshi_trader.py` | The trading engine: strategies, fees, accounting, settlement |
 | `make_icon.py` | Regenerates `btc.ico` / `eth.ico` (needs Pillow) |
-| `research/` | Scrapes a week of Kalshi markets and tests how they price — see its own README |
+| `tests/` | The suite — `python tests/run.py` |
+| `research/` | Scrapes Kalshi markets, tests how they price, backtests the engine — see its own README |
+| `CONTRIBUTING.md` | How this repo is worked on: branching, commits, tests |
 
-Runtime state (`kalshi_balance*.json`, `kalshi_trades*.csv`) is gitignored — it's personal
-results, and the app recreates it at $150 per strategy on first launch.
+## Why the Scalper doesn't cut its losses
+
+It looks like it should. It doesn't, and that is a measured decision rather than an
+oversight — `research/backtest_stops.py` reproduces all of this.
+
+Over a month of recorded BTC rounds, its money ends up like this:
+
+| How a position ended | n | staked | net |
+|---|---|---|---|
+| won at settlement | 218 | $1,101 | +$1,776 |
+| **lost at settlement** | **713** | **$3,716** | **−$3,716** |
+| sold at a profit | 453 | $2,322 | +$1,324 |
+| sold at a loss | 45 | $252 | −$126 |
+
+It cuts a loser **45 times out of 758 — 6%.** The code says why: `take_capture` requires
+proceeds to beat cost, so it can only fire at a profit, and the value exit fires when the
+market is paying *more* than the model thinks the position is worth, which is selling into
+strength. Nothing in it sells a position because it is losing.
+
+Adding that turns out to lose money. Both a price stop (`stop_loss`, sell once this much of
+the stake is gone) and a time stop (`stop_tau`, sell a position still behind this close to
+the bell) are implemented and tested; every setting tried is worse than holding, by $105 to
+$207 over the month. Both are off in every shipped strategy, and a test enforces that.
+
+Half the reason is visible in the data: positions that fall below 70% of cost still win
+15% of the time, and those wins pay 100¢ on contracts bought for 20¢.
+
+**The other half is a limit of the data, and anyone retrying this needs to know it.** A stop
+is only checked when a quote arrives, and the backtest cache is one-minute bars — a whole
+minute in which a dying position falls through its floor. A stop aiming to sell at 50% of
+cost actually filled at a median of **26%**, with 95% of fills below the floor. Live, the app
+quotes every second, so real fills would land much closer. **This backtest cannot fairly test
+a price stop.** The time stop can be — the clock never gaps — and it is worse too, which is
+the stronger half of the argument.
+
+If you want to settle it on live per-second data, set `stop_tau` or `stop_loss` on the
+Scalper in `kalshi_trader.py`. `kalshi_exits.csv` grades every sale with `why = stop` against
+what holding would have paid, so a few hundred rounds will answer it properly.
+
+## The anti-world
+
+The left-hand panel holds a mirror of every strategy — `Anti Value`, `Anti Model`,
+`Anti Late`, `Anti Scalper`, `Anti Favorite`, `Anti Lottery` — each with its own $1,000 and
+the same caps. Twelve accounts, six per world, none shared. The globe beside the bell flips
+which world the chart's bet markers come from.
+
+A twin has no opinions. It takes the other side of whatever its original does, at the same
+moment, for the same money, and closes when the original closes. Matching the **stake** and
+not the contract count matters: the two sides of a market are different prices — buying UP at
+30¢ against DOWN at 71¢ — so matching contracts would have the twin committing well over
+twice the capital, straight through the exposure cap its original had just respected.
+
+**What it answers.** Every strategy loses money. Either the model is systematically wrong, in
+which case taking the other side should pay, or it is roughly right and the losses are costs.
+Over the same month of recorded BTC rounds (`research/backtest_antiworld.py`):
+
+| | P/L | twin | twin P/L | pair | contracts vs original |
+|---|---|---|---|---|---|
+| Value | −$440 | Anti Value | −$1,000 (bust) | −$1,440 | 0.80× |
+| Model | −$998 | Anti Model | **+$898** | −$100 | 1.19× |
+| Late | −$989 | Anti Late | **+$3,009** | +$2,019 | 0.80× |
+| Scalper | −$742 | Anti Scalper | −$231 | −$972 | 0.63× |
+| Favorite | −$969 | Anti Favorite | **+$1,574** | +$605 | 3.25× |
+| Lottery | −$568 | Anti Lottery | −$4 | −$572 | 0.03× |
+
+Three twins made money and three did not, which is more interesting than a clean sweep either
+way — but **read the last column before drawing conclusions.** Equal money buys very unequal
+quantities at 18¢ and at 85¢, so a pair is not a hedge: it carries a standing long position in
+whichever side was cheaper. `Anti Favorite` holds 3.25× its original's contracts, `Anti
+Lottery` 0.03×. A positive pair therefore does *not* prove the model is backwards, and a
+negative one does not isolate the fees.
+
+What the twin does show honestly is the thing the panel exists for: whether taking the other
+side, at the same risk, would have done better. For `Late` and `Favorite` over this month, it
+clearly would.
+
+## When a strategy runs out
+
+Each strategy starts with **$1,000** and may have at most **$250** at risk across all open
+bets at any moment — a quarter of the *starting* bank, not the current one, so a winning run
+does not quietly raise the ceiling on its own stakes.
+
+A strategy is finished when it has under a dollar and nothing outstanding: a contract costs a
+cent plus fee, so it cannot bet again. Open bets are excluded on purpose — while one is live
+the strategy still holds something that might pay, and calling it dead then would flap every
+time a round went against it.
+
+Three things happen, in order:
+
+1. **A postmortem is written** to `kalshi_bankrupt_<name>_<time>.md`, before anything is
+   cleared. Net by coin, by outcome, by what triggered each early sale, the worst rounds and
+   what share of the damage they were, and the exact settings it was running.
+2. **A line is appended** to `kalshi_bankruptcies.log` and the app raises a notification.
+   That file is tab-separated and append-only, so it can be watched from outside the app.
+3. **A strategy is staked again** at $1,000 with a clean log, and `bankruptcies` counts the
+   lives. **A twin is not.** It retires: no more bets, ever, and its original carries on
+   trading alone.
+
+The two need opposite treatment. A strategy exists to be compared and stops producing
+evidence at zero, so leaving it dead would quietly shrink the experiment. A twin is a
+measurement of its original rather than a competitor, and handing it a fresh stake every time
+it failed would say nothing except that it failed again. Nothing can pay money into a retired
+account, so retirement is permanent; the panel greys the row and labels it, because a balance
+frozen at $0.00 otherwise looks like a bug.
+
+Restaking is deliberate. Six strategies exist to be compared, and one sitting at zero stops
+producing evidence, so leaving it dead would quietly shrink the experiment. The run that
+ended is preserved in its postmortem — and a strategy on its third life is telling you
+something a balance alone would not.
+
+## Tests
+
+```bash
+python tests/run.py
+```
+
+Stdlib `unittest`, no packages to install, and nothing to configure. They run on every push
+via GitHub Actions on Windows and Linux across Python 3.12 and 3.13.
+
+They never import `asset_cracker` — that would build a Tk window and fail on a headless
+machine — so display logic is checked as geometry and numbers instead. Anything they need
+from the app is read out of its source, which means a test notices if the app's own tables
+change underneath it.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before making changes.
+
+Runtime state (`kalshi_balance*.json`, `kalshi_*.csv`) is gitignored — it's personal
+results, and the app recreates it at $1,000 per strategy on first launch.
+
+## The logs, and what to ask them
+
+The app writes three CSVs next to itself while it runs. The trade log says what happened;
+the other two exist to say whether it should have.
+
+| File | One row per | Read it to ask |
+|---|---|---|
+| `kalshi_trades.csv` | bet, sale, settlement | What did it do, at what price, with how long left (`tau`) and what book (`yes_bid`/`yes_ask`)? `why` separates an entry from a value exit from a capture exit. |
+| `kalshi_exits.csv` | early sale, written when that round settles | **Did selling early cost us?** `gave_up` is what holding would have paid minus what we got. Positive means the sale was a mistake in hindsight. |
+| `kalshi_rounds.csv` | coin per round, *including rounds nobody bet on* | Why didn't it trade? Rows with `bets = 0` are the passed-on rounds. `index_gap_pct` tracks whether the index offset is drifting. |
+| `kalshi_bankruptcies.log` | strategy that ran out of money | Which ones die, how long they lasted, and how many times. Tab-separated and append-only, so `tail -f` works. |
+| `kalshi_sessions.csv` | run of the app | Which runs happened, how long, on what settings, and how they ended. |
+| `kalshi_bankrupt_<name>_<time>.md` | the same event, in full | **Why it died.** Net by coin, by outcome, by exit trigger, the worst rounds, and the settings it was running. |
+
+Every row in all three CSVs carries a **`session`** — the run of the app it came from —
+because otherwise the logs are one undifferentiated stream: close the app, reopen it, change
+the starting bank from $150 to $1,000, and the rows simply continue with nothing marking
+where one era ended. `kalshi_sessions.csv` indexes the runs, recording what each was
+*configured* with (bank, round cap, coins, strategy count) as well as how it went, since an
+old session's numbers cannot be read correctly without knowing the settings behind them.
+
+```bash
+python research/sessions.py           # every run, newest first
+python research/sessions.py last      # the most recent, in detail
+python research/sessions.py 20260920_235320
+```
+
+Counts on a session row are for that run alone. The accounts themselves persist across
+restarts, so reading their lifetime totals would credit a one-minute session with every bet
+ever placed.
+
+`gave_up` is the number to tune `take_capture` on. Selling early always costs something in
+hindsight — a position deep enough in the money to trigger a capture exit usually goes on
+to win. The question is whether the reversals it avoids are worth the upside it clips, and
+that is a question only a few hundred graded exits can answer. Summing `gave_up` per `why`
+and comparing with the realised P/L over the same span is the whole experiment.
+
+A round still open when the app closes is carried across the restart, so restarting does
+not punch a hole in the round log.
 
 ## Caveats
 

@@ -34,7 +34,8 @@ from ctypes import wintypes
 from datetime import datetime, timedelta, timezone
 from tkinter import font as tkfont
 
-from kalshi_trader import START_BALANCE, STRATEGIES, KalshiTrader, parse_amount
+from kalshi_trader import (ANTI_STRATEGIES, START_BALANCE, STRATEGIES, KalshiTrader,
+                           parse_amount, strategies)
 
 APP_NAME = "Asset Cracker"
 APP_ID = "AssetCracker.App"  # how Windows knows our notifications belong to us
@@ -44,8 +45,12 @@ TICKER_EVERY_MS = 500  # Coinbase allows ~10 requests/sec per IP, so this is wel
 CANDLES_EVERY_MS = 60_000
 ALERT_PCT = 1.0  # notify when the price moves this much since the last alert
 
-# name -> (candle size in seconds, how many candles to show)
-RANGES = {"15M": (60, 15), "1H": (60, 60), "24H": (300, 288), "7D": (3600, 168)}
+# name -> (point size in seconds, how many points to show)
+RANGES = {"1M": (1, 60), "15M": (60, 15), "1H": (60, 60), "24H": (300, 288), "7D": (3600, 168)}
+# 1M is drawn from the live feed rather than Coinbase's candles: the smallest candle they
+# serve is a minute, which would be a single point. The feed is already kept per second for
+# the window chart, so a minute of it is free.
+LIVE_RANGES = {"1M"}
 DEFAULT_RANGE = "24H"
 
 # Dark theme
@@ -58,6 +63,9 @@ BUTTON = "#232A3D"
 HILITE = "#2C3752"  # a lighter band behind the current window's orders in the log
 AMBER = "#F2B84B"  # the soft "a bet was just placed" glow on the Strategies tab
 FLASH_SECONDS = 9.0  # how long that glow takes to fade away (one slow pulse, no blinking)
+# An active pill is filled with TEXT, so a bright symbol on it is unreadable. Blended this far
+# toward BG, the dimmest of the five still clears 4.5:1 there.
+SYMBOL_ON_LIGHT = 0.5
 
 
 def mix_color(base, top, amount):
@@ -78,6 +86,10 @@ TRANSPARENT = "#010203"  # painted outside the rounded shell, then made see-thro
 
 W, H = 360, 720  # phone size in logical pixels
 TAB = 16  # the side button sticks out this far past the phone's right edge
+# The bell, world toggle and close button share this line, level with the island and clear
+# of the coin pills below. They used to sit in the pills' row, where the world toggle landed
+# on top of the first coin.
+TOP_ROW_Y = 36
 SIDE = 360  # the side panel is a square this big
 
 
@@ -513,15 +525,44 @@ def save_muted(coin, value):
         pass  # not being able to remember the setting isn't worth an error
 
 
-# The coins we track. Each gets its own phone window, side panel, accounts and files.
-# The index gap and volatility were measured from a week of Kalshi settlements (Sep 2026).
+# The coins we track, up to five, each with its own phone page and side panel, all funded from
+# one balance per strategy. What each field is for:
+#
+#   index_offset_pct / index_sd_pct / default_sigma
+#       How this coin's price behaves and how far Kalshi's settlement index sits above our
+#       exchange's. BTC and ETH were measured over a week of settlements (see research/); the
+#       rest start from BTC's numbers and self-calibrate from their own within the hour.
+#   decimals
+#       How many Kalshi quotes this coin's strikes to, which is the precision a price has to
+#       be shown at for a 15-minute move to be visible at all: DOGE moves in the sixth.
+#   symbol
+#       The coin's sign, checked against the font by research/font_probe.py -- a codepoint
+#       Segoe UI lacks draws as a hollow box, which is how U+25CE was rejected for Solana.
+#   colour
+#       For the sign only. The ticker beside it keeps the colour everything else uses, so a row
+#       reads as text with a mark rather than as five differently coloured labels. Each clears
+#       5.8:1 against the dark backgrounds; SYMBOL_ON_LIGHT dims it for an active pill.
 ASSETS = {
-    "BTC": dict(coin="BTC", name="Bitcoin", product="BTC-USD", series="KXBTC15M", side="right",
-                icon="btc.ico", suffix="", index_offset_pct=0.000057,
-                index_sd_pct=0.000144, default_sigma=8e-5, min_pad_pct=0.000187, decimals=0),
-    "ETH": dict(coin="ETH", name="Ethereum", product="ETH-USD", series="KXETH15M", side="left",
-                icon="eth.ico", suffix="_eth", index_offset_pct=0.0000713,
+    "BTC": dict(coin="BTC", name="Bitcoin", product="BTC-USD", series="KXBTC15M",
+                symbol="₿", colour="#F7931A",  # bitcoin orange
+                icon="btc.ico", index_offset_pct=0.000057,
+                index_sd_pct=0.000144, default_sigma=8e-5, min_pad_pct=0.000187, decimals=2),
+    "ETH": dict(coin="ETH", name="Ethereum", product="ETH-USD", series="KXETH15M",
+                symbol="Ξ", colour="#8FA2F2",  # periwinkle; #627EEA is too dark here
+                icon="eth.ico", index_offset_pct=0.0000713,
                 index_sd_pct=0.0002156, default_sigma=9.4e-5, min_pad_pct=0.000187, decimals=2),
+    "SOL": dict(coin="SOL", name="Solana", product="SOL-USD", series="KXSOL15M",
+                symbol="≡", colour="#14F195",  # solana green
+                icon="eth.ico", index_offset_pct=0.000057,
+                index_sd_pct=0.000216, default_sigma=1.1e-4, min_pad_pct=0.00025, decimals=4),
+    "XRP": dict(coin="XRP", name="XRP", product="XRP-USD", series="KXXRP15M",
+                symbol="✕", colour="#4FC3F7",  # ripple blue; its real mark is black
+                icon="eth.ico", index_offset_pct=0.000057,
+                index_sd_pct=0.000216, default_sigma=1.1e-4, min_pad_pct=0.00025, decimals=4),
+    "DOGE": dict(coin="DOGE", name="Dogecoin", product="DOGE-USD", series="KXDOGE15M",
+                 symbol="Ð", colour="#E3C044",  # dogecoin gold, lifted off #C2A633
+                 icon="eth.ico", index_offset_pct=0.000057,
+                 index_sd_pct=0.000216, default_sigma=1.2e-4, min_pad_pct=0.00025, decimals=6),
 }
 
 
@@ -561,6 +602,20 @@ class Drawing:
             fill=fill, anchor=anchor, **kw
         )
 
+    def marked_text(self, cx, y, symbol, rest, size, mark, fill, **kw):
+        """Draw "<symbol> <rest>" centred on cx, with only the symbol coloured.
+
+        Two canvas items rather than one, because a text item takes a single fill. They are
+        measured and placed by hand so the pair still reads as one centred label.
+        """
+        font = tkfont.Font(family="Segoe UI Semibold", size=-self.px(size))
+        gap = 4
+        w_sym = font.measure(symbol) / self.k
+        w_rest = font.measure(rest) / self.k
+        start = cx - (w_sym + gap + w_rest) / 2
+        self.text(start, y, symbol, size, mark, anchor="w", **kw)
+        self.text(start + w_sym + gap, y, rest, size, fill, anchor="w", **kw)
+
     def _button(self, tag, on_click):
         self.canvas.tag_bind(tag, "<Button-1>", lambda e: on_click())
         self.canvas.tag_bind(tag, "<Enter>", lambda e: self.canvas.configure(cursor="hand2"))
@@ -576,7 +631,14 @@ class Hub:
         self.root = root
         self.active = active
         self.monitors = {}
-        self.panels = {}
+        # One panel per world, each following whichever coin page is showing.
+        self.panels = {False: None, True: None}
+        # Which world the chart's bet markers come from. Independent of the panels: this is
+        # only about the graph, where the two would otherwise be indistinguishable.
+        self.chart_anti = False
+        # One trader for the whole app: each strategy has a single balance that every coin
+        # draws on, so a bet on SOL spends the same money as a bet on BTC.
+        self.trader = KalshiTrader(data_dir(), ASSETS)
 
     def monitor(self):
         """The page on screen right now."""
@@ -592,9 +654,13 @@ class Hub:
         new.lift()
         old.withdraw()
         self.active = coin
+        self.trader.select_coin(coin)  # the panel follows the page you are looking at
         self.redraw_tabs()
         for panel in self.panels.values():
-            panel.follow()
+            if panel:
+                panel.follow()
+                if panel.is_open:
+                    panel.refresh()
 
     def follow(self, moved):
         """The phone was dragged: carry the hidden pages and the open panels along."""
@@ -602,24 +668,35 @@ class Hub:
             if m is not moved:
                 m.geometry(f"+{moved.winfo_x()}+{moved.winfo_y()}")
         for panel in self.panels.values():
-            panel.follow()
+            if panel:
+                panel.follow()
 
-    def toggle_panel(self, coin):
-        if coin not in self.panels:
-            self.panels[coin] = SidePanel(self.monitors[coin])
-        self.panels[coin].toggle()
+    def toggle_panel(self, anti=False):
+        if self.panels[anti] is None:
+            self.panels[anti] = SidePanel(self, anti=anti)
+        self.panels[anti].toggle()
+
+    def open_panels(self):
+        return [p for p in self.panels.values() if p and p.is_open]
+
+    def toggle_chart_world(self):
+        """Flip the chart between the strategies and their anti-world twins."""
+        self.chart_anti = not self.chart_anti
+        for m in self.monitors.values():
+            m._draw_world_button()
+            m._chart_dirty = True
         self.redraw_tabs()
 
-    def is_open(self, coin):
-        return coin in self.panels and self.panels[coin].is_open
+    def is_open(self, anti=False):
+        p = self.panels[anti]
+        return p is not None and p.is_open
 
     def redraw_tabs(self):
         for m in self.monitors.values():
             m._draw_tab()
 
     def quit(self):
-        for m in self.monitors.values():
-            m.trader.save(force=True)  # never lose the latest balances
+        self.trader.save(force=True)  # never lose the latest balances
         self.root.destroy()
 
 
@@ -632,7 +709,6 @@ class Monitor(Drawing, tk.Toplevel):
         self.hub = hub
         self.asset = asset
         self.coin = asset["coin"]
-        self.side = asset["side"]  # which side this coin's panel opens on
         self.ox = TAB  # room for a tab on each edge: Ethereum's on the left, Bitcoin's on the right
         self.k = self.winfo_fpixels("1i") / 96  # display scaling (1.0 = 100%)
         self.app_id = register_app_id() if sys.platform == "win32" else APP_ID
@@ -655,9 +731,6 @@ class Monitor(Drawing, tk.Toplevel):
         self._clock_offsets = collections.deque(maxlen=200)  # exchange time - PC time
         self._chart_dirty = False
         self._chart_drawn_at = 0.0
-        self.trader = KalshiTrader(
-            data_dir(), suffix=asset["suffix"], offset_pct=asset["index_offset_pct"],
-            sd_pct=asset["index_sd_pct"], default_sigma=asset["default_sigma"])
         self._panel_drawn_at = 0.0
         self._taskbar_styled = False
         self.flash = {}  # strategy name -> when it last placed a bet (for the glow)
@@ -681,6 +754,7 @@ class Monitor(Drawing, tk.Toplevel):
         self._draw_static()
         self._draw_tab()
         self._draw_bell_button()
+        self._draw_world_button()
         self._draw_range_pills()
         self._draw_price()
         self._draw_ptb()
@@ -715,9 +789,19 @@ class Monitor(Drawing, tk.Toplevel):
             pass
 
     @property
+    def trader(self):
+        """The one trader every page shares."""
+        return self.hub.trader
+
+    @property
+    def state(self):
+        """This coin's prices, volatility and index calibration."""
+        return self.hub.trader.coins[self.coin]
+
+    @property
     def panel(self):
-        """This coin's side panel, once it has been opened."""
-        return self.hub.panels.get(self.coin)
+        """The single side panel, once it has been opened."""
+        return self.hub.panel
 
     def _style_for_taskbar(self):
         """Borderless windows are hidden from the taskbar unless we ask nicely."""
@@ -768,26 +852,43 @@ class Monitor(Drawing, tk.Toplevel):
         self.rrect(W / 2 - 52, 20, W / 2 + 52, 46, 13, fill=ISLAND)  # the island
         self.rrect(W / 2 - 62, H - 28, W / 2 + 62, H - 22, 3, fill=MUTED)  # home bar
 
-        # The page switch: tap the other coin to flip to its page. Ethereum sits on the left
-        # and Bitcoin on the right, matching the side each one's panel opens on.
-        for i, (coin, asset) in enumerate((("ETH", ASSETS["ETH"]), ("BTC", ASSETS["BTC"]))):
-            x1 = W / 2 - 107 + i * 110
+        # The page switch: one pill per coin. Tickers rather than names, because five
+        # names will not fit across a phone.
+        # The bell, the world toggle and the close button sit in the island's band above, so
+        # the pills get the full width here rather than a strip between them.
+        coins = list(ASSETS)
+        left, right, gap = 26, W - 26, 3
+        wide = (right - left - gap * (len(coins) - 1)) / len(coins)
+        for i, coin in enumerate(coins):
+            x1 = left + i * (wide + gap)
             active = coin == self.coin
             tags = ("btn", f"page_{coin}")
-            self.rrect(x1, 70, x1 + 104, 98, 14, fill=TEXT if active else BUTTON, tags=tags)
-            self.text(x1 + 52, 84, asset["name"], 13, BG if active else MUTED, tags=tags)
+            self.rrect(x1, 71, x1 + wide, 97, 12, fill=TEXT if active else BUTTON, tags=tags)
+            asset = ASSETS[coin]
+            # an active pill is filled with TEXT, so its bright sign has to be dimmed
+            mark = (mix_color(asset["colour"], BG, SYMBOL_ON_LIGHT) if active
+                    else asset["colour"])
+            self.marked_text(x1 + wide / 2, 84, asset["symbol"], coin, 10, mark,
+                             BG if active else MUTED, tags=tags)
             self._button(f"page_{coin}", lambda c=coin: self.hub.switch(c))
 
-        # close button, top left
-        self.circle(42, 84, 15, fill=BUTTON, width=0, tags=("btn", "close"))
+        # All three controls sit either side of the island, clear of the coin pills below.
+        # They used to share the pills' row, where the world toggle covered the first coin.
+        cx, cy = W - 46, TOP_ROW_Y
+        self.circle(cx, cy, 15, fill=BUTTON, width=0, tags=("btn", "close"))
         for a, b in (((-5, -5), (5, 5)), ((-5, 5), (5, -5))):
-            c.create_line(*self.pts([42 + a[0], 84 + a[1], 42 + b[0], 84 + b[1]]),
+            c.create_line(*self.pts([cx + a[0], cy + a[1], cx + b[0], cy + b[1]]),
                           fill=MUTED, width=self.px(2), capstyle="round",
                           tags=("btn", "close"))
         self._button("close", self.quit_app)
 
         # "BTC index  · live" caption (the settlement index, as the prediction market uses)
-        self.text(W / 2 - 4, 122, f"{self.coin} index", 12, MUTED, anchor="e")
+        # measured and centred by hand so the live dot beside it stays where it was
+        caption = f"{self.coin} index"
+        font = tkfont.Font(family="Segoe UI Semibold", size=-self.px(12))
+        w = (font.measure(self.asset["symbol"]) + font.measure(caption)) / self.k + 4
+        self.marked_text(W / 2 - 4 - w / 2, 122, self.asset["symbol"], caption, 12,
+                         self.asset["colour"], MUTED)
         self.live_dot = self.circle(W / 2 + 8, 122, 4, fill=MUTED, width=0)
         self.live_text = self.text(W / 2 + 16, 122, "connecting", 12, MUTED, anchor="w")
 
@@ -797,7 +898,7 @@ class Monitor(Drawing, tk.Toplevel):
     def _draw_bell_button(self):
         c = self.canvas
         c.delete("bell")
-        cx, cy, sc = W - 46, 84, 0.85
+        cx, cy, sc = 42, TOP_ROW_Y, 0.85
         self.circle(cx, cy, 20, fill=CARD, width=0, tags=("btn", "bell"))
         color = MUTED if self.muted else BELL
         body = []
@@ -814,33 +915,65 @@ class Monitor(Drawing, tk.Toplevel):
                           width=self.px(2.5), capstyle="round", tags=("btn", "bell"))
         self._button("bell", self.toggle_mute)
 
-    def _draw_tab(self):
-        """The side buttons on the phone's edges: Ethereum's on the left, Bitcoin's on the
-        right. Both are always there, so both panels can be open at the same time."""
+    def _draw_world_button(self):
+        """A globe beside the bell, switching which world's bets the chart draws.
+
+        The two panels stay where they are -- this is only about the markers on the graph,
+        which is the one place the two worlds would otherwise be impossible to tell apart.
+        In the anti-world it is drawn in the DOWN colour, matching the left-hand tab.
+        """
         c = self.canvas
-        c.delete("tab")
+        c.delete("world")
+        anti = self.hub.chart_anti
+        cx, cy, r = 84, TOP_ROW_Y, 13
+        tags = ("btn", "world")
+        colour = DOWN if anti else TEXT
+        self.circle(cx, cy, 20, fill=CARD, width=0, tags=tags)
+        self.circle(cx, cy, r, fill="", outline=colour, width=self.px(2), tags=tags)
+        # the equator, and two meridians drawn as ellipses squeezed toward the centre
+        c.create_line(*self.pts([cx - r, cy, cx + r, cy]), fill=colour,
+                      width=self.px(1.4), tags=tags)
+        for squeeze in (0.42, 0.85):
+            c.create_oval(*self.pts([cx - r * squeeze, cy - r, cx + r * squeeze, cy + r]),
+                          outline=colour, width=self.px(1.4), tags=tags)
+        if anti:  # a small mark so the state reads without relying on colour alone
+            self.text(cx + 15, cy - 11, "A", 9, DOWN, tags=tags)
+        self._button("world", self.hub.toggle_chart_world)
+
+    def _draw_tab(self):
+        """The side buttons. Right opens the strategies, left opens their anti-world twins;
+        both follow whichever coin's page you are looking at. The left one is tinted in the
+        DOWN colour so the two worlds are never confused at a glance."""
+        c = self.canvas
+        c.delete("tabs")  # the group tag, never bound to a click
         top, bottom = 196, 296
         mid = (top + bottom) / 2
-        for coin, asset in ASSETS.items():
-            opened = self.hub.is_open(coin)
-            name = f"tab_{coin}"
-            tags = ("btn", "tab", name)
-            if asset["side"] == "right":
-                self.rrect(W - 4, top, W + TAB, bottom, 7, fill=UP if opened else BEZEL, tags=tags)
-                x, out = W + 6, 1  # `out` points away from the phone
+        for anti in (False, True):
+            opened = self.hub.is_open(anti)
+            # Each tab's click tag is its own. Binding a click to a tag that both tabs carry
+            # would fire both handlers from one press, and a tab carrying its own tag twice
+            # would fire its handler twice and toggle straight back.
+            name = "tab_anti" if anti else "tab_real"
+            tags = ("btn", "tabs", name)
+            live = DOWN if anti else UP
+            if anti:
+                self.rrect(-TAB, top, 4, bottom, 7, fill=live if opened else BEZEL, tags=tags)
+                x, d = -6, -1  # the chevron points away from the phone to open
             else:
-                self.rrect(-TAB, top, 4, bottom, 7, fill=UP if opened else BEZEL, tags=tags)
-                x, out = -6, -1
-            d = -out if opened else out  # the chevron points away from the phone to open
+                self.rrect(W - 4, top, W + TAB, bottom, 7, fill=live if opened else BEZEL,
+                           tags=tags)
+                x, d = W + 6, 1
+            if opened:
+                d = -d
             c.create_line(*self.pts([x - 2 * d, mid - 7, x + 2 * d, mid, x - 2 * d, mid + 7]),
                           fill=BG if opened else TEXT, width=self.px(2), capstyle="round",
                           joinstyle="round", tags=tags)
-            self.text(x, mid + 20, coin[0], 9, BG if opened else MUTED, tags=tags)  # E or B
-            self._button(name, lambda c=coin: self.hub.toggle_panel(c))
+            self._button(name, lambda a=anti: self.hub.toggle_panel(a))
 
     def _draw_range_pills(self):
         self.canvas.delete("pills")
-        w, gap, top, bottom = 62, 8, 596, 632
+        # sized so the whole row still fits the phone's width as ranges are added
+        w, gap, top, bottom = 56, 6, 596, 632
         x = (W - (w * len(RANGES) + gap * (len(RANGES) - 1))) / 2
         for key in RANGES:
             active = key == self.range_key
@@ -860,13 +993,22 @@ class Monitor(Drawing, tk.Toplevel):
         if self.price is None:
             self.text(W / 2, 168, "$ ———", 44, MUTED, tags="price")
             return
-        shown = self.price * (1 + self.trader.offset_pct)
-        self.text(W / 2, 168, f"${shown:,.2f}", 44, TEXT, tags="price")
+        shown = self.price * (1 + self.state.offset_pct)
+        dec = self.asset["decimals"]
+        self.text(W / 2, 168, f"${shown:,.{dec}f}", 44, TEXT, tags="price")
 
-        if len(self.history) >= 2 and self.history[0]:
-            change = (self.price - self.history[0]) / self.history[0] * 100
+        # 1M has no candle history behind it, so its change comes from the live points
+        if self.range_key in LIVE_RANGES:
+            window = [p for t, p in self.window_pts if t >= self.now() - 60]
+            base = window[0] if len(window) >= 2 else None
+        else:
+            base = self.history[0] if len(self.history) >= 2 else None
+        if base:
+            change = (self.price - base) / base * 100
             good = change >= 0
-            label = f"{'▲' if good else '▼'} {abs(change):.2f}%  ·  {self.range_key}"
+            # a minute's move is a hundredth of a percent or so, and would round to 0.00
+            places = 3 if self.range_key in LIVE_RANGES else 2
+            label = f"{'▲' if good else '▼'} {abs(change):.{places}f}%  ·  {self.range_key}"
             width = tkfont.Font(family="Segoe UI Semibold", size=-self.px(13)).measure(label)
             half = width / self.k / 2 + 16
             self.rrect(W / 2 - half, 200, W / 2 + half, 228, 14,
@@ -885,12 +1027,13 @@ class Monitor(Drawing, tk.Toplevel):
             return
         # Kalshi settles on an index that runs a little above Coinbase's price, so compare
         # like with like: our estimate of that index against the price to beat.
-        offset, samples = self.trader.offset_status()
+        offset, samples = self.state.offset_status()
         est = self.price * (1 + offset) if self.price is not None else None
         state = MUTED if est is None else (UP if est >= self.ptb else DOWN)
         self.circle(42, mid, 4, fill=state, width=0, tags="ptb")
         self.text(54, mid, "Price to beat", 11, MUTED, weight="", anchor="w", tags="ptb")
-        self.text(W / 2 + 34, mid, f"${self.ptb:,.2f}", 14, TEXT, tags="ptb")
+        self.text(W / 2 + 34, mid, f"${self.ptb:,.{self.asset['decimals']}f}", 14, TEXT,
+                  tags="ptb")
         left = int(self.ptb_close - self.now())
         clock = f"{left // 60}:{left % 60:02d}" if left > 0 else "settling"
         self.text(W - 40, mid, clock, 12, MUTED, anchor="e", tags="ptb")
@@ -916,14 +1059,15 @@ class Monitor(Drawing, tk.Toplevel):
         close_t = self.ptb_close
         open_t = close_t - 900
         pts = [(t, p) for t, p in self.window_pts if open_t <= t <= close_t]
-        bets = [lot for lot in self.trader.account().log if lot["close"] == close_t]
+        bets = [lot for lot in self.trader.account(anti=self.hub.chart_anti).log
+                if lot["close"] == close_t and lot.get("coin") == self.coin]
         if not pts:
             self.text(W / 2, 420, "Window just opened…", 14, MUTED, weight="", tags="chart")
             return
 
         # Draw on the scale of Kalshi's index (Coinbase's price nudged up by its usual gap),
         # since that's what the price to beat and the settlement use.
-        lift = 1 + self.trader.offset_pct
+        lift = 1 + self.state.offset_pct
         dec = self.asset["decimals"]
         levels = [p * lift for _, p in pts] + [self.ptb]
         for lot in bets:
@@ -960,7 +1104,9 @@ class Monitor(Drawing, tk.Toplevel):
         y = Yi(self.ptb)  # the price to beat
         c.create_line(*self.pts([left, y, right, y]), fill=TEXT, width=self.px(1.5),
                       dash=(self.px(5), self.px(4)), tags="chart")
-        self.text(right, y - 8, f"Price to beat  ${self.ptb:,.2f}", 10, MUTED, weight="",
+        self.text(right, y - 8,
+                  f"Price to beat  ${self.ptb:,.{self.asset['decimals']}f}", 10, MUTED,
+                  weight="",
                   anchor="e", tags="chart")
         ex, ey = X(pts[-1][0]), Y(pts[-1][1])
         self.circle(ex, ey, 6.5, fill=CARD, width=0, tags="chart")
@@ -1000,11 +1146,77 @@ class Monitor(Drawing, tk.Toplevel):
         self.text(46, 552, f"Low  ${min(ps):,.{dec}f}", 11, MUTED, anchor="w", tags="chart")
         self.text(W - 46, 552, f"High  ${max(ps):,.{dec}f}", 11, MUTED, anchor="e", tags="chart")
 
+    def _draw_minute_chart(self):
+        """The 1M view: the last sixty seconds, one point per second, straight off the feed.
+
+        At this zoom the price barely moves, so the scale has to fit the data rather than
+        the price to beat -- a target far away would flatten a whole minute into a
+        straight line. The target is still drawn when it happens to fall inside the band.
+        """
+        c = self.canvas
+        left, right, top, bottom = 46, W - 46, 322, 518
+        start = self.now() - 60
+        pts = [(t, p) for t, p in self.window_pts if t >= start]
+        if len(pts) < 2:
+            self.text(W / 2, 420, "Listening…", 14, MUTED, weight="", tags="chart")
+            return
+
+        lift = 1 + self.state.offset_pct
+        dec = self.asset["decimals"]
+        levels = [p * lift for _, p in pts]
+        lo, hi = min(levels), max(levels)
+        # a minute can be genuinely flat, so fall back to the coin's own minimum padding
+        pad = max((hi - lo) * 0.18, hi * self.asset["min_pad_pct"] * 0.5)
+        lo, hi = lo - pad, hi + pad
+
+        def X(t):
+            return left + (right - left) * (t - start) / 60
+
+        def Yi(p):
+            return bottom - (bottom - top) * (p - lo) / (hi - lo)
+
+        good = levels[-1] >= levels[0]
+        line, tint = (UP, UP_TINT) if good else (DOWN, DOWN_TINT)
+        for i in range(4):  # faint gridlines
+            y = top + (bottom - top) * i / 3
+            c.create_line(*self.pts([left, y, right, y]), fill=GRID, width=self.px(1),
+                          tags="chart")
+
+        coords = [v for (t, _), p in zip(pts, levels) for v in (X(t), Yi(p))]
+        c.create_polygon(self.pts(coords + [coords[-2], bottom, coords[0], bottom]),
+                         fill=tint, outline="", tags="chart")
+        c.create_line(*self.pts(coords), fill=line, width=self.px(2.5),
+                      capstyle="round", joinstyle="round", tags="chart")
+
+        # One dot per second. At this zoom they are individually visible, so a gap in the
+        # dots is a gap in the feed -- which is worth being able to see at a glance.
+        for x, y in zip(coords[::2], coords[1::2]):
+            self.circle(x, y, 1.8, fill=line, width=0, tags="chart")
+        self.circle(coords[-2], coords[-1], 7, fill=CARD, width=0, tags="chart")
+        self.circle(coords[-2], coords[-1], 4.5, fill=line, width=0, tags="chart")
+
+        if self.ptb is not None and lo <= self.ptb <= hi:  # only when it is actually in view
+            y = Yi(self.ptb)
+            c.create_line(*self.pts([left, y, right, y]), fill=TEXT, width=self.px(1.5),
+                          dash=(self.px(5), self.px(4)), tags="chart")
+            self.text(right, y - 8, f"Price to beat  ${self.ptb:,.{dec}f}", 10, MUTED,
+                      weight="", anchor="e", tags="chart")
+
+        self.text(46, 552, f"Low  ${min(levels):,.{dec}f}", 11, MUTED, anchor="w",
+                  tags="chart")
+        self.text(W - 46, 552, f"High  ${max(levels):,.{dec}f}", 11, MUTED, anchor="e",
+                  tags="chart")
+        # 60 would be a full minute with no missed seconds; fewer means a quiet or laggy feed
+        self.text(W / 2, 552, f"{len(pts)}/60 ticks", 11, MUTED, weight="", tags="chart")
+
     def _draw_chart(self):
         c = self.canvas
         c.delete("chart")
         if self.range_key == "15M":
             self._draw_window_chart()
+            return
+        if self.range_key == "1M":
+            self._draw_minute_chart()
             return
         left, right, top, bottom = 46, W - 46, 322, 518
         pts = list(self.history)
@@ -1037,7 +1249,7 @@ class Monitor(Drawing, tk.Toplevel):
         self.circle(ex, ey, 4.5, fill=line, width=0, tags="chart")
 
         if self.low is not None:  # on the index's scale, to match the headline price
-            dec, lift = self.asset["decimals"], 1 + self.trader.offset_pct
+            dec, lift = self.asset["decimals"], 1 + self.state.offset_pct
             self.text(46, 552, f"Low  ${self.low * lift:,.{dec}f}", 11, MUTED, anchor="w",
                       tags="chart")
             self.text(W - 46, 552, f"High  ${self.high * lift:,.{dec}f}", 11, MUTED, anchor="e",
@@ -1095,7 +1307,8 @@ class Monitor(Drawing, tk.Toplevel):
 
         def worker():
             try:
-                send_toast(self.app_id, title, f"Now ${price:,.2f}")
+                send_toast(self.app_id, title,
+                           f"Now ${price:,.{self.asset['decimals']}f}")
             except Exception:
                 pass  # a missed toast shouldn't disturb the display
 
@@ -1116,6 +1329,8 @@ class Monitor(Drawing, tk.Toplevel):
         ).start()
 
     def _poll_history(self):
+        if self.range_key in LIVE_RANGES:
+            return  # nothing to fetch: this range is drawn from the feed we already have
         if self._history_busy:
             return
         self._history_busy = True
@@ -1146,7 +1361,7 @@ class Monitor(Drawing, tk.Toplevel):
             target=stream_kalshi,
             args=(lambda m: self.results.put(("market", m)),
                   lambda t, r, v, c: self.results.put(("settled", t, r, v, c)),
-                  self.trader.pending_tickers, self.now, self.asset["series"]),
+                  lambda: self.trader.pending_tickers(self.coin), self.now, self.asset["series"]),
             daemon=True,
         ).start()
 
@@ -1192,10 +1407,11 @@ class Monitor(Drawing, tk.Toplevel):
             self._chart_dirty = False
             self._chart_drawn_at = time.monotonic()
             self._draw_chart()
-        if (self.panel and self.panel.is_open
-                and time.monotonic() - self._panel_drawn_at > 0.25):
+        open_panels = self.hub.open_panels()
+        if open_panels and time.monotonic() - self._panel_drawn_at > 0.25:
             self._panel_drawn_at = time.monotonic()
-            self.panel.refresh()
+            for panel in open_panels:
+                panel.refresh()
         self.after(8, self._pump)
 
     def flash_level(self, name):
@@ -1209,29 +1425,58 @@ class Monitor(Drawing, tk.Toplevel):
             return 0.0
         return min(1.0, age / 0.5) * (1 - age / FLASH_SECONDS)
 
+    def _on_bankrupt(self, e):
+        """A strategy ran out and has been staked again. Unlike a bet, this is reported
+        whichever strategy is being tracked -- it is about the experiment, not about one
+        position -- though the bell still silences the toast. The postmortem is on disk
+        either way, which is what makes it findable after the fact.
+        """
+        title = f"{e['strategy']} ran out of money"
+        body = (f"Ended with ${e['cash']:.2f} after {e['rounds']} rounds. "
+                f"Staked again at ${START_BALANCE:,.0f} (life {e['life'] + 1}). "
+                f"Findings: {os.path.basename(e['report'])}")
+        print(f"[bankrupt] {title} - {body}", flush=True)  # also on stdout, for a log
+        if self.muted:
+            return
+
+        def worker():
+            try:
+                send_toast(self.app_id, title, body)
+            except Exception:
+                pass  # a missed toast shouldn't disturb the display
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _on_trade(self, e):
         """A bet was placed or settled: refresh the panel and (unless muted) notify."""
         if e["kind"] == "bet":
             self.flash[e["strategy"]] = time.monotonic()
-        if self.panel and self.panel.is_open:
-            self.panel.refresh()
+        for panel in self.hub.open_panels():
+            panel.refresh()
         self._chart_dirty = True  # a new marker may belong on the chart
+        if e["kind"] == "bankrupt":
+            self._on_bankrupt(e)
+            return
         # Five strategies trade at once; only the one you're tracking gets notifications,
         # and the bell silences those too.
-        if self.muted or e["strategy"] != self.trader.selected:
+        # One bet is one piece of news. A twin mirrors in the same instant, so notifying
+        # both worlds pinged twice for a single decision; the globe decides which world you
+        # are following, and the bell still silences it.
+        if self.muted or e["strategy"] != self.trader.tracked(self.hub.chart_anti):
             return
         who = f"{self.coin} {e['strategy']}"
         if e["kind"] == "bet":
             title = f"{who}: bet {e['side']}, {e['contracts']} × {e['price'] * 100:.0f}¢ ({e['multiplier']:.2f}x)"
             body = (f"{e['model_prob'] * 100:.0f}% confident  ·  ${e['cost']:.2f} incl. fee  ·  "
-                    f"price to beat ${e['strike']:,.2f}")
+                    f"price to beat ${e['strike']:,.{self.asset['decimals']}f}")
         elif e["kind"] == "sold":
             title = f"{who}: sold early {'+' if e['pnl'] >= 0 else '−'}${abs(e['pnl']):.2f}"
             body = f"{e['side']} × {e['contracts']} at {e['exit_price'] * 100:.0f}¢"
         else:
             title = f"{who}: {'won +' if e['won'] else 'lost −'}${abs(e['pnl']):.2f}"
             final = parse_amount(e.get("final_value")) or 0.0
-            body = f"{e['side']} bet {'paid out' if e['won'] else 'missed'}  ·  final ${final:,.2f}"
+            body = (f"{e['side']} bet {'paid out' if e['won'] else 'missed'}  ·  "
+                    f"final ${final:,.{self.asset['decimals']}f}")
 
         def worker():
             try:
@@ -1260,18 +1505,18 @@ class Monitor(Drawing, tk.Toplevel):
                 self._chart_dirty = True
             self._draw_status()
             ts = msg[2] or self.now()
-            self.trader.observe(self.price, ts)  # feeds volatility
+            self.trader.observe(self.coin, self.price, ts)  # feeds volatility
             sec = int(ts)  # one point per second for the 15-minute window chart
             if self.window_pts and self.window_pts[-1][0] == sec:
                 self.window_pts[-1] = (sec, self.price)
             elif not self.window_pts or sec > self.window_pts[-1][0]:
                 self.window_pts.append((sec, self.price))
-            if self.range_key == "15M":
+            if self.range_key in ("15M", "1M"):  # both are drawn from the live points
                 self._chart_dirty = True
         elif kind == "seed":
             candles = msg[1]  # [(time, close), ...] one per minute, oldest first
             done = [p for t, p in candles if t <= self.now()]  # drop the minute still in progress
-            self.trader.seed_vol(done)
+            self.trader.seed_vol(self.coin, done)
             first = self.window_pts[0][0] if self.window_pts else float("inf")
             self.window_pts.extendleft(reversed([pt for pt in candles if pt[0] < first]))
             self._chart_dirty = True
@@ -1284,19 +1529,19 @@ class Monitor(Drawing, tk.Toplevel):
                 if self.range_key == "15M":
                     self._draw_chart()
             if self.price:
-                for event in self.trader.step(m, self.price, self.now()):
+                for event in self.trader.step(self.coin, m, self.price, self.now()):
                     self._on_trade(event)
             self.trader.save()  # throttled: keeps the balance file current
         elif kind == "settled":
             _, ticker, result, final, close = msg
             # The settled value is the index averaged over that round's final minute: a free,
             # exact measurement of how far it sits above our exchange price.
-            self.trader.note_settlement(close, final)
+            self.trader.note_settlement(self.coin, close, final)
             for event in self.trader.on_settled(ticker, result, final, self.now(), self.price):
                 self._on_trade(event)
             self._redraw_for_offset()  # a fresh measurement shifts every price we show
         elif kind == "offsets":
-            self.trader.seed_offsets(msg[1])
+            self.trader.seed_offsets(self.coin, msg[1])
             self._redraw_for_offset()
         elif kind == "offline":
             if self.online:
@@ -1322,17 +1567,23 @@ class Monitor(Drawing, tk.Toplevel):
 
 
 class SidePanel(Drawing, tk.Toplevel):
-    """A square window that slides out from the phone's side button. It has three
-    tabs: the tracked strategy's account, a log of its bets, and a leaderboard."""
+    """A square window that slides out from a side button on the phone. It has three tabs:
+    the tracked strategy's account, a log of its bets, and a leaderboard.
+
+    There are two, one per world. The right-hand panel shows the six strategies; the left
+    shows their anti-world twins, which believe the opposite of whatever the model says.
+    Same class, same tabs -- `anti` picks which set of accounts it reads and which edge it
+    grows from."""
 
     STEPS = 9
     ROW_H = 24  # a row in the bet log
     LOG_ROWS = 8
 
-    def __init__(self, app):
-        super().__init__(app.master)  # `app` is the coin's page; the panel is its own window
-        self.app = app
-        self.k = app.k
+    def __init__(self, hub, anti=False):
+        super().__init__(hub.root)  # its own window, parented to the invisible root
+        self.hub = hub
+        self.anti = anti
+        self.k = hub.monitor().k
         self.is_open = False
         self.tab = "account"
         self.log_offset = 0  # how many rows the log is scrolled back
@@ -1348,13 +1599,13 @@ class SidePanel(Drawing, tk.Toplevel):
         s = self.px(SIDE)
         self.canvas = tk.Canvas(self, width=s, height=s, bg=TRANSPARENT, highlightthickness=0)
         # Anchor toward the phone so the panel appears to slide out from it.
-        self.canvas.pack(anchor="nw" if app.side == "right" else "ne")
+        self.canvas.pack(anchor="nw")
         self.canvas.bind("<MouseWheel>", lambda e: self._scroll(-1 if e.delta > 0 else 1))
         self.rrect(0, 0, SIDE, SIDE, 46, fill=BEZEL)
         self.rrect(6, 6, SIDE - 6, SIDE - 6, 40, fill=BG)
         for tab in ("account", "log", "strategies"):
             self._button(f"tab_{tab}", lambda t=tab: self._set_tab(t))
-        for i in range(len(STRATEGIES)):
+        for i in range(len(strategies(anti))):
             self._button(f"strat_{i}", lambda i=i: self._pick(i))
         self._button("badge", self._cycle)
         self._button("pause", self._toggle_pause)
@@ -1362,18 +1613,35 @@ class SidePanel(Drawing, tk.Toplevel):
         self._button("log_up", lambda: self._scroll(-1))
         self._button("log_down", lambda: self._scroll(1))
 
+    @property
+    def app(self):
+        """The page currently on screen. The panel always shows that coin."""
+        return self.hub.monitor()
+
+    @property
+    def world_names(self):
+        """The strategies this panel is responsible for. A mirror trades in the same instant
+        as its original, so anything that reads across both worlds reacts twice to one
+        decision."""
+        return {p["name"] for p in strategies(self.anti)}
+
     # ---- placement and sliding --------------------------------------------
 
     def _origin(self, width=None):
-        """Top-left of the panel when it is `width` wide. It's glued to the phone's edge:
-        on the right for Bitcoin, on the left for Ethereum (so it grows leftward)."""
-        a = self.app.hub.monitor()  # position against the page that's on screen
-        width = self.px(SIDE) if width is None else width
+        """Top-left of the panel when it is `width` wide, glued to the phone's edge.
+
+        The anti panel grows leftward, so its left edge moves as it opens while its right
+        edge stays pinned to the phone -- otherwise it would slide out from under itself.
+        """
+        a = self.app  # position against the page that's on screen
+        full = self.px(SIDE)
+        width = full if width is None else width
         y = a.winfo_y() + a.px(110)
-        if self.app.side == "right":
-            x = a.winfo_x() + a.px(W + 2 * TAB) + a.px(6)
-            return min(x, self.winfo_screenwidth() - self.px(SIDE)), y
-        return max(0, a.winfo_x() - a.px(6) - width), y
+        if self.anti:
+            right = a.winfo_x() - a.px(6)
+            return max(0, right - width), y
+        x = a.winfo_x() + a.px(W + 2 * TAB) + a.px(6)
+        return min(x, self.winfo_screenwidth() - full), y
 
     def follow(self):
         if self.is_open:
@@ -1408,14 +1676,17 @@ class SidePanel(Drawing, tk.Toplevel):
 
     def refresh(self):
         self.canvas.delete("dyn")
-        s = self.app.trader.snapshot()
+        s = self.hub.trader.snapshot(name=self.hub.trader.tracked(self.anti),
+                                     coin=self.app.coin)
         self._header(s)
         {"account": self._account, "log": self._log, "strategies": self._strategies}[
             self.tab](s)
 
     def _header(self, s):
         tag = "dyn"
-        self.text(28, 32, f"Kalshi {self.app.coin} 15-min", 14, TEXT, anchor="w", tags=tag)
+        title = (f"Anti-world {self.app.coin}" if self.anti
+                 else f"Kalshi {self.app.coin} 15-min")
+        self.text(28, 32, title, 14, DOWN if self.anti else TEXT, anchor="w", tags=tag)
         chip = f"{s['name']}  ▾"
         w = tkfont.Font(family="Segoe UI Semibold", size=-self.px(11)).measure(chip) / self.k + 24
         self.rrect(SIDE - 28 - w, 20, SIDE - 28, 44, 12, fill=BUTTON, tags=(tag, "btn", "badge"))
@@ -1429,7 +1700,9 @@ class SidePanel(Drawing, tk.Toplevel):
             self.rrect(x, 54, x + 96, 80, 13, fill=TEXT if active else BUTTON, tags=tags)
             self.text(x + 48, 67, label, 11, BG if active else TEXT, tags=tags)
             if key == "strategies" and not active:  # a bet was placed while you're elsewhere
-                glow = max((self.app.flash_level(n) for n in self.app.flash), default=0.0)
+                mine = self.world_names
+                glow = max((self.app.flash_level(n) for n in self.app.flash if n in mine),
+                           default=0.0)
                 if glow > 0:
                     # brighter than the row glow: it's a small dot on a dark button
                     self.circle(x + 84, 67, 4, fill=mix_color(BUTTON, AMBER, glow * 1.4 + 0.15),
@@ -1511,9 +1784,11 @@ class SidePanel(Drawing, tk.Toplevel):
         c, tag = self.canvas, "dyn"
         lots = list(reversed(s["log"]))  # newest first
         top = 96
-        for x, label, anchor in ((34, "TIME", "w"), (84, "BET", "w"), (252, "COST", "e"),
-                                 (SIDE - 34, "RESULT", "e")):
-            self.text(x, top, label, 9, MUTED, anchor=anchor, tags=tag)
+        for x, label, size, anchor in ((34, "TIME", 9, "w"), (74, "COIN", 9, "w"),
+                                       (108, "BET", 9, "w"), (142, "CONTRACTS", 8, "w"),
+                                       (190, "MULT", 8, "w"), (258, "COST", 9, "e"),
+                                       (SIDE - 34, "RESULT", 9, "e")):
+            self.text(x, top, label, size, MUTED, anchor=anchor, tags=tag)
         if not lots:
             self.text(SIDE / 2, 200, "No bets yet", 14, MUTED, weight="", tags=tag)
             self.text(SIDE / 2, 224, "They'll show up here as they're placed", 11, MUTED,
@@ -1521,22 +1796,27 @@ class SidePanel(Drawing, tk.Toplevel):
             return
         self.log_offset = max(0, min(self.log_offset, len(lots) - self.LOG_ROWS))
         page = lots[self.log_offset:self.log_offset + self.LOG_ROWS]
-        current = self.app.ptb_close  # the window that's live right now
+        # Anything still running is worth flagging, whichever coin it is on -- every coin's
+        # round closes on the same quarter hour, so this catches the whole live slate.
+        now = self.app.now()
         for i, lot in enumerate(page):
             y = top + 22 + i * self.ROW_H
-            if lot["close"] == current:  # orders in the current window get a lighter band
+            if lot["close"] > now:  # this round has not settled yet
                 self.rrect(24, y - 11, SIDE - 24, y + 11, 8, fill=HILITE, tags=tag)
             c.create_line(*self.pts([28, y - 12, SIDE - 28, y - 12]), fill=GRID,
                           width=self.px(1), tags=tag)
-            when = datetime.fromisoformat(lot["time"]).strftime("%I:%M %p").lstrip("0")
-            self.text(34, y, when, 11, MUTED, weight="", anchor="w", tags=tag)
+            when = datetime.fromisoformat(lot["time"]).strftime("%I:%M%p").lstrip("0")
+            self.text(34, y, when[:-1].lower(), 9, MUTED, weight="", anchor="w", tags=tag)
+            self.text(74, y, lot.get("coin") or "?", 10, TEXT, anchor="w", tags=tag)
             col = UP if lot["side"] == "UP" else DOWN
-            self.text(84, y, lot["side"], 11, col, anchor="w", tags=tag)
-            self.text(132, y, f"{lot['contracts']}×{lot['price'] * 100:.0f}¢", 11, TEXT,
+            self.text(108, y, lot["side"], 10, col, anchor="w", tags=tag)
+            self.text(142, y, f"{lot['contracts']}×{lot['price'] * 100:.0f}¢", 10,
+                      TEXT, weight="", anchor="w", tags=tag)
+            # a cheap contract pays 70x or more, so drop the decimals once it is big
+            mult = lot["multiplier"]
+            self.text(190, y, f"{mult:.0f}x" if mult >= 10 else f"{mult:.2f}x", 9, MUTED,
                       weight="", anchor="w", tags=tag)
-            self.text(174, y, f"{lot['multiplier']:.2f}x", 10, MUTED, weight="", anchor="w",
-                      tags=tag)
-            self.text(252, y, f"${lot['cost']:.2f}", 11, TEXT, weight="", anchor="e", tags=tag)
+            self.text(258, y, f"${lot['cost']:.2f}", 10, TEXT, weight="", anchor="e", tags=tag)
             status = lot["status"]
             if status == "open":
                 res, rcol = "open", MUTED
@@ -1545,28 +1825,28 @@ class SidePanel(Drawing, tk.Toplevel):
                 sign = "+" if pnl > 0 else "−"
                 res = f"{'sold ' if status == 'sold' else ''}{sign}${abs(pnl):.2f}"
                 rcol = UP if pnl > 0 else DOWN
-            self.text(SIDE - 34, y, res, 11, rcol, anchor="e", tags=tag)
+            self.text(SIDE - 34, y, res, 10, rcol, anchor="e", tags=tag)
         last = min(len(lots), self.log_offset + self.LOG_ROWS)
         net = sum(lot.get("pnl", 0) for lot in lots)
         self.text(34, 338, f"{self.log_offset + 1}–{last} of {len(lots)}  ·  net "
                   f"{'+' if net >= 0 else '−'}${abs(net):.2f}", 10, MUTED, weight="",
                   anchor="w", tags=tag)
-        self.rrect(172, 333, 184, 343, 3, fill=HILITE, tags=tag)  # legend for the band
-        self.text(190, 338, "current window", 10, MUTED, weight="", anchor="w", tags=tag)
+        self.rrect(176, 333, 188, 343, 3, fill=HILITE, tags=tag)  # legend for the band
+        self.text(194, 338, "live round", 10, MUTED, weight="", anchor="w", tags=tag)
         for name, cx, glyph in (("log_up", SIDE - 62, "▲"), ("log_down", SIDE - 34, "▼")):
             self.circle(cx, 338, 11, fill=BUTTON, width=0, tags=(tag, "btn", name))
             self.text(cx, 338, glyph, 8, TEXT, weight="", tags=(tag, "btn", name))
 
     def _strategies(self, s):
         tag = "dyn"
-        standings = self.app.trader.standings()
+        standings = self.app.trader.standings(anti=self.anti)
         self._row_names = [r["name"] for r in standings]
         any_bets = any(r["bets"] for r in standings)
         pitch = min(47, 234 // max(1, len(standings)))  # rows shrink to fit however many there are
         height = pitch - 4
         for i, r in enumerate(standings):
             y = 96 + i * pitch
-            chosen = r["name"] == self.app.trader.selected
+            chosen = r["name"] == self.app.trader.tracked(self.anti)
             tags = (tag, "btn", f"strat_{i}")
             glow = self.app.flash_level(r["name"])  # a soft amber warmth after a new bet
             base = BUTTON if chosen else CARD
@@ -1576,14 +1856,20 @@ class SidePanel(Drawing, tk.Toplevel):
             if glow > 0:
                 self.circle(27, top_line, 3.5, fill=mix_color(row, AMBER, glow), width=0, tags=tags)
             star = "★ " if (i == 0 and any_bets and r["pnl_pct"] > 0) else ""
-            self.text(34, top_line, f"{star}{r['name']}", 12, TEXT, anchor="w", tags=tags)
+            # A retired twin sits at zero and never moves again, which looks like a stuck
+            # row unless it says why.
+            dead = r.get("retired")
+            self.text(34, top_line, f"{star}{r['name']}", 12, MUTED if dead else TEXT,
+                      anchor="w", tags=tags)
             self.text(SIDE - 100, top_line, f"${r['equity']:,.2f}", 12, TEXT, anchor="e", tags=tags)
             good = r["pnl_pct"] >= 0
             self.text(SIDE - 34, top_line, f"{'+' if good else '−'}{abs(r['pnl_pct']):.1f}%", 12,
                       UP if good else DOWN, anchor="e", tags=tags)
-            record = f"{r['bets']} bets · {r['joined']}/{s['rounds_monitored']} rounds"
+            record = ("retired · out of money" if dead else
+                      f"{r['bets']} bets · {r['joined']}/{s['rounds_monitored']} rounds")
             self.text(34, bottom_line, r["blurb"], 10, MUTED, weight="", anchor="w", tags=tags)
-            self.text(SIDE - 34, bottom_line, record, 10, MUTED, weight="", anchor="e", tags=tags)
+            self.text(SIDE - 34, bottom_line, record, 10, DOWN if dead else MUTED,
+                      weight="", anchor="e", tags=tags)
         self.text(SIDE / 2, 338, f"Rounds monitored {s['rounds_monitored']}  ·  tap a "
                   "strategy to track it", 10, MUTED, weight="", tags=tag)
 
@@ -1606,9 +1892,10 @@ class SidePanel(Drawing, tk.Toplevel):
             self.refresh()
 
     def _cycle(self):
-        names = [p["name"] for p in STRATEGIES]
+        names = [p["name"] for p in strategies(self.anti)]
         trader = self.app.trader
-        trader.select(names[(names.index(trader.selected) + 1) % len(names)])
+        here = trader.tracked(self.anti)
+        trader.select(names[(names.index(here) + 1) % len(names)])
         self.app._chart_dirty = True
         self.log_offset = 0
         self.refresh()
