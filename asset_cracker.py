@@ -1413,10 +1413,10 @@ class Monitor(Drawing, tk.Toplevel):
             return
         # Five strategies trade at once; only the one you're tracking gets notifications,
         # and the bell silences those too.
-        # Both worlds have a tracked strategy, and both are worth hearing about; the bell
-        # still silences them.
-        tracked = (self.trader.tracked(False), self.trader.tracked(True))
-        if self.muted or e["strategy"] not in tracked:
+        # One bet is one piece of news. A twin mirrors in the same instant, so notifying
+        # both worlds pinged twice for a single decision; the globe decides which world you
+        # are following, and the bell still silences it.
+        if self.muted or e["strategy"] != self.trader.tracked(self.hub.chart_anti):
             return
         who = f"{self.coin} {e['strategy']}"
         if e["kind"] == "bet":
@@ -1572,6 +1572,13 @@ class SidePanel(Drawing, tk.Toplevel):
         """The page currently on screen. The panel always shows that coin."""
         return self.hub.monitor()
 
+    @property
+    def world_names(self):
+        """The strategies this panel is responsible for. A mirror trades in the same instant
+        as its original, so anything that reads across both worlds reacts twice to one
+        decision."""
+        return {p["name"] for p in strategies(self.anti)}
+
     # ---- placement and sliding --------------------------------------------
 
     def _origin(self, width=None):
@@ -1647,7 +1654,9 @@ class SidePanel(Drawing, tk.Toplevel):
             self.rrect(x, 54, x + 96, 80, 13, fill=TEXT if active else BUTTON, tags=tags)
             self.text(x + 48, 67, label, 11, BG if active else TEXT, tags=tags)
             if key == "strategies" and not active:  # a bet was placed while you're elsewhere
-                glow = max((self.app.flash_level(n) for n in self.app.flash), default=0.0)
+                mine = self.world_names
+                glow = max((self.app.flash_level(n) for n in self.app.flash if n in mine),
+                           default=0.0)
                 if glow > 0:
                     # brighter than the row glow: it's a small dot on a dark button
                     self.circle(x + 84, 67, 4, fill=mix_color(BUTTON, AMBER, glow * 1.4 + 0.15),
