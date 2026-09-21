@@ -218,7 +218,9 @@ tick tables by time and set a retention policy.
 ## 13. Build order (sim only until the last step)
 
 1. Postgres schema: ledger, accounts, buckets, pools, instruments, strategy versions, trials,
-   journal, commentary. Go service skeleton, deployed to the Pi.
+   journal, commentary. **Schema done 2026-09-20** (`db/`): applied to `assetcracker_dev` on
+   the Pi, with tests that attempt each rule violation. Still to do: Go service skeleton,
+   deployed to the Pi.
 2. Sources: Coinbase and Kalshi market data in Go, recorded to Postgres. Fix the duplicate
    settlement delivery found in the Python poller.
 3. Strategy interface; port Doipster's six as the first family; check with the replay harness.
