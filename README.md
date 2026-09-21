@@ -154,6 +154,45 @@ of the index, and roughly $8 of round-to-round noise is irreducible.
 | `research/` | Scrapes Kalshi markets, tests how they price, backtests the engine — see its own README |
 | `CONTRIBUTING.md` | How this repo is worked on: branching, commits, tests |
 
+## Why the Scalper doesn't cut its losses
+
+It looks like it should. It doesn't, and that is a measured decision rather than an
+oversight — `research/backtest_stops.py` reproduces all of this.
+
+Over a month of recorded BTC rounds, its money ends up like this:
+
+| How a position ended | n | staked | net |
+|---|---|---|---|
+| won at settlement | 218 | $1,101 | +$1,776 |
+| **lost at settlement** | **713** | **$3,716** | **−$3,716** |
+| sold at a profit | 453 | $2,322 | +$1,324 |
+| sold at a loss | 45 | $252 | −$126 |
+
+It cuts a loser **45 times out of 758 — 6%.** The code says why: `take_capture` requires
+proceeds to beat cost, so it can only fire at a profit, and the value exit fires when the
+market is paying *more* than the model thinks the position is worth, which is selling into
+strength. Nothing in it sells a position because it is losing.
+
+Adding that turns out to lose money. Both a price stop (`stop_loss`, sell once this much of
+the stake is gone) and a time stop (`stop_tau`, sell a position still behind this close to
+the bell) are implemented and tested; every setting tried is worse than holding, by $105 to
+$207 over the month. Both are off in every shipped strategy, and a test enforces that.
+
+Half the reason is visible in the data: positions that fall below 70% of cost still win
+15% of the time, and those wins pay 100¢ on contracts bought for 20¢.
+
+**The other half is a limit of the data, and anyone retrying this needs to know it.** A stop
+is only checked when a quote arrives, and the backtest cache is one-minute bars — a whole
+minute in which a dying position falls through its floor. A stop aiming to sell at 50% of
+cost actually filled at a median of **26%**, with 95% of fills below the floor. Live, the app
+quotes every second, so real fills would land much closer. **This backtest cannot fairly test
+a price stop.** The time stop can be — the clock never gaps — and it is worse too, which is
+the stronger half of the argument.
+
+If you want to settle it on live per-second data, set `stop_tau` or `stop_loss` on the
+Scalper in `kalshi_trader.py`. `kalshi_exits.csv` grades every sale with `why = stop` against
+what holding would have paid, so a few hundred rounds will answer it properly.
+
 ## When a strategy runs out
 
 Each strategy starts with **$1,000** and may have at most **$250** at risk across all open

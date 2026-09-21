@@ -452,6 +452,8 @@ class Account:
         scalping mostly is, and a strategy opts into it with take_profit."""
         prm = self.params
         capture = prm.get("take_capture")  # None: only sell when the market overpays
+        stop = prm.get("stop_loss")  # None: never cut a loser, hold it to settlement
+        stop_tau = prm.get("stop_tau")  # ...or cut it this late, if it is still behind
         hold = prm.get("min_hold", MIN_HOLD)
         events = []
         for lot in self.open_lots(market["ticker"]):
@@ -472,12 +474,22 @@ class Account:
             # those two numbers, so this can never bank a loss.
             banking = (capture is not None and proceeds > lot["cost"]
                        and sell_c >= lot["price"] + capture * (1 - lot["price"]))
-            if overpriced or banking:
+            # Cutting a loser. Neither rule above can do this: banking requires proceeds to
+            # beat cost, and the market overpaying is a reason to sell into strength. Without
+            # this a position that is dying is simply held to zero.
+            cutting = (stop is not None and proceeds <= lot["cost"] * (1 - stop))
+            # A time stop instead of a price stop. Near the close a losing position has run
+            # out of room to recover, and unlike a price floor this cannot be gapped through:
+            # it triggers on the clock, which never jumps.
+            if stop_tau is not None and market["close"] - now <= stop_tau:
+                cutting = cutting or proceeds < lot["cost"]
+            if overpriced or banking or cutting:
                 self._close(lot, "sold", proceeds, now, exit_price=round(sell_c, 2),
                             exit_btc=price,
                             # kept on the lot, not just the event: at settlement the exits
                             # log looks back at this sale and needs to know what drove it
-                            why="capture" if banking and not overpriced else "value",
+                            why=("stop" if cutting and not (banking or overpriced)
+                                 else "capture" if banking and not overpriced else "value"),
                             exit_tau=round(market["close"] - now))
                 events.append(dict(lot, kind="sold", strategy=self.name, payout=proceeds))
         return events
