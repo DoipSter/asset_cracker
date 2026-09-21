@@ -101,7 +101,7 @@ Consequences to accept:
 **Decided.** A failing bucket is closed, never topped up.
 
 1. Seeded from the common pool with a strategy version from the bench.
-2. Runs. Success is taxed into the common pool at a configured rate.
+2. Runs. A sustainment allocation is taken from its gains at a configured rate (section 6).
 3. A **circuit breaker** trips: drawdown from peak, absolute floor, run of losses, or sim fills
    drifting from real fills. Thresholds are configuration.
 4. De-activated: no new orders. Open positions follow the instrument's rule (proposed default:
@@ -118,6 +118,10 @@ netting or a conflict rule before real trading. **Open.**
 
 ## 6. Money flows
 
+**Naming (Brad, 2026-09-21):** the platform's own take from a bucket's gains is the **sustainment
+allocation**. "Tax" means only government tax, and the tax reserve is the bucket that holds money
+for it. The two were both being called tax; the ledger now says `sustainment` and `allocated`.
+
 **Built 2026-09-21** for simulated money, on the version 2 buckets (migration 0008,
 `service/internal/runner/runner2.go`, `tools/skim-policy.sh`). Brad's names for the buckets:
 
@@ -129,7 +133,7 @@ netting or a conflict rule before real trading. **Open.**
 | Tax reserve | a share of gains set aside, so tax is never a surprise | `tax_reserve` |
 | Fee reserve | for fees that may come later: withdrawals, venue charges. Kalshi's per-trade fee is already paid on every fill | `fee_reserve` |
 
-The skim is taken at settlement, from a bucket's gain above its own **high-water mark** (book
+The sustainment allocation is taken at settlement, from a bucket's gain above its own **high-water mark** (book
 value: cash plus still-live bets at cost), so a bucket climbing back from a loss is not charged
 twice on the same dollars. A bucket is skimmed only once every round that has closed is settled
 for it: the five coins settle seconds apart, and on dev a bucket skimmed after the first coin
@@ -145,7 +149,7 @@ stays comparable); the rates themselves.
 The earlier sketch of these flows, kept for the parts not built yet:
 
 
-Success tax (bucket to common pool), reap (closed bucket to common pool), seed (common pool to
+Sustainment allocation (bucket to the money buckets; first sketched here as a "success tax"), reap (closed bucket to common pool), seed (common pool to
 new bucket), take (common pool to profit pool), expansion (profit pool funds more buckets or
 higher limits, by approval). Rates and thresholds are configuration and are Brad's and
 Doipster's to set. Every flow is a ledger transfer, so any pool's balance can be rebuilt from
@@ -265,7 +269,7 @@ tick tables by time and set a retention policy.
    (`service/internal/runner`): the six strategies run live in sim in twelve buckets; every
    decision is journaled with the rule that blocked it; fills, fees and payouts are ledger
    transfers; state survives a restart and is checked against the ledger. Not yet: human
-   weights applied, success tax, breakers, reaping and replacement, a broker interface a live
+   weights applied, breakers, reaping and replacement, a broker interface a live
    broker could share.
 5. Metrics and the promotion gate; trials registry.
 6. API and the Flutter client.

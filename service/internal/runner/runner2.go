@@ -105,7 +105,7 @@ func (r *Runner2) refreshMoney(ctx context.Context) {
 	}
 }
 
-// skim takes the policy's share of each bucket's gain above its high-water mark. Book value is
+// skim takes the sustainment allocation: the policy's share of each bucket's gain above its high-water mark. Book value is
 // cash plus bets still live at cost, so a bucket is not skimmed on money that is merely tied up, and
 // one climbing back from a loss is not charged twice on the same dollars. What is taken really
 // leaves the strategy's balance: it goes on trading with what stays.
@@ -145,11 +145,11 @@ func (r *Runner2) skim(ctx context.Context) error {
 			r.trader.Withdraw(a.Params.Name, float64(taken)/100)
 		}
 		if err := r.db.RecordSkim(ctx, r.setup, k); err != nil {
-			return r.halt(fmt.Errorf("recording a skim of %s: %w", b.Name, err), k.Taken() > 0)
+			return r.halt(fmt.Errorf("recording the sustainment allocation from %s: %w", b.Name, err), k.Taken() > 0)
 		}
 		r.hwm[a.Params.Name] = book - k.Taken()
 		if k.Taken() > 0 {
-			slog.Info("skimmed", "bucket", b.Name, "gain_cents", gain, "winnings", k.Winnings, "replenishment", k.Replenish, "tax", k.Tax, "fees", k.Fees)
+			slog.Info("sustainment allocation", "bucket", b.Name, "gain_cents", gain, "winnings", k.Winnings, "replenishment", k.Replenish, "tax", k.Tax, "fees", k.Fees)
 		}
 	}
 	return nil

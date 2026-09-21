@@ -272,17 +272,17 @@ function notify() {
       seen[key] = true; }
     seen[a.name] = true; }
 }
-// Where the simulated money sits: what the strategies are trading with, and the four buckets a
-// skim feeds. Rates are a dated policy a person sets; with none set, the page says so.
+// Where the simulated money sits: what the strategies are trading with, and the four buckets the
+// sustainment allocation feeds. Rates are a dated policy a person sets; with none set, the page says so.
 function renderMoney() {
   const el = $("money"), e = v2(), m = e && e.money; el.hidden = !m; if (!m) return;
   const b = m.buckets, p = m.policy, pct = (bps) => (bps / 100).toFixed(bps % 100 ? 2 : 0) + "%", total = p.winnings_bps + p.replenish_bps + p.tax_bps + p.fees_bps;
   const tile = (name, cents, hint, cls) => '<div class="tile ' + (cls || "") + '" title="' + esc(hint) + '"><span>' + name + "</span><b>" + usd(cents / 100) + "</b></div>";
   el.innerHTML = tile("Capital in deployment", b.deployed, "Cash in the strategy buckets that are still trading. Open bets are out in the market, so this dips while they are live.", "dep") +
     tile("Winnings", b.winnings, "The skim off the top that is kept.") + tile("Replenishment", b.replenishment, "Restarts buckets that died, and receives whatever a dead bucket had left.") +
-    tile("Tax reserve", b.tax_reserve, "Set aside from gains so that tax is never a surprise.") + tile("Fee reserve", b.fee_reserve, "Set aside for fees that may come later: withdrawals, venue charges.") +
-    '<div class="rule">' + (total ? "Of each bucket's gain above its own high-water mark: winnings " + pct(p.winnings_bps) + "  ·  replenishment " + pct(p.replenish_bps) + "  ·  tax " + pct(p.tax_bps) + "  ·  fees " + pct(p.fees_bps) + "  ·  " + pct(10000 - total) + " stays and compounds"
-      : "No skim is set: every rate is 0%, so gains stay in their buckets. Set one with tools/skim-policy.sh") + "  ·  venue fees paid so far " + usd(b.fees_paid / 100) + "</div>";
+    tile("Tax reserve", b.tax_reserve, "Set aside for government taxes, so they are never a surprise. This is not the sustainment allocation, which is ours.") + tile("Fee reserve", b.fee_reserve, "Set aside for fees that may come later: withdrawals, venue charges.") +
+    '<div class="rule">' + (total ? "Sustainment allocation, from each bucket's gain above its own high-water mark: winnings " + pct(p.winnings_bps) + "  ·  replenishment " + pct(p.replenish_bps) + "  ·  tax reserve " + pct(p.tax_bps) + "  ·  fee reserve " + pct(p.fees_bps) + "  ·  " + pct(10000 - total) + " stays and compounds"
+      : "No sustainment allocation is set: every rate is 0%, so gains stay in their buckets. Set one with tools/skim-policy.sh") + "  ·  venue fees paid so far " + usd(b.fees_paid / 100) + "</div>";
 }
 function render() { renderMoney(); renderPhone(); renderPanel("anti"); renderPanel("real"); notify(); }
 

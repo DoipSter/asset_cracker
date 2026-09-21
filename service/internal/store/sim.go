@@ -419,7 +419,9 @@ func (s *Store) LoadEngineState(ctx context.Context, series string, into any) (b
 	return true, json.Unmarshal(blob, into)
 }
 
-// SkimPolicy is the split, in basis points of a bucket's gain above its high-water mark.
+// SkimPolicy is the SUSTAINMENT ALLOCATION: the platform's own share of a bucket's gain above its
+// high-water mark, split between the money buckets, in basis points. It is ours, not the
+// government's: Tax here is only the part set aside, into the tax reserve, for real taxes.
 type SkimPolicy struct {
 	ID                             int64
 	Winnings, Replenish, Tax, Fees int64
@@ -468,8 +470,8 @@ func (s *Store) RecordSkim(ctx context.Context, setup SimSetup, k Skim) error {
 	var transferID *int64
 	if k.Taken() > 0 {
 		var id int64
-		if err := tx.QueryRow(ctx, `insert into ledger_transfer (mode, reason, memo, created_by) values ('sim', 'tax', $1, $2) returning id`,
-			fmt.Sprintf("skim of %s under policy %d", k.Bucket.Name, k.Policy.ID), setup.ActorID).Scan(&id); err != nil {
+		if err := tx.QueryRow(ctx, `insert into ledger_transfer (mode, reason, memo, created_by) values ('sim', 'sustainment', $1, $2) returning id`,
+			fmt.Sprintf("sustainment allocation from %s under policy %d", k.Bucket.Name, k.Policy.ID), setup.ActorID).Scan(&id); err != nil {
 			return err
 		}
 		batch := &pgx.Batch{}
@@ -488,7 +490,7 @@ func (s *Store) RecordSkim(ctx context.Context, setup SimSetup, k Skim) error {
 		}
 		transferID = &id
 		if _, err := tx.Exec(ctx, `insert into bucket_event (bucket_id, kind, detail, actor_id)
-		        values ($1, 'taxed', jsonb_build_object('winnings', $2::bigint, 'replenishment', $3::bigint, 'tax', $4::bigint, 'fees', $5::bigint), $6)`,
+		        values ($1, 'allocated', jsonb_build_object('winnings', $2::bigint, 'replenishment', $3::bigint, 'tax_reserve', $4::bigint, 'fee_reserve', $5::bigint), $6)`,
 			k.Bucket.ID, k.Winnings, k.Replenish, k.Tax, k.Fees, setup.ActorID); err != nil {
 			return err
 		}
