@@ -54,6 +54,63 @@ class Decimals(unittest.TestCase):
         self.assertEqual(offenders, [], "coin prices still hardcoded to two decimals")
 
 
+class Symbols(unittest.TestCase):
+    """Each coin's sign, on its page button and over the chart.
+
+    The characters are pinned here rather than merely checked for existence, because a
+    codepoint the font lacks renders as a hollow box and no assertion about presence would
+    notice. U+25CE BULLSEYE was the obvious pick for Solana and is a box on Windows 11;
+    research/font_probe.py is what rejected it and what to run before adding a coin.
+    """
+
+    VERIFIED = {
+        "BTC": "₿",   # bitcoin sign
+        "ETH": "Ξ",   # greek capital xi
+        "SOL": "≡",   # identical to -- three bars
+        "XRP": "✕",   # multiplication x
+        "DOGE": "Ð",  # latin capital eth
+    }
+    PILL_WIDTH = (W - 26 - 26 - 3 * 4) / 5
+
+    def setUp(self):
+        self.assets = h.app_value("ASSETS")
+
+    def test_every_coin_has_one(self):
+        for coin in self.assets:
+            with self.subTest(coin=coin):
+                self.assertIn("symbol", self.assets[coin])
+
+    def test_they_are_the_glyphs_the_font_probe_cleared(self):
+        for coin, want in self.VERIFIED.items():
+            with self.subTest(coin=coin):
+                self.assertEqual(self.assets[coin]["symbol"], want)
+
+    def test_each_is_a_single_character(self):
+        """Two-character labels would not fit the pill beside the ticker."""
+        for coin, asset in self.assets.items():
+            with self.subTest(coin=coin):
+                self.assertEqual(len(asset["symbol"]), 1)
+
+    def test_no_two_coins_share_a_symbol(self):
+        seen = [a["symbol"] for a in self.assets.values()]
+        self.assertEqual(len(set(seen)), len(seen))
+
+    def test_symbol_and_ticker_fit_one_pill(self):
+        """Measured without Tk: the widest label is DOGE's, about 37px of a 59px pill."""
+        for coin, asset in self.assets.items():
+            label = f"{asset['symbol']} {coin}"
+            with self.subTest(coin=coin, label=label):
+                self.assertLessEqual(len(label), 7,
+                                     "too long to sit beside the ticker in a pill")
+        self.assertGreater(self.PILL_WIDTH, 50)
+
+    def test_the_pill_shows_the_symbol(self):
+        self.assertIn("ASSETS[coin]['symbol']", h.app_source())
+
+    def test_the_chart_caption_shows_the_symbol(self):
+        self.assertIn("self.asset['symbol']} {self.coin} index", h.app_source())
+
+
 class MinuteChart(unittest.TestCase):
     """The 1M view. Coinbase's smallest candle is a minute, so this range is drawn from the
     per-second feed buffer instead; LIVE_RANGES marks it."""

@@ -128,6 +128,7 @@ with a few live brackets around spot.
 | `backtest_stops.py` | Asks whether the Scalper should cut its losses (it should not) |
 | `backtest_antiworld.py` | Runs each strategy against its mirror |
 | `sessions.py` | Browses past runs of the app: `python sessions.py [last|<id>]` |
+| `font_probe.py` | Checks a glyph renders rather than drawing as a box — run before adding a coin |
 
 The `.json` caches are gitignored — regenerate them with `scrape_week.py` and
 `fetch_rounds.py`.

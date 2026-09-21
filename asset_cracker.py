@@ -525,24 +525,31 @@ def save_muted(coin, value):
 # The coins we track. Each gets its own phone window, side panel, accounts and files.
 # The index gap and volatility were measured from a week of Kalshi settlements (Sep 2026).
 # Up to five coins, all funded from one balance per strategy. Index offset and volatility
+# `symbol` is the coin's sign, checked against the font by research/font_probe.py -- a
+# codepoint Segoe UI lacks draws as a hollow box, which is how U+25CE was rejected for Solana.
 # are per coin; BTC and ETH are measured (see research/), the rest start from BTC's numbers
 # and self-calibrate from their own settlements within the hour. `decimals` is how many
 # Kalshi quotes that coin's strikes to, which is the precision a price has to be shown
 # at for a 15-minute move to be visible at all: DOGE moves in the sixth decimal.
 ASSETS = {
     "BTC": dict(coin="BTC", name="Bitcoin", product="BTC-USD", series="KXBTC15M",
+                symbol="₿",
                 icon="btc.ico", index_offset_pct=0.000057,
                 index_sd_pct=0.000144, default_sigma=8e-5, min_pad_pct=0.000187, decimals=2),
     "ETH": dict(coin="ETH", name="Ethereum", product="ETH-USD", series="KXETH15M",
+                symbol="Ξ",
                 icon="eth.ico", index_offset_pct=0.0000713,
                 index_sd_pct=0.0002156, default_sigma=9.4e-5, min_pad_pct=0.000187, decimals=2),
     "SOL": dict(coin="SOL", name="Solana", product="SOL-USD", series="KXSOL15M",
+                symbol="≡",
                 icon="eth.ico", index_offset_pct=0.000057,
                 index_sd_pct=0.000216, default_sigma=1.1e-4, min_pad_pct=0.00025, decimals=4),
     "XRP": dict(coin="XRP", name="XRP", product="XRP-USD", series="KXXRP15M",
+                symbol="✕",
                 icon="eth.ico", index_offset_pct=0.000057,
                 index_sd_pct=0.000216, default_sigma=1.1e-4, min_pad_pct=0.00025, decimals=4),
     "DOGE": dict(coin="DOGE", name="Dogecoin", product="DOGE-USD", series="KXDOGE15M",
+                 symbol="Ð",
                  icon="eth.ico", index_offset_pct=0.000057,
                  index_sd_pct=0.000216, default_sigma=1.2e-4, min_pad_pct=0.00025, decimals=6),
 }
@@ -832,7 +839,8 @@ class Monitor(Drawing, tk.Toplevel):
             active = coin == self.coin
             tags = ("btn", f"page_{coin}")
             self.rrect(x1, 71, x1 + wide, 97, 12, fill=TEXT if active else BUTTON, tags=tags)
-            self.text(x1 + wide / 2, 84, coin, 10, BG if active else MUTED, tags=tags)
+            label = f"{ASSETS[coin]['symbol']} {coin}"
+            self.text(x1 + wide / 2, 84, label, 10, BG if active else MUTED, tags=tags)
             self._button(f"page_{coin}", lambda c=coin: self.hub.switch(c))
 
         # All three controls sit either side of the island, clear of the coin pills below.
@@ -846,7 +854,8 @@ class Monitor(Drawing, tk.Toplevel):
         self._button("close", self.quit_app)
 
         # "BTC index  · live" caption (the settlement index, as the prediction market uses)
-        self.text(W / 2 - 4, 122, f"{self.coin} index", 12, MUTED, anchor="e")
+        self.text(W / 2 - 4, 122, f"{self.asset['symbol']} {self.coin} index", 12, MUTED,
+                  anchor="e")
         self.live_dot = self.circle(W / 2 + 8, 122, 4, fill=MUTED, width=0)
         self.live_text = self.text(W / 2 + 16, 122, "connecting", 12, MUTED, anchor="w")
 
