@@ -122,15 +122,21 @@ STRATEGIES = [
      "tau": (LOTTERY["min_tau"], 900), "band": (0.0, LOTTERY["max_ask"])},
 ]
 
-def _mirrored(params):
-    """The anti-world twin of a strategy: identical in every respect except that it believes
-    the opposite of what the model says.
+OPPOSITE = {"UP": "DOWN", "DOWN": "UP"}
 
-    Inverting the belief rather than simply flipping the chosen side matters. The side falls
-    out of the belief anyway, but so do the stake, the edge test and the early exits, and a
-    twin that inverted only the side would size itself off a conviction it does not hold.
+
+def _mirrored(params):
+    """The anti-world twin of a strategy. It has no opinions of its own: it takes the other
+    side of whatever its original does, at the same size, and closes when the original
+    closes.
+
+    An earlier version gave the twin an inverted belief and let it trade on it. That made it
+    a different strategy rather than a mirror -- it picked its own moments and its own sizes,
+    and the pair stopped being comparable. A mirror is worth more: with the same number of
+    contracts on each side, exactly one of them pays, so whatever the pair loses is precisely
+    what the two fills and the fees cost.
     """
-    return dict(params, name=f"Anti {params['name']}", anti=True, invert=True,
+    return dict(params, name=f"Anti {params['name']}", anti=True,
                 blurb=f"Takes the other side of {params['name']}")
 
 
@@ -308,24 +314,13 @@ class Account:
     def step(self, market, price, now, p_model, paused, ctx=None):
         """Look at the open window: maybe sell, maybe bet. Returns a list of events."""
         prm = self.params
-        if prm.get("invert"):
-            # The whole of the anti-world. Everything downstream -- which side looks cheap,
-            # how big the edge is, what an open position is worth on the way out -- is
-            # derived from this number, so inverting it here inverts all of it consistently.
-            p_model = 1 - p_model
         tau = market["close"] - now
         ya, na, yb = market["yes_ask"], market["no_ask"], market["yes_bid"]
         if not price or ya <= 0 or na <= 0:
             self.views[market.get("coin")] = None
             return []
         if prm.get("kind") == "lottery":
-            ctx = ctx or {}
-            if prm.get("invert") and ctx.get("p_tail") is not None:
-                # The lottery path reads its probability from ctx, not from p_model, so
-                # inverting p_model above does nothing for it. Copy rather than mutate: one
-                # ctx is shared by every account in this step.
-                ctx = dict(ctx, p_tail=1 - ctx["p_tail"])
-            return self._lottery(market, price, now, p_model, paused, ctx)
+            return self._lottery(market, price, now, p_model, paused, ctx or {})
 
         mid = (yb + ya) / 2 if yb > 0 else ya
         p_up = mid + prm["shrink"] * (p_model - mid)  # blend with what the market believes
@@ -464,6 +459,71 @@ class Account:
         if n < 1:
             return []
         return [self._bet(market, best, n, price, now)]
+
+    # ---- mirroring ---------------------------------------------------------
+
+    def mirror(self, events, market, now, price):
+        """Take the other side of whatever the original just did, for the same money.
+
+        Matched by stake, not by contract count. The two sides of a market are not the same
+        price -- buying UP at 30c and DOWN at 71c -- so matching contracts would have the
+        twin committing well over twice the capital for the same position, straight through
+        the exposure cap its original had just respected. Matching the stake keeps both
+        accounts risking the same amount on the same moment, which is what makes their
+        balances comparable, and keeps the cap honest for free.
+        """
+        out = []
+        for e in events:
+            if e["kind"] == "bet":
+                out += self._mirror_bet(e, market, now, price)
+            elif e["kind"] == "sold":
+                out += self._mirror_sell(e, market, now, price)
+        return out
+
+    def _mirror_bet(self, e, market, now, price):
+        side = OPPOSITE[e["side"]]
+        ask = market["yes_ask"] if side == "UP" else market["no_ask"]
+        size = market["yes_ask_size"] if side == "UP" else market["no_ask_size"]
+        if ask <= 0:
+            return []
+        c = min(0.99, ask + SLIPPAGE)
+        # As many contracts as the original's stake buys on this side, never more. The caps
+        # are not re-checked: matching the stake means the twin commits what its original
+        # committed, and that already passed them. Cash still binds -- it cannot spend money
+        # it does not have, and a twin too poor to follow is worth seeing rather than hiding.
+        budget = min(e["cost"], self.cash)
+        n = min(int(budget // c), int(size))
+        while n > 0 and n * c + kalshi_fee(n, c) > budget:
+            n -= 1
+        if n < 1:
+            return []
+        p_side = 1 - e["model_prob"] if e.get("model_prob") is not None else None
+        option = {"side": side, "cost": c, "size": size,
+                  "p": p_side if p_side is not None else 0.5,
+                  "edge": (p_side - c - FEE_RATE * c * (1 - c)) if p_side is not None else 0.0}
+        lot = self._bet(market, option, n, price, now)
+        # what this lot is the mirror of, so the matching sale can be found later
+        self.log[-1]["mirror_of"] = e["id"]
+        lot["mirror_of"] = e["id"]
+        return [lot]
+
+    def _mirror_sell(self, e, market, now, price):
+        """The original closed early, so the twin closes the position it opened against it."""
+        held = [l for l in self.open_lots(market["ticker"])
+                if l.get("mirror_of") == e["id"]]
+        out = []
+        for lot in held:
+            bid = market["yes_bid"] if lot["side"] == "UP" else market["no_bid"]
+            if bid <= 0:
+                continue  # nothing to sell into; it will settle instead
+            sell_c = max(0.01, bid - SLIPPAGE)
+            n = lot["contracts"]
+            proceeds = round(n * sell_c - kalshi_fee(n, sell_c), 2)
+            self._close(lot, "sold", proceeds, now, exit_price=round(sell_c, 2),
+                        exit_btc=price, why="mirror",
+                        exit_tau=round(market["close"] - now))
+            out.append(dict(lot, kind="sold", strategy=self.name, payout=proceeds))
+        return out
 
     def _bet(self, market, option, n, price, now):
         c = option["cost"]
@@ -816,7 +876,13 @@ class KalshiTrader:
         ctx = c.tail_context(market, price, tau)
         events = []
         for acct in self.accounts.values():
-            events += acct.step(c.market, price, now, p_model, self.paused, ctx)
+            if acct.params.get("anti"):
+                continue  # twins shadow; they are driven by their original, just below
+            moves = acct.step(c.market, price, now, p_model, self.paused, ctx)
+            events += moves
+            twin = self.accounts.get(f"Anti {acct.name}")
+            if twin is not None and moves:
+                events += twin.mirror(moves, c.market, now, price)
         return self._record(events, now)
 
     def on_settled(self, ticker, result, final_value, now, price):

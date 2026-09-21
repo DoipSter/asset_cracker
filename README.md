@@ -197,36 +197,38 @@ what holding would have paid, so a few hundred rounds will answer it properly.
 
 The left-hand panel holds a mirror of every strategy — `Anti Value`, `Anti Model`,
 `Anti Late`, `Anti Scalper`, `Anti Favorite`, `Anti Lottery` — each with its own $1,000 and
-the same caps. Twelve accounts, six per world, none shared.
+the same caps. Twelve accounts, six per world, none shared. The globe beside the bell flips
+which world the chart's bet markers come from.
 
-A twin is not a new strategy. It is the same rules fed an inverted belief: wherever the model
-says the chance of UP is *p*, its twin is handed *1 − p* and everything follows from there —
-which side looks cheap, how big the stake is, when to take a position off. Inverting the
-belief rather than just flipping the chosen side matters, because a twin that flipped only
-the side would size itself off a conviction it does not hold.
+A twin has no opinions. It takes the other side of whatever its original does, at the same
+moment, for the same money, and closes when the original closes. Matching the **stake** and
+not the contract count matters: the two sides of a market are different prices — buying UP at
+30¢ against DOWN at 71¢ — so matching contracts would have the twin committing well over
+twice the capital, straight through the exposure cap its original had just respected.
 
-**Why bother.** Every strategy loses money, and there are two explanations that call for
-opposite responses. Either the model is systematically *wrong*, in which case inverting it
-should pay; or the model is roughly right and the losses are *costs* — the spread plus
-Kalshi's fee on every buy and every sell — in which case both sides lose and no amount of
-tuning will help. Running the pair separates the two. Nothing else here can.
-
+**What it answers.** Every strategy loses money. Either the model is systematically wrong, in
+which case taking the other side should pay, or it is roughly right and the losses are costs.
 Over the same month of recorded BTC rounds (`research/backtest_antiworld.py`):
 
-| | P/L | | twin P/L | pair | fees |
+| | P/L | twin | twin P/L | pair | contracts vs original |
 |---|---|---|---|---|---|
-| Value | −$440 | Anti Value | −$1,000 (bust) | −$1,439 | $1,178 |
-| Model | −$998 | Anti Model | −$1,000 (bust) | −$1,998 | $750 |
-| Late | −$989 | Anti Late | −$1,000 (bust) | −$1,989 | $350 |
-| Scalper | −$742 | Anti Scalper | −$997 | −$1,738 | $405 |
-| Favorite | −$969 | Anti Favorite | −$167 | −$1,136 | $100 |
-| Lottery | −$568 | Anti Lottery | −$845 | −$1,413 | $227 |
+| Value | −$440 | Anti Value | −$1,000 (bust) | −$1,440 | 0.80× |
+| Model | −$998 | Anti Model | **+$898** | −$100 | 1.19× |
+| Late | −$989 | Anti Late | **+$3,009** | +$2,019 | 0.80× |
+| Scalper | −$742 | Anti Scalper | −$231 | −$972 | 0.63× |
+| Favorite | −$969 | Anti Favorite | **+$1,574** | +$605 | 3.25× |
+| Lottery | −$568 | Anti Lottery | −$4 | −$572 | 0.03× |
 
-**Both sides lost in six pairs out of six.** The `pair` column is the two P/Ls added
-together: if the model carried real information, one side would win more than the other lost
-and the pair would be positive. Every pair is negative. That is the market charging for the
-privilege of holding an opinion, in either direction — and it says the problem is not that
-the model points the wrong way.
+Three twins made money and three did not, which is more interesting than a clean sweep either
+way — but **read the last column before drawing conclusions.** Equal money buys very unequal
+quantities at 18¢ and at 85¢, so a pair is not a hedge: it carries a standing long position in
+whichever side was cheaper. `Anti Favorite` holds 3.25× its original's contracts, `Anti
+Lottery` 0.03×. A positive pair therefore does *not* prove the model is backwards, and a
+negative one does not isolate the fees.
+
+What the twin does show honestly is the thing the panel exists for: whether taking the other
+side, at the same risk, would have done better. For `Late` and `Favorite` over this month, it
+clearly would.
 
 ## When a strategy runs out
 

@@ -101,9 +101,13 @@ def lagging_book_round(trader, coin="BTC", ticker="KXBTC15M-LAG", strike=80000.0
     return trader
 
 
-def cash_balances(acct):
+def cash_balances(acct, start=None):
     """What the account's own history says its cash should be. Every test that moves money
-    checks this: start, minus what every bet cost, plus everything that paid out."""
+    checks this: start, minus what every bet cost, plus everything that paid out.
+
+    `start` overrides the usual starting balance, for tests that stake an account at some
+    other figure to see what it does when short of money.
+    """
     spent = sum(lot["cost"] for lot in acct.log)
     paid = sum(lot.get("payout", 0.0) for lot in acct.log if lot["status"] != "open")
-    return kt.START_BALANCE - spent + paid
+    return (kt.START_BALANCE if start is None else start) - spent + paid

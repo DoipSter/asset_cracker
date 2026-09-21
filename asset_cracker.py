@@ -597,6 +597,9 @@ class Hub:
         self.monitors = {}
         # One panel per world, each following whichever coin page is showing.
         self.panels = {False: None, True: None}
+        # Which world the chart's bet markers come from. Independent of the panels: this is
+        # only about the graph, where the two would otherwise be indistinguishable.
+        self.chart_anti = False
         # One trader for the whole app: each strategy has a single balance that every coin
         # draws on, so a bet on SOL spends the same money as a bet on BTC.
         self.trader = KalshiTrader(data_dir(), ASSETS)
@@ -639,6 +642,13 @@ class Hub:
 
     def open_panels(self):
         return [p for p in self.panels.values() if p and p.is_open]
+
+    def toggle_chart_world(self):
+        """Flip the chart between the strategies and their anti-world twins."""
+        self.chart_anti = not self.chart_anti
+        for m in self.monitors.values():
+            m._draw_world_button()
+            m._chart_dirty = True
         self.redraw_tabs()
 
     def is_open(self, anti=False):
@@ -708,6 +718,7 @@ class Monitor(Drawing, tk.Toplevel):
         self._draw_static()
         self._draw_tab()
         self._draw_bell_button()
+        self._draw_world_button()
         self._draw_range_pills()
         self._draw_price()
         self._draw_ptb()
@@ -820,10 +831,12 @@ class Monitor(Drawing, tk.Toplevel):
             self.text(x1 + wide / 2, 84, coin, 10, BG if active else MUTED, tags=tags)
             self._button(f"page_{coin}", lambda c=coin: self.hub.switch(c))
 
-        # close button, top left
-        self.circle(42, 84, 15, fill=BUTTON, width=0, tags=("btn", "close"))
+        # Close sits top right, away from the two controls you actually use; the bell and
+        # the world toggle share the left, where the close button used to be.
+        cx = W - 46
+        self.circle(cx, 84, 15, fill=BUTTON, width=0, tags=("btn", "close"))
         for a, b in (((-5, -5), (5, 5)), ((-5, 5), (5, -5))):
-            c.create_line(*self.pts([42 + a[0], 84 + a[1], 42 + b[0], 84 + b[1]]),
+            c.create_line(*self.pts([cx + a[0], 84 + a[1], cx + b[0], 84 + b[1]]),
                           fill=MUTED, width=self.px(2), capstyle="round",
                           tags=("btn", "close"))
         self._button("close", self.quit_app)
@@ -839,7 +852,7 @@ class Monitor(Drawing, tk.Toplevel):
     def _draw_bell_button(self):
         c = self.canvas
         c.delete("bell")
-        cx, cy, sc = W - 46, 84, 0.85
+        cx, cy, sc = 42, 84, 0.85
         self.circle(cx, cy, 20, fill=CARD, width=0, tags=("btn", "bell"))
         color = MUTED if self.muted else BELL
         body = []
@@ -856,18 +869,46 @@ class Monitor(Drawing, tk.Toplevel):
                           width=self.px(2.5), capstyle="round", tags=("btn", "bell"))
         self._button("bell", self.toggle_mute)
 
+    def _draw_world_button(self):
+        """A globe beside the bell, switching which world's bets the chart draws.
+
+        The two panels stay where they are -- this is only about the markers on the graph,
+        which is the one place the two worlds would otherwise be impossible to tell apart.
+        In the anti-world it is drawn in the DOWN colour, matching the left-hand tab.
+        """
+        c = self.canvas
+        c.delete("world")
+        anti = self.hub.chart_anti
+        cx, cy, r = 84, 84, 13
+        tags = ("btn", "world")
+        colour = DOWN if anti else TEXT
+        self.circle(cx, cy, 20, fill=CARD, width=0, tags=tags)
+        self.circle(cx, cy, r, fill="", outline=colour, width=self.px(2), tags=tags)
+        # the equator, and two meridians drawn as ellipses squeezed toward the centre
+        c.create_line(*self.pts([cx - r, cy, cx + r, cy]), fill=colour,
+                      width=self.px(1.4), tags=tags)
+        for squeeze in (0.42, 0.85):
+            c.create_oval(*self.pts([cx - r * squeeze, cy - r, cx + r * squeeze, cy + r]),
+                          outline=colour, width=self.px(1.4), tags=tags)
+        if anti:  # a small mark so the state reads without relying on colour alone
+            self.text(cx + 15, cy - 11, "A", 9, DOWN, tags=tags)
+        self._button("world", self.hub.toggle_chart_world)
+
     def _draw_tab(self):
         """The side buttons. Right opens the strategies, left opens their anti-world twins;
         both follow whichever coin's page you are looking at. The left one is tinted in the
         DOWN colour so the two worlds are never confused at a glance."""
         c = self.canvas
-        c.delete("tab")
+        c.delete("tabs")  # the group tag, never bound to a click
         top, bottom = 196, 296
         mid = (top + bottom) / 2
         for anti in (False, True):
             opened = self.hub.is_open(anti)
-            name = "tab_anti" if anti else "tab"
-            tags = ("btn", "tab", name)
+            # Each tab's click tag is its own. Binding a click to a tag that both tabs carry
+            # would fire both handlers from one press, and a tab carrying its own tag twice
+            # would fire its handler twice and toggle straight back.
+            name = "tab_anti" if anti else "tab_real"
+            tags = ("btn", "tabs", name)
             live = DOWN if anti else UP
             if anti:
                 self.rrect(-TAB, top, 4, bottom, 7, fill=live if opened else BEZEL, tags=tags)
@@ -972,7 +1013,7 @@ class Monitor(Drawing, tk.Toplevel):
         close_t = self.ptb_close
         open_t = close_t - 900
         pts = [(t, p) for t, p in self.window_pts if open_t <= t <= close_t]
-        bets = [lot for lot in self.trader.account().log
+        bets = [lot for lot in self.trader.account(anti=self.hub.chart_anti).log
                 if lot["close"] == close_t and lot.get("coin") == self.coin]
         if not pts:
             self.text(W / 2, 420, "Window just opened…", 14, MUTED, weight="", tags="chart")

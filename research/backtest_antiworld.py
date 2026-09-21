@@ -3,15 +3,20 @@
     python fetch_rounds.py KXBTC15M BTC-USD bt30_btc.json   # once, ~20 min
     python backtest_antiworld.py
 
-Every strategy loses money. There are two explanations and they call for opposite responses:
+Every strategy loses money. Either the model is systematically WRONG, in which case taking
+the other side should pay; or the model is roughly right and the LOSSES ARE COSTS -- the
+spread and Kalshi's fee on every buy and every sell -- in which case both sides lose.
 
-  * The model is systematically WRONG. Then inverting it should make money, and the twin
-    beats the original by more than the round trip costs.
-  * The model is roughly right and the LOSSES ARE COSTS -- the spread and Kalshi's fee on
-    every buy and every sell. Then both sides lose, because both pay them, and no amount of
-    tuning the model will help.
+READ THE PAIR COLUMN CAREFULLY. A twin matches its original's STAKE, not its contract count,
+because the two sides of a market are different prices and matching contracts would have the
+twin committing well over twice the capital, straight through the exposure cap. The cost of
+that choice is that a pair is not a hedge: equal money at 18c and at 85c buys very different
+quantities, so each pair holds a standing long position in whichever side was cheaper. Over
+this month the twins ended up with anywhere from 0.03x to 3.25x their original's contracts.
 
-Running the pair separates the two. Nothing else in this project can.
+So a positive pair does NOT prove the model is backwards, and a negative one does not isolate
+the fees. What a twin does show honestly is whether taking the other side, at the same risk,
+would have done better -- which is the question the panel is there to answer.
 """
 
 import json
@@ -96,11 +101,21 @@ def main():
 
     traded = [p for p in kt.STRATEGIES if t.accounts[p["name"]].log
               or t.accounts[f"Anti {p['name']}"].log]
-    print(f"\n  Both sides lost in {both_lost} of {len(traded)} pairs.")
-    print("\n  The 'pair' column is the two P/Ls added together. If the model carried real\n"
-          "  information, one side would win more than the other lost and the pair would be\n"
-          "  positive. A pair that is negative and close to the fees beside it is the market\n"
-          "  charging for the privilege of having an opinion, in either direction.")
+    print(f"\n  Both sides lost in {both_lost} of {len(traded)} pairs.\n")
+    print(f"  {'pair':10s} {'orig contracts':>15s} {'twin contracts':>15s} {'ratio':>7s}")
+    for real in kt.STRATEGIES:
+        a = t.accounts[real["name"]]
+        b = t.accounts[f"Anti {real['name']}"]
+        if not a.log or not b.log:
+            continue
+        ca = sum(l["contracts"] for l in a.log)
+        cb = sum(l["contracts"] for l in b.log)
+        print(f"  {real['name']:10s} {ca:15,d} {cb:15,d} {cb / ca:7.2f}")
+    print("\n  Those ratios are why the pair column is not a clean measure of cost. Equal\n"
+          "  money buys very unequal quantities at 18c and at 85c, so each pair carries a\n"
+          "  standing long position in whichever side was cheaper. A positive pair does not\n"
+          "  prove the model is backwards; it shows that taking the other side at the same\n"
+          "  risk would have done better over this month.")
 
 
 if __name__ == "__main__":
