@@ -28,3 +28,9 @@ grant update (saved_at, state) on engine_state to assetcracker;
 -- database (deploy/pi/setup-prod-db.sh), which is the only place this file is applied.
 grant select, insert on value_snapshot to assetcracker;
 grant select on value_snapshot to assetcracker_ro;
+
+-- candle (0015) is appended to by cmd/candles and the service's hourly candle writer, which also
+-- reads it (the newest stored candle, and the stored copy it compares a later one with). Spelled
+-- out for the same reason as value_snapshot: the research reads it through the read-only role.
+grant select, insert on candle to assetcracker;
+grant select on candle to assetcracker_ro;

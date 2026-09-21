@@ -265,6 +265,13 @@ func run() error {
 		}
 	}()
 
+	// Coinbase's daily and hourly candles for the spot products, once an hour: RECORD ONLY, for the
+	// spot protocol. Its own goroutine; nothing else waits on it or reads its state.
+	if len(products) > 0 {
+		wg.Add(1)
+		go func() { defer wg.Done(); recordCandles(ctx, db, cfg.UserAgent, products) }()
+	}
+
 	slog.Info("asset cracker service running", "version", version, "instruments", len(instruments), "ladders_recorded", len(ladders), "health", "http://"+cfg.HTTPAddr+"/healthz")
 	// What the running service knows right now. The health check and the status page share it.
 	live := func(hctx context.Context) (map[string]any, bool) {
