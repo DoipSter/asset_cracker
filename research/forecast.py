@@ -3,6 +3,7 @@
     python forecast.py                          # BTC, 45 minutes, a ladder around spot
     python forecast.py ETH 15                   # another coin, another horizon
     python forecast.py BTC 45 87000 87500       # your own levels
+    python forecast.py BTC hour 87000           # ...until the top of the hour
 
 Reads the last hour of one-minute candles from Coinbase's public API and treats the next
 stretch as a random walk from where the price is now. That is deliberately the dullest
@@ -25,7 +26,7 @@ import math
 import statistics
 import sys
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 PRODUCTS = {"BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD",
             "XRP": "XRP-USD", "DOGE": "DOGE-USD"}
@@ -88,8 +89,20 @@ def main():
     args = sys.argv[1:]
     coin = (args[0].upper() if args and args[0].upper() in PRODUCTS else "BTC")
     args = args[1:] if args and args[0].upper() in PRODUCTS else args
-    horizon = int(args[0]) if args and args[0].isdigit() else 45
-    args = args[1:] if args and args[0].isdigit() else args
+    # "hour" means whatever is left until the clock strikes, which shrinks as it runs -- the
+    # natural horizon when the question is about a round that ends on the hour.
+    label = None
+    if args and args[0].lower() == "hour":
+        started = datetime.now().astimezone()
+        top = (started + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        horizon = max(1.0, (top - started).total_seconds() / 60)
+        label = f"{top:%H:%M}"
+        args = args[1:]
+    elif args and args[0].isdigit():
+        horizon = int(args[0])
+        args = args[1:]
+    else:
+        horizon = 45
     levels = [float(a) for a in args] if args else None
 
     m = measure(candles(PRODUCTS[coin]))
@@ -101,9 +114,10 @@ def main():
     print(f"  last hour: {(spot / m['open'] - 1) * 100:+.2f}%, "
           f"${m['low']:,.{dec}f} to ${m['high']:,.{dec}f}, {m['volume']:,.1f} traded")
     print(f"  volatility {m['sd_minute'] * 100:.4f}%/min over {m['samples']} returns "
-          f"-> {sigma * 100:.3f}% over {horizon} min  (+/- ${spot * sigma:,.{dec}f})\n")
+          f"-> {sigma * 100:.3f}% {f'by {label}' if label else 'ahead'}"
+          f"  (+/- ${spot * sigma:,.{dec}f})   [{horizon:.0f} min]\n")
 
-    print(f"  {'level':>12s} {'vs spot':>9s} {'sigmas':>7s} {'finishes above':>15s} "
+    print(f"  {'level':>12s} {'vs spot':>9s} {'sigmas':>7s} {'above':>7s} {'below':>7s} "
           f"{'touches':>9s}")
     for level in levels:
         above, touch = odds(spot, sigma, level)
@@ -111,11 +125,11 @@ def main():
         z = math.log(level / spot) / sigma
         mark = "  <- spot" if abs(gap) < spot * sigma * 0.15 else ""
         print(f"  ${level:>11,.{dec}f} {gap:>+9,.{dec}f} {z:>+7.2f} "
-              f"{above * 100:>14.1f}% {touch * 100:>8.1f}%{mark}")
+              f"{above * 100:>6.1f}% {(1 - above) * 100:>6.1f}% {touch * 100:>8.1f}%{mark}")
 
-    print(f"\n  'finishes above' is what a {horizon}-minute contract settles on, so it is "
-          f"also\n  roughly what one should cost. 'touches' is the chance of getting there "
-          f"at all.")
+    print(f"\n  'above' and 'below' are where it FINISHES, which is what a contract settles "
+          f"on,\n  so 'above' is roughly what one should cost. 'touches' is the chance of "
+          f"reaching\n  it at any point on the way, and is always the larger number.")
     print(f"  No drift is assumed: over a month of rounds, direction was unpredictable\n"
           f"  (correlation +0.02). Volatility from {m['samples']} returns is a thin sample "
           f"-- a quiet\n  hour understates it and a busy one overstates it.")
