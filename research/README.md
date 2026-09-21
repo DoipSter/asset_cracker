@@ -129,6 +129,7 @@ with a few live brackets around spot.
 | `backtest_antiworld.py` | Runs each strategy against its mirror |
 | `sessions.py` | Browses past runs of the app: `python sessions.py [last|<id>]` |
 | `font_probe.py` | Checks a glyph renders rather than drawing as a box — run before adding a coin |
+| `forecast.py` | Odds of a coin being above a price N minutes out: `python forecast.py BTC 45` |
 
 The `.json` caches are gitignored — regenerate them with `scrape_week.py` and
 `fetch_rounds.py`.
