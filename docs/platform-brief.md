@@ -221,10 +221,13 @@ tick tables by time and set a retention policy.
 
 1. Postgres schema: ledger, accounts, buckets, pools, instruments, strategy versions, trials,
    journal, commentary. **Schema done 2026-09-20** (`db/`): applied to `assetcracker_dev` on
-   the Pi, with tests that attempt each rule violation. Still to do: Go service skeleton,
-   deployed to the Pi.
+   the Pi, with tests that attempt each rule violation. **Service skeleton done** (`service/`):
+   runs on the Pi by hand against the dev database. Not yet: a systemd unit, and the real
+   database's roles (the service should not own the tables).
 2. Sources: Coinbase and Kalshi market data in Go, recorded to Postgres. Fix the duplicate
-   settlement delivery found in the Python poller.
+   settlement delivery found in the Python poller. **Done 2026-09-20**, with a test that replays
+   the duplicate-settlement scenario. Measured on the Pi: quotes at 1 Hz per series, trade
+   prints about 47 ms behind the exchange's timestamp.
 3. Strategy interface; port Doipster's six as the first family; check with the replay harness.
 4. Paper broker, journal, bucket lifecycle, supervisor and breakers.
 5. Metrics and the promotion gate; trials registry.
