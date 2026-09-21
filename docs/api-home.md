@@ -113,6 +113,9 @@ How the figures are made (added when the API was built, 2026-09-21; all additive
   - the value history never read: `total.earned_cents`, `total.earned_pct`, every
     `composition[].earned_cents` and every `assets[].earned_cents` are null. (Before any
     snapshot EXISTS, which is a lookup that worked, they are 0 as above.)
+- `recording_error` (string) appears when no value snapshot has been written for five minutes (a
+  convention: one skipped minute is routine, between a round's close and its settlement), with
+  the writer's own reason. The page shows it as a notice; nothing else would say so short of the log.
 - Snapshots are looked up at most once a minute per range, so `earned_cents` moves with the live
   value every poll but its starting point moves once a minute.
 

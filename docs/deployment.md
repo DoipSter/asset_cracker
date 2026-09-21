@@ -104,9 +104,11 @@ ssh acdeploy@rpi-v5-1.local sudo journalctl -u assetcracker -n 100 --no-pager
 ssh acdeploy@rpi-v5-1.local sudo systemctl status assetcracker
 ```
 
-systemd restarts the service five seconds after a crash. There is no alerting yet: nothing
-tells anyone if the Pi is off or the feeds are stale. A push notification from a health check is
-the obvious next piece.
+systemd restarts the service five seconds after a crash. The home page says so itself when an
+engine is halted, the service is unhealthy, the ledger could not be read, or no value snapshot
+has been written for five minutes. There is still no PUSH alert: nothing reaches anyone who is
+not looking, and nothing at all if the Pi is off. Brad chose to leave that for later
+(2026-09-21); ntfy or a Discord webhook, placed on the Pi by him, are the candidates.
 
 ## Secrets
 

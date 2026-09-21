@@ -306,6 +306,14 @@ func run() error {
 	// It waits a minute before the first one, so that every round has quotes to mark bets by. A
 	// snapshot that cannot be written is logged and skipped. It takes the engines' locks only to
 	// copy what is in memory, never across a database call: trading does not wait on it.
+	// The home page says so when the snapshots stop: nothing else would, short of reading the log.
+	var recordingMu sync.Mutex
+	recording := web.Recording{Started: time.Now()}
+	src.Recording = func() web.Recording {
+		recordingMu.Lock()
+		defer recordingMu.Unlock()
+		return recording
+	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -316,12 +324,20 @@ func run() error {
 			case <-ctx.Done():
 				return
 			case now := <-t.C:
-				switch err := snapshotValues(ctx, db, src, run2, now); {
+				err := snapshotValues(ctx, db, src, run2, now)
+				switch {
 				case errors.Is(err, runner.ErrAwaitingSettlement): // routine: a minute that fell between a close and its settlement
 					slog.Warn("value snapshot skipped", "why", err)
 				case err != nil:
 					slog.Error("value snapshot not written", "err", err)
 				}
+				recordingMu.Lock()
+				if err == nil {
+					recording.LastWritten, recording.LastProblem = now, ""
+				} else {
+					recording.LastProblem = err.Error()
+				}
+				recordingMu.Unlock()
 			}
 		}
 	}()

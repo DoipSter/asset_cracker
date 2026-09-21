@@ -394,7 +394,7 @@ function renderDateline(){var h=S.home||{},n=new Date();
 function renderAlerts(){var h=S.home||{},out="",raw=arr(h.halted),hn=haltedNames();
   if(raw.length)out+='<div class="alert" role="alert"><b>HALTED</b> · '+(hn.length?hn.map(esc).join(", ")+" · "+(hn.length>1?"these engines are":"this engine is"):"an engine the service did not name is")+" placing no new bets</div>";
   if(S.home&&h.healthy===false)out+='<div class="alert" role="alert"><b>UNHEALTHY</b> · the service reports it is not healthy</div>';
-  [h.capital_error,h.history_error].forEach(function(m){if(str(m))out+='<div class="alert soft" role="status">'+esc(m)+"</div>"});
+  [h.capital_error,h.history_error,h.recording_error].forEach(function(m){if(str(m))out+='<div class="alert soft" role="status">'+esc(m)+"</div>"});
   if(S.fail.home>=2)out+='<div class="alert soft" role="status">No answer from the service'+(S.okAt?" since "+clock(S.okAt/1000,1)+". Figures below are the last received.":".")+"</div>";
   if(S.home&&h.simulated!==true)out+='<div class="alert soft">The service did not confirm simulated: true.</div>';
   setHTML($("alerts"),out)}

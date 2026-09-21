@@ -59,6 +59,37 @@ type Sources struct {
 	Feeds   []Feed
 	Price   func(product string) (price, ageSeconds float64, ok bool)
 	Round   func(series string) (kalshi.Status, bool)
+	// Recording says how the once-a-minute value snapshots are going. Nil means nobody is
+	// writing them (a test, or a build without the writer).
+	Recording func() Recording
+}
+
+// Recording is the state of the value-snapshot writer: when it last wrote, and why it last did not.
+type Recording struct {
+	Started     time.Time
+	LastWritten time.Time // zero until the first snapshot of this run
+	LastProblem string    // why the most recent attempt wrote nothing; empty if it wrote
+}
+
+// RecordingStaleAfter is how long without a snapshot before the home page says so. A convention:
+// the routine gap is one minute (a minute that falls between a round's close and its
+// settlement is skipped), so five in a row is not routine.
+const RecordingStaleAfter = 5 * time.Minute
+
+// recordingError is the sentence the page shows when the value history has stopped growing.
+func recordingError(r Recording, now time.Time) string {
+	last := r.LastWritten
+	if last.IsZero() {
+		last = r.Started
+	}
+	if last.IsZero() || now.Sub(last) < RecordingStaleAfter {
+		return ""
+	}
+	msg := fmt.Sprintf("No value snapshot has been written for %d minutes, so the earned figures and the value chart are not growing.", int(now.Sub(last).Minutes()))
+	if r.LastProblem != "" {
+		msg += " The writer's reason: " + r.LastProblem
+	}
+	return msg
 }
 
 func (s Sources) feed(coin string) (Feed, bool) {
@@ -338,6 +369,11 @@ func homeDoc(src Sources, key string, w window, now time.Time, changes map[strin
 	}
 	if msg := capitalError(capital, capitalOK); msg != "" {
 		doc["capital_error"] = msg
+	}
+	if src.Recording != nil {
+		if msg := recordingError(src.Recording(), now); msg != "" {
+			doc["recording_error"] = msg
+		}
 	}
 	return doc
 }

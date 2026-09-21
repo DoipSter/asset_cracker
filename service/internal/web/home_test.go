@@ -525,3 +525,28 @@ func TestRoundPricesAreKeptForOnePoint(t *testing.T) {
 		t.Errorf("%d rounds kept, want only the open one: finished rounds must not pile up", len(cache.by))
 	}
 }
+
+// The page only hears that the value history stopped if the API says so: one skipped minute is
+// routine, five are not, and before the first snapshot the clock runs from the service's start.
+func TestRecordingError(t *testing.T) {
+	now := time.Unix(1_790_000_000, 0)
+	for _, c := range []struct {
+		name string
+		r    Recording
+		want string
+	}{
+		{"just started", Recording{Started: now.Add(-2 * time.Minute)}, ""},
+		{"one routine skip", Recording{Started: now.Add(-time.Hour), LastWritten: now.Add(-2 * time.Minute), LastProblem: "between close and settlement"}, ""},
+		{"stopped", Recording{Started: now.Add(-time.Hour), LastWritten: now.Add(-7 * time.Minute), LastProblem: "v2 is halted"}, "for 7 minutes"},
+		{"never wrote", Recording{Started: now.Add(-10 * time.Minute), LastProblem: "no table"}, "for 10 minutes"},
+		{"nobody writing", Recording{}, ""},
+	} {
+		got := recordingError(c.r, now)
+		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
+			t.Errorf("%s: got %q, want it to contain %q", c.name, got, c.want)
+		}
+		if c.want != "" && c.r.LastProblem != "" && !strings.Contains(got, c.r.LastProblem) {
+			t.Errorf("%s: the writer's reason is missing from %q", c.name, got)
+		}
+	}
+}
