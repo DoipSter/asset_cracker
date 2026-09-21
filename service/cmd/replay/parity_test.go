@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -14,8 +15,8 @@ func TestParityWithPython(t *testing.T) {
 		t.Fatal("no recordings to replay")
 	}
 	for _, folder := range fixtures {
-		if st, err := os.Stat(folder); err != nil || !st.IsDir() {
-			continue
+		if st, err := os.Stat(folder); err != nil || !st.IsDir() || strings.Contains(folder, "_v2_") {
+			continue // second-version recordings belong to cmd/replay2
 		}
 		t.Run(filepath.Base(folder), func(t *testing.T) {
 			if err := run(folder); err != nil {

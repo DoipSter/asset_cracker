@@ -9,6 +9,7 @@ void main() {
       .listSync()
       .whereType<Directory>()
       .map((d) => d.path)
+      .where((p) => !p.contains('_v2_')) // second-version recordings: the Dart engine is the first version only
       .toList()
     ..sort();
 

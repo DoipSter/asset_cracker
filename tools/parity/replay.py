@@ -106,7 +106,13 @@ def main():
         # The state this replay ended in, under the recorded clock: what another engine's replay
         # is compared with. The live run's own state file was saved on its own schedule, so its
         # equity figures belong to a different moment.
-        shutil.copy(os.path.join(out, "kalshi_balance.json"), os.path.join(os.path.dirname(args.trace), "replay_state.json"))
+        dest = os.path.dirname(args.trace)
+        shutil.copy(os.path.join(out, "kalshi_balance.json"), os.path.join(dest, "replay_state.json"))
+        # ...and the two logs this replay wrote, for the same reason: another engine is compared
+        # with the Python given exactly these calls, whatever the live run went on to do.
+        for name in ("kalshi_trades.csv", "kalshi_exits.csv"):
+            if os.path.exists(os.path.join(out, name)):
+                shutil.copy(os.path.join(out, name), os.path.join(dest, "replay_" + name))
 
     print(f"replayed {len(calls)} calls: {dict(counts)}")
     print(f"events produced: {dict(events) or 'none'}")

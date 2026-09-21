@@ -6,6 +6,14 @@ the Go side is `service/cmd/replay2`. The first version's harness is in `v1/` an
 kalshi_trader.py at ed05fc2; its fixture is `fixtures/2026-09-20_40min`, and its Go side is
 `service/cmd/replay`. What follows was written for the first version; the method is the same.
 
+`fixtures/2026-09-20_v2_17min/` is the first v2 fixture: 11,086 calls across five coins taken
+from a live run of his unmodified engine, producing 101 bets, 14 early sales (the Scalper's and
+its twin's mirrored ones), 75 settlements and 14 graded exits. It holds the calls, the Python
+replay's per-step trace (with all twelve accounts' cash on every step), and the trade log,
+early-sales log and final state that replay produced. The Go port is compared with those: the
+Python given exactly these calls. No account ran out in it; that path is covered by unit tests
+in `service/internal/kalshi15m2`.
+
 Phase 1 of `docs/flutter-port-scope.md`. It answers one question: given the same inputs, does
 an engine make the same trades? First for the Python against itself, later for the Dart port
 against the Python.

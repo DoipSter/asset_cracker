@@ -146,7 +146,11 @@ func run(folder string) error {
 		file string
 		rows [][]string
 	}{{"kalshi_trades.csv", trader.Trades}, {"kalshi_exits.csv", trader.Exits}} {
-		live, _ := lines(filepath.Join(folder, pair.file))
+		// Prefer what the Python REPLAY wrote from exactly these calls (saved beside the trace).
+		live, err := lines(filepath.Join(folder, "replay_"+pair.file))
+		if err != nil {
+			live, _ = lines(filepath.Join(folder, pair.file))
+		}
 		var ours []string
 		for _, row := range pair.rows {
 			ours = append(ours, csvLine(row))
