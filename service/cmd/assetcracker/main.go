@@ -146,7 +146,7 @@ func run() error {
 			ok = ok && time.Since(st.LastQuotesAt) < time.Minute
 		}
 		return map[string]any{
-			"ok": ok, "uptime_seconds": time.Since(started).Seconds(), "mode": "market data only",
+			"ok": ok, "version": version, "uptime_seconds": time.Since(started).Seconds(), "mode": "market data only",
 			"ticks_written": ticksWritten.Load(), "prices": prices, "rounds": rounds,
 		}, ok
 	})
