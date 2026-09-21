@@ -4,8 +4,11 @@
 -- money, this is a record of what it was MARKED at.
 --
 --   value_cents        marked to market: cash plus open bets at the current BID. An open bet
---                      with no bid (a round that has closed but not settled, an empty book) is
---                      worth 0 here and is counted in `unmarked`, so a dip can be told from a loss.
+--                      with no bid (an empty book: a losing side late in its round) is worth 0
+--                      here and is counted in `unmarked`, so a dip can be told from a loss. No
+--                      row at all is written while a round has closed and not yet settled, when
+--                      NO open bet on it can be priced, nor while an engine is halted; and the
+--                      home page never measures a range from a row with unmarked > 0.
 --   cash_cents         cash alone.
 --   at_risk_cents      open bets at what they cost.
 --   contributed_cents  money put IN, net of money taken out, that was not earned by trading:
@@ -41,10 +44,33 @@ create table value_snapshot (
     contributed_cents bigint not null,
     unmarked          integer not null default 0 check (unmarked >= 0)
 );
-create index value_snapshot_lookup on value_snapshot (mode, scope, key, at);
+-- One index serves every read: the newest row of a scope and key at or before a moment, the
+-- batch written at one moment (looked up key by key), and the series since a moment. It carries
+-- value_cents so that the series, which for ALL is every total row there is, can be read from
+-- the index alone and need not visit a heap in which the total is one row in eleven. (That it
+-- is read index-only has not been measured: check with EXPLAIN once there are rows.)
+create index value_snapshot_lookup on value_snapshot (mode, scope, key, at) include (value_cents);
 create trigger append_only before update or delete on value_snapshot for each row execute function forbid_change();
 
 comment on table value_snapshot is 'What the simulated world was marked at, appended once a minute by the service. Append-only. Not money: the ledger is.';
 comment on column value_snapshot.value_cents is 'Cash plus open bets at the BID. A bet with no bid counts 0 and is counted in unmarked.';
 comment on column value_snapshot.contributed_cents is 'Net money put in that trading did not earn. Earned = change in (value_cents - contributed_cents).';
 comment on column value_snapshot.unmarked is 'Open bets that had no bid to mark them by when this row was written.';
+
+-- The home page's other two reads of older tables, which had no index to start from. Neither
+-- table is partitioned. Plain "create index", not "concurrently": a migration runs inside one
+-- transaction; ledger_transfer had about 680 rows and market about 100 when this was written
+-- (2026-09-21), so the lock is momentary. NOT YET RUN ANYWHERE: written without a database.
+--
+-- The capital behind the snapshots (store.BucketCapitals) is the handful of transfers that are
+-- not trading: seeds, reaps, deposits, sustainment allocations. Trading is nearly every row of
+-- ledger_transfer, one per fill and per paid settlement, so without this the read walks every
+-- trade ever made, and it runs under the second engine's lock after each settlement. The query's
+-- where clause repeats this predicate word for word, which is what lets the planner use it.
+create index ledger_transfer_capital on ledger_transfer (id)
+ where reason not in ('fill', 'fee', 'settlement');
+
+-- What each coin realised over a range (store.RealisedByCoin) starts from the markets that
+-- settled in the range. From there it reaches their orders through trade_order (market_id),
+-- which 0011_analysis_indexes.sql adds, and their payouts through settlement's unique key.
+create index market_settled_at on market (settled_at);

@@ -22,7 +22,7 @@ var ranges = map[string][2]int{"1H": {60, 60}, "24H": {300, 288}, "7D": {3600, 1
 
 type history struct {
 	Closes    []float64 `json:"closes"`
-	Times     []float64 // when each close was struck: the candle's start plus its length, unix seconds
+	Times     []float64 // when each close was struck, unix seconds: the candle's end, or for the one still forming, when it was fetched
 	High, Low float64
 	fetched   time.Time
 }
@@ -53,7 +53,7 @@ func priceHistory(ctx context.Context, userAgent, product, key string) (history,
 	h := history{fetched: time.Now()}
 	for i, c := range candles {
 		h.Closes = append(h.Closes, c.Close)
-		h.Times = append(h.Times, float64(c.Start.Unix()+int64(spec[0])))
+		h.Times = append(h.Times, closeTime(c.Start, spec[0], h.fetched))
 		if i == 0 || c.High > h.High {
 			h.High = c.High
 		}
@@ -63,6 +63,18 @@ func priceHistory(ctx context.Context, userAgent, product, key string) (history,
 	}
 	historyCache[product+key] = h
 	return h, nil
+}
+
+// closeTime is when a candle's close was struck. Coinbase's newest candle is still forming (seen
+// 2026-09-21: an hourly candle whose end was 1,478 s ahead of the clock): its close is the latest
+// trade, so it is timed at the fetch, not at an end that has not happened yet and would put the
+// chart's last point after "now" and after the bets drawn on it.
+func closeTime(start time.Time, granularity int, fetched time.Time) float64 {
+	end := start.Add(time.Duration(granularity) * time.Second)
+	if end.After(fetched) {
+		end = fetched
+	}
+	return float64(end.UnixNano()) / 1e9
 }
 
 //go:embed home.html

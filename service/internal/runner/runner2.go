@@ -42,12 +42,21 @@ type Runner2 struct {
 
 	capital      store.Capital // the ledger's side of the balance sheet, for the value snapshots
 	capitalFresh bool          // false when the last attempt to read it failed
+	// capitalGen counts the times this engine has re-read the capital, or stopped short of doing
+	// so after moving money. RefreshCapital reads outside the lock and keeps its result only if
+	// this has not moved meanwhile: an older read must never land on top of a newer one.
+	capitalGen uint64
+	// heldElsewhere is the ids of the buckets the first engine's runners hold. With this engine's
+	// own, they are every bucket whose cash is in some engine's memory; any other live bucket
+	// is valued at its ledger cash (store.BucketCapitals).
+	heldElsewhere []int64
 }
 
 const engine2 = "kalshi15m2"
 
-// NewRunner2 prepares the twelve buckets and restores the engine's saved state.
-func NewRunner2(ctx context.Context, db *store.Store, coins []Coin2) (*Runner2, error) {
+// NewRunner2 prepares the twelve buckets and restores the engine's saved state. heldElsewhere is
+// the ids of the buckets the first engine's runners hold, which never change while the service runs.
+func NewRunner2(ctx context.Context, db *store.Store, coins []Coin2, heldElsewhere []int64) (*Runner2, error) {
 	var names, order []string
 	cal := map[string]k2.Calibration{}
 	byCoin := map[string]Coin2{}
@@ -62,7 +71,8 @@ func NewRunner2(ctx context.Context, db *store.Store, coins []Coin2) (*Runner2, 
 	if err != nil {
 		return nil, fmt.Errorf("v2 sim setup: %w", err)
 	}
-	r := &Runner2{db: db, setup: setup, coins: byCoin, last: map[string]string{}, lastAt: map[string]float64{}, hwm: map[string]int64{}}
+	r := &Runner2{db: db, setup: setup, coins: byCoin, last: map[string]string{}, lastAt: map[string]float64{}, hwm: map[string]int64{},
+		heldElsewhere: heldElsewhere}
 	r.trader = k2.NewTrader(func() float64 { return unix(time.Now()) }, order, cal)
 	var saved k2.SavedState
 	if found, err := db.LoadEngineState(ctx, engine2, &saved); err != nil {
@@ -91,24 +101,52 @@ func NewRunner2(ctx context.Context, db *store.Store, coins []Coin2) (*Runner2, 
 		}
 		r.hwm[name] = mark
 	}
+	r.refreshPolicy(ctx)
 	r.refreshMoney(ctx)
 	return r, nil
 }
 
-// refreshMoney re-reads the skim policy and where the money sits. A failure leaves the old
-// figures in place: they are for display, and the ledger is unaffected.
-func (r *Runner2) refreshMoney(ctx context.Context) {
+// refreshPolicy re-reads the sustainment allocation's rates. A failure leaves the old ones in place.
+func (r *Runner2) refreshPolicy(ctx context.Context) {
 	if p, err := r.db.CurrentSkimPolicy(ctx); err == nil {
 		r.policy = p
 	} else {
 		slog.Warn("could not read the skim policy", "err", err)
 	}
-	c, err := r.db.ReadCapital(ctx)
+}
+
+// held is the ids of every bucket some engine holds in memory: the first engine's, and this
+// engine's live ones.
+func (r *Runner2) held() []int64 {
+	ids := append([]int64{}, r.heldElsewhere...)
+	for _, b := range r.setup.Buckets {
+		if !b.Frozen {
+			ids = append(ids, b.ID)
+		}
+	}
+	return ids
+}
+
+// refreshMoney re-reads where the money sits, and then the capital behind the value snapshots.
+// The two are read apart on purpose: where the money sits is what /api/status has always shown,
+// from a query that has run since the money buckets existed, and it must not go blank because
+// the newer query behind the home page failed. A failure leaves the old figures in place: they
+// are for display, and the ledger is unaffected. Callers hold the lock.
+func (r *Runner2) refreshMoney(ctx context.Context) {
+	r.capitalGen++
+	m, err := r.db.MoneyBucketBalances(ctx)
+	if err != nil {
+		r.capitalFresh = false
+		slog.Warn("could not read where the money sits", "err", err)
+		return
+	}
+	r.money = m
+	b, err := r.db.BucketCapitals(ctx, r.held())
 	if r.capitalFresh = err == nil; err != nil {
 		slog.Warn("could not read the capital behind the value snapshots", "err", err)
 		return
 	}
-	r.capital, r.money = c, c.Money
+	r.capital = store.Capital{Money: m, Buckets: b, ReadAt: time.Now()}
 }
 
 // skim takes the sustainment allocation: the policy's share of each bucket's gain above its high-water mark. Book value is
@@ -116,7 +154,7 @@ func (r *Runner2) refreshMoney(ctx context.Context) {
 // one climbing back from a loss is not charged twice on the same dollars. What is taken really
 // leaves the strategy's balance: it goes on trading with what stays.
 func (r *Runner2) skim(ctx context.Context) error {
-	r.refreshMoney(ctx)
+	r.refreshPolicy(ctx) // only the rates are needed here; the capital is re-read once, after the allocations
 	for _, a := range r.trader.Accounts {
 		b := r.setup.Buckets[a.Params.Name]
 		if b.Frozen || a.Retired {
@@ -347,14 +385,16 @@ func (r *Runner2) Settled(ctx context.Context, coin string, marketID int64, info
 	if len(events) == 0 {
 		return nil
 	}
-	// A settlement is when gains become real, so it is when the skim is taken.
+	// A settlement is when gains become real, so it is when the skim is taken. However this ends,
+	// allocations may have moved the ledger by then (one bucket's can be recorded before another's
+	// fails), so the capital is re-read on the way out, still under the lock.
+	defer r.refreshMoney(ctx)
 	if err := r.skim(ctx); err != nil {
 		return err
 	}
 	if err := r.db.SaveEngineState(ctx, engine2, r.trader.Export()); err != nil {
 		return r.halt(fmt.Errorf("saving v2 state after a skim: %w", err), true)
 	}
-	r.refreshMoney(ctx)
 	return nil
 }
 
@@ -390,6 +430,7 @@ func (r *Runner2) afterEvents(ctx context.Context, events, closed []k2.Event, sa
 }
 
 func (r *Runner2) halt(err error, moneyMoved bool) error {
+	r.capitalGen++ // the ledger may have moved without the re-read that normally follows: a read begun before this is not to be trusted
 	if moneyMoved {
 		r.halted = err.Error()
 		slog.Error("v2 halted: simulated money moved but was not recorded", "err", err)

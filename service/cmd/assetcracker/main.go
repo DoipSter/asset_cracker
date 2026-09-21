@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -117,9 +118,15 @@ func run() error {
 				DefaultSigma: num("default_sigma", 8e-5), Decimals: int(num("decimals", 2))}})
 		coinOf[in.Symbol] = in.Underlying
 	}
+	// The buckets the first engine's runners hold. Any other live bucket that the second engine
+	// does not hold either has its cash in the ledger and nowhere else, and is valued from there.
+	heldByV1 := []int64{}
+	for _, r := range runners {
+		heldByV1 = append(heldByV1, r.BucketIDs()...)
+	}
 	var run2 *runner.Runner2
 	if len(coins2) > 0 {
-		if run2, err = runner.NewRunner2(ctx, db, coins2); err != nil {
+		if run2, err = runner.NewRunner2(ctx, db, coins2, heldByV1); err != nil {
 			return err
 		}
 		run2.Seed(ctx, client, cfg.UserAgent)
@@ -222,17 +229,24 @@ func run() error {
 	}
 	// What the home page and the value snapshots read: the engines' books, typed, from memory.
 	src := web.Sources{Release: version}
-	src.Books = func() []runner.Book {
-		var books []runner.Book
+	// The ledger's side comes with them. Only the second engine ever changes it while the service
+	// runs (it seeds, reaps and takes allocations; the first engine does none of these), so its
+	// book and the capital are read under one hold of its lock and can never be from either side
+	// of such an event.
+	capitalWithoutV2 := ledgerCapital(db, heldByV1)
+	src.Books = func() ([]runner.Book, store.Capital, bool) {
+		books := []runner.Book{}
 		for _, in := range instruments { // in instrument order, so the list does not shuffle between calls
 			if r := runners[in.Symbol]; r != nil {
 				books = append(books, r.Book())
 			}
 		}
-		if run2 != nil {
-			books = append(books, run2.Book())
+		if run2 == nil {
+			capital, ok := capitalWithoutV2()
+			return books, capital, ok
 		}
-		return books
+		book, capital, ok := run2.BookAndCapital()
+		return append(books, book), capital, ok
 	}
 	src.Markers = func(coin string, since float64) []runner.Marker {
 		var out []runner.Marker
@@ -244,7 +258,6 @@ func run() error {
 		}
 		return out
 	}
-	src.Capital = ledgerCapital(db, run2)
 	for _, in := range instruments {
 		if in.Source != "kalshi" || in.Kind != "binary_contract" {
 			continue
@@ -269,16 +282,30 @@ func run() error {
 		return p.Status(), true
 	}
 
+	// The health check pings the database, and the home page is polled every few seconds by
+	// every phone looking at it, so its answer is kept for five seconds: /api/home is meant to be
+	// served from memory, and must not queue for one of the pool's few connections on every poll.
+	var (
+		healthMu sync.Mutex
+		healthAt time.Time
+		healthOK bool
+	)
 	src.Healthy = func() bool {
-		hctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_, ok := live(hctx)
-		return ok
+		healthMu.Lock()
+		defer healthMu.Unlock()
+		if time.Since(healthAt) > 5*time.Second {
+			hctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_, healthOK = live(hctx)
+			cancel()
+			healthAt = time.Now()
+		}
+		return healthOK
 	}
 
 	// Once a minute, write down what everything is worth: the history behind "earned over 24H".
 	// It waits a minute before the first one, so that every round has quotes to mark bets by. A
-	// snapshot that cannot be written is logged and skipped. It never touches the engines.
+	// snapshot that cannot be written is logged and skipped. It takes the engines' locks only to
+	// copy what is in memory, never across a database call: trading does not wait on it.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -289,7 +316,10 @@ func run() error {
 			case <-ctx.Done():
 				return
 			case now := <-t.C:
-				if err := snapshotValues(ctx, db, src, run2, now); err != nil {
+				switch err := snapshotValues(ctx, db, src, run2, now); {
+				case errors.Is(err, runner.ErrAwaitingSettlement): // routine: a minute that fell between a close and its settlement
+					slog.Warn("value snapshot skipped", "why", err)
+				case err != nil:
 					slog.Error("value snapshot not written", "err", err)
 				}
 			}
@@ -311,6 +341,7 @@ func run() error {
 				}
 				return doc
 			}, src)
+			web.AnalysisRoutes(mux, db)
 		})
 	stop()
 	wg.Wait()
@@ -318,13 +349,11 @@ func run() error {
 }
 
 // ledgerCapital is where the snapshots and the home page get the ledger's side of the balance
-// sheet. The second engine keeps it cached and re-reads it whenever it changes. Without that
-// engine nothing is seeded, reaped or allocated while the service runs, so it is read from the
-// database at most once a minute.
-func ledgerCapital(db *store.Store, run2 *runner.Runner2) func() (store.Capital, bool) {
-	if run2 != nil {
-		return run2.Capital
-	}
+// sheet when the second engine is not running. (When it is, it keeps the capital cached, re-reads
+// it whenever it changes, and hands it over together with its book.) Without that engine nothing
+// is seeded, reaped or allocated while the service runs, so it is read from the database at most
+// once a minute. held is the ids of the buckets the first engine's runners hold.
+func ledgerCapital(db *store.Store, held []int64) func() (store.Capital, bool) {
 	var (
 		mu   sync.Mutex
 		last store.Capital
@@ -337,7 +366,7 @@ func ledgerCapital(db *store.Store, run2 *runner.Runner2) func() (store.Capital,
 		if time.Since(at) > time.Minute {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			c, err := db.ReadCapital(ctx)
+			c, err := db.ReadCapital(ctx, held)
 			if at, good = time.Now(), err == nil; good {
 				last = c
 			} else {
@@ -350,18 +379,31 @@ func ledgerCapital(db *store.Store, run2 *runner.Runner2) func() (store.Capital,
 
 // snapshotValues appends one minute's value snapshots: the total and the four groups every
 // minute, every bucket and coin on each fifth minute of the hour. It refuses to write a row
-// whose contributed figure might be stale, because a wrong row is there for good: the table is
-// append-only, and a gap in the chart is honest where a false step is not.
+// that might be wrong, because a wrong row is there for good: the table is append-only, and a
+// gap in the chart is honest where a false step is not. So nothing is written while the
+// contributed figure might be stale, while an engine is halted, or while an open bet's round
+// has closed and not yet settled (runner.SnapshotRefusal says why for the last two).
 func snapshotValues(ctx context.Context, db *store.Store, src web.Sources, run2 *runner.Runner2, now time.Time) error {
-	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancel()
-	if _, fresh := src.Capital(); !fresh && run2 != nil {
-		run2.RefreshCapital(wctx)
+	if run2 != nil {
+		if _, fresh := run2.Capital(); !fresh {
+			// Its own short budget: the engine's lock is not held across this read, but a
+			// struggling database is not to be leaned on for ten seconds for a display figure.
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			run2.RefreshCapital(rctx)
+			cancel()
+		}
 	}
-	v, _, fresh := src.Valuation()
+	v, books, _, fresh := src.Valuation()
+	// The clock is read AFTER the books, so a round that closed while they were being read is
+	// caught: refusing a minute needlessly costs a point on a chart, the other way a false row.
+	if err := runner.SnapshotRefusal(books, time.Now()); err != nil {
+		return err
+	}
 	if !fresh {
 		return fmt.Errorf("the ledger's side of the balance sheet could not be read")
 	}
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
 	at := now.Truncate(time.Second) // one timestamp for the whole batch, exact in Postgres's microseconds
 	return db.InsertSnapshots(wctx, v.Snapshots(at, at.Minute()%5 == 0))
 }

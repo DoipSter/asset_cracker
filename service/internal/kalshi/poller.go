@@ -26,6 +26,7 @@ type Status struct {
 	Ticker       string    `json:"ticker"`
 	Strike       float64   `json:"strike"`
 	Closes       time.Time `json:"closes"`
+	Opens        time.Time `json:"-"` // Kalshi's own open time for the round, zero if it sent none. Not in the status document, which does not change
 	Quotes       Quotes    `json:"quotes"`
 	LastQuotesAt time.Time `json:"last_quotes_at"`
 	Awaiting     int       `json:"awaiting_results"`
@@ -71,9 +72,9 @@ func (p *Poller) Status() Status {
 	return p.status
 }
 
-// giveUpAfter is how long to keep asking for a round's result. Kalshi normally reports it
+// GiveUpAfter is how long to keep asking for a round's result. Kalshi normally reports it
 // about five seconds after the close.
-const giveUpAfter = 15 * time.Minute
+const GiveUpAfter = 15 * time.Minute
 
 // Run polls until ctx ends.
 func (p *Poller) Run(ctx context.Context) {
@@ -154,6 +155,7 @@ func (p *Poller) step(ctx context.Context, current **round, waiting map[string]*
 		}
 		p.mu.Lock()
 		p.status.Ticker, p.status.Closes, p.status.LastQuotesAt = cur.info.Ticker, cur.closes, now
+		p.status.Opens = cur.info.Opens()
 		p.status.Quotes, p.status.Strike = q, *cur.info.FloorStrike
 		p.mu.Unlock()
 	}
@@ -178,7 +180,7 @@ func (p *Poller) step(ctx context.Context, current **round, waiting map[string]*
 			continue
 		}
 		switch age := now.Sub(w.closes); {
-		case age > giveUpAfter:
+		case age > GiveUpAfter:
 			slog.Warn("no result for round; giving up", "ticker", ticker)
 			delete(waiting, ticker)
 		case age > time.Minute:

@@ -114,10 +114,14 @@ func (s *Store) EnsureSimSetup(ctx context.Context, prefix, family string, versi
 		var b SimBucket
 		// The newest bucket of that name: a strategy that ran out is frozen and replaced by
 		// "<name> life N", and the replacement is the one that trades.
-		err := tx.QueryRow(ctx, `select id, ledger_account_id, strategy_version_id, status = 'frozen' from bucket
+		// Its name is kept as the database has it, life and all: the value snapshots are keyed by
+		// it, and a second life written under the first life's name would join a dead bucket's
+		// history to its replacement's in a table that cannot be corrected.
+		err := tx.QueryRow(ctx, `select id, name, ledger_account_id, strategy_version_id, status = 'frozen' from bucket
 		                          where name = $1 or name like $1 || ' life %' order by id desc limit 1`, bucketName).
-			Scan(&b.ID, &b.LedgerAccountID, &b.VersionID, &b.Frozen)
+			Scan(&b.ID, &b.Name, &b.LedgerAccountID, &b.VersionID, &b.Frozen)
 		if errors.Is(err, pgx.ErrNoRows) {
+			b.Name = bucketName
 			if err = tx.QueryRow(ctx, `select v.id from strategy_version v join strategy st on st.id = v.strategy_id
 			                            where st.family = $1 and st.name = $2 and v.version = $3`, family, name, version).Scan(&b.VersionID); err != nil {
 				return out, fmt.Errorf("strategy %s/%s v%d is not registered: %w", family, name, version, err)
@@ -146,7 +150,6 @@ func (s *Store) EnsureSimSetup(ctx context.Context, prefix, family string, versi
 		if err = tx.QueryRow(ctx, `select coalesce(sum(amount_cents), 0) from ledger_entry where account_id = $1`, b.LedgerAccountID).Scan(&b.CashCents); err != nil {
 			return out, err
 		}
-		b.Name = bucketName
 		out.Buckets[name] = b
 	}
 	out.PoolLedgerID, out.OwnersLedgerID, out.venueAccountID = pool, owners, venueAccount

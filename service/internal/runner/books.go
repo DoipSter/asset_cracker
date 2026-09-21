@@ -2,10 +2,14 @@ package runner
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log/slog"
 	"math"
 	"strings"
 	"time"
 
+	"github.com/doipster/asset_cracker/service/internal/kalshi"
 	"github.com/doipster/asset_cracker/service/internal/store"
 )
 
@@ -25,6 +29,7 @@ type Position struct {
 	CostCents  int64
 	ValueCents *int64  // at the bid right now; nil when there is no bid to mark it by
 	Placed     float64 // unix seconds
+	Closes     float64 // when its round closes, unix seconds: past that and still open, it is waiting to be settled
 	Underlying float64 // the coin's price when the bet was placed
 }
 
@@ -105,7 +110,7 @@ func (r *Runner) Book() Book {
 				}
 			}
 			p := Position{Strategy: a.Params.Name, Engine: "v1", World: "real", Coin: r.Coin, Side: lot.Side, Ticker: lot.Ticker,
-				Contracts: lot.Contracts, EntryPrice: lot.Price, CostCents: cents(lot.Cost), Placed: lot.T, Underlying: lot.BTCPrice}
+				Contracts: lot.Contracts, EntryPrice: lot.Price, CostCents: cents(lot.Cost), Placed: lot.T, Closes: lot.Close, Underlying: lot.BTCPrice}
 			b.AtRiskCents += p.CostCents
 			if v, ok := markCents(lot.Contracts, bid); ok {
 				p.ValueCents, b.MarkedCents = &v, b.MarkedCents+v
@@ -149,10 +154,37 @@ func appendMarkers(out []Marker, since float64, m Marker, placed, price float64,
 	return out
 }
 
+// BucketIDs is the ids of the buckets this series' strategies trade from. The first engine never
+// replaces a bucket, so they are the same for as long as the service runs.
+func (r *Runner) BucketIDs() []int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids := make([]int64, 0, len(r.setup.Buckets))
+	for _, b := range r.setup.Buckets {
+		ids = append(ids, b.ID)
+	}
+	return ids
+}
+
 // Book is the second engine's twelve buckets and every open bet across the coins.
 func (r *Runner2) Book() Book {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.book()
+}
+
+// BookAndCapital is Book and Capital under ONE hold of the lock. Taken apart, a settlement that
+// takes an allocation, or a strategy running out and being staked again, can slip between the
+// two, and the valuation would lay books from before it beside capital from after it: a false
+// step of the whole amount, which a value snapshot would then keep for good.
+func (r *Runner2) BookAndCapital() (Book, store.Capital, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.book(), r.capital, r.capitalFresh
+}
+
+// book is Book for a caller that holds the lock.
+func (r *Runner2) book() Book {
 	out := Book{Engine: "v2", Halted: r.halted}
 	mk := r.trader.Markets()
 	for _, a := range r.trader.Accounts {
@@ -175,7 +207,7 @@ func (r *Runner2) Book() Book {
 				}
 			}
 			p := Position{Strategy: b.Strategy, Engine: "v2", World: w, Coin: lot.Coin, Side: lot.Side, Ticker: lot.Ticker,
-				Contracts: lot.Contracts, EntryPrice: lot.Price, CostCents: cents(lot.Cost), Placed: lot.T, Underlying: lot.BTCPrice}
+				Contracts: lot.Contracts, EntryPrice: lot.Price, CostCents: cents(lot.Cost), Placed: lot.T, Closes: lot.Close, Underlying: lot.BTCPrice}
 			b.AtRiskCents += p.CostCents
 			if v, ok := markCents(lot.Contracts, bid); ok {
 				p.ValueCents, b.MarkedCents = &v, b.MarkedCents+v
@@ -209,8 +241,11 @@ func (r *Runner2) Markers(coin string, since float64) []Marker {
 
 // Capital is the ledger's side of the balance sheet as last read, and whether that read worked.
 // It is re-read whenever this engine seeds, reaps or takes an allocation, which is the only time
-// it changes, so between those moments the cached copy is exact and not merely recent. (Venue
-// fees paid and deployed cash do move with every fill; the snapshots take neither from here.)
+// it changes, so between those moments the cached copy is exact against the LEDGER and not
+// merely recent. (Venue fees paid and deployed cash do move with every fill; the snapshots take
+// neither from here.) It is the engine's memory that can run ahead of the ledger, when a write
+// failed and the engine halted: that is why a halted engine's books are never written down as a
+// value snapshot (SnapshotRefusal).
 func (r *Runner2) Capital() (store.Capital, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -218,12 +253,36 @@ func (r *Runner2) Capital() (store.Capital, bool) {
 }
 
 // RefreshCapital reads the ledger's side again. The snapshot writer calls it only after a read
-// has failed; it holds the engine's lock, as every other refresh does, so that a read can never
-// land on top of a newer one.
+// has failed. It never holds the engine's lock across the database: that lock is what every
+// step, settlement and price print waits on, and this is only a display figure. The lock is
+// taken twice, briefly, to note the generation before the read and to keep the result after it,
+// and the result is dropped if the engine re-read the capital (or halted) in between, because
+// the engine's read is then the newer one.
 func (r *Runner2) RefreshCapital(ctx context.Context) {
 	r.mu.Lock()
+	gen, held := r.capitalGen, r.held()
+	r.mu.Unlock()
+
+	m, moneyErr := r.db.MoneyBucketBalances(ctx)
+	var b []store.BucketCapital
+	var bucketErr error
+	if moneyErr == nil {
+		b, bucketErr = r.db.BucketCapitals(ctx, held)
+	}
+	at := time.Now()
+
+	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.refreshMoney(ctx)
+	switch {
+	case r.capitalGen != gen:
+	case moneyErr != nil:
+		slog.Warn("could not read where the money sits", "err", moneyErr)
+	case bucketErr != nil:
+		r.money = m
+		slog.Warn("could not read the capital behind the value snapshots", "err", bucketErr)
+	default:
+		r.money, r.capital, r.capitalFresh = m, store.Capital{Money: m, Buckets: b, ReadAt: at}, true
+	}
 }
 
 // Policy is the sustainment allocation's rates as last read.
@@ -266,6 +325,50 @@ type Valuation struct {
 	Coins   []Line // open bets per coin: cash and contributed are always 0
 }
 
+// ErrAwaitingSettlement marks the routine reason for refusing a value snapshot: it clears by
+// itself within seconds, so whoever logs it need not raise an alarm.
+var ErrAwaitingSettlement = errors.New("between their round's close and its settlement")
+
+// SnapshotRefusal says why these books must not be written down as a value snapshot right now,
+// or nil if they may be. A snapshot row is there for good, so a minute with no row is honest
+// where a row with a false step in it is not. Two states are refused, and either refuses the
+// whole batch, because the total and the groups must add up and both include the engine at fault:
+//
+//   - an engine is halted: its memory and the ledger disagree (a bucket staked again in memory
+//     whose seed never reached the ledger reads as $1,000 earned), and nothing here can say which
+//     is right;
+//   - an open bet's round has already closed: until it settles, which takes some seconds, nothing
+//     can price it, it counts 0, and a range measured from such a row reads the whole stake as
+//     earned. This is the same test the sustainment allocation waits on, a condition and not a
+//     number of seconds. It is ErrAwaitingSettlement for as long as the poller is still asking
+//     for the round's result; past that the bet will stay open, every minute will be refused,
+//     and the error is a plain one so that it is logged as a fault until someone looks.
+//
+// A bet with no bid in a round still open (a losing side late on) is not refused: it is fairly
+// worth about nothing, and the row says how many such bets it holds.
+func SnapshotRefusal(books []Book, now time.Time) error {
+	at := unix(now)
+	waiting, longest := 0, 0.0
+	for _, book := range books {
+		if book.Halted != "" {
+			return fmt.Errorf("%s is halted, so its books and the ledger disagree: %s", strings.TrimSpace(book.Engine+" "+book.Series), book.Halted)
+		}
+		for _, p := range book.Positions {
+			if p.Closes <= at {
+				waiting++
+				longest = math.Max(longest, at-p.Closes)
+			}
+		}
+	}
+	switch {
+	case waiting == 0:
+		return nil
+	case longest > kalshi.GiveUpAfter.Seconds():
+		return fmt.Errorf("%d open bets belong to rounds that closed up to %.0f s ago and were never settled: they cannot be priced, and no snapshot will be written until they are resolved", waiting, longest)
+	}
+	return fmt.Errorf("%d open bets are %w (the longest for %.0f s) and cannot be priced", waiting, ErrAwaitingSettlement, longest)
+}
+
 // Value marks every book to market and lays it beside what the ledger says was put in.
 //
 // The three bucket groups are the live buckets' cash and marked bets. The money group is the
@@ -274,6 +377,11 @@ type Valuation struct {
 // again shows its first life's loss as a loss, not as a fresh $1,000 earned. The money group's
 // contribution is whatever came from outside and is not in a bucket group, so the four always
 // add up to the total's, and the four earned figures add up to the total earned.
+//
+// A live bucket that no engine holds (its series was switched to recording only, or the second
+// engine is off) still has its cash in the ledger and its seed in the contributions, so it is
+// counted at that cash. Left out, switching an engine off would read as losing its buckets.
+// A bet such a bucket still had open is not counted: nothing in memory can mark it.
 func Value(books []Book, capital store.Capital, coins []string) Valuation {
 	groups := map[string]*Line{}
 	for _, g := range Groups {
@@ -289,8 +397,10 @@ func Value(books []Book, capital store.Capital, coins []string) Valuation {
 		byCoin[c] = &Line{Scope: "coin", Key: c}
 	}
 	v := Valuation{}
+	held := map[int64]bool{}
 	for _, book := range books {
 		for _, b := range book.Buckets {
+			held[b.BucketID] = true
 			if b.Retired { // its bucket is frozen and empty; only its contribution, above, remains
 				continue
 			}
@@ -318,6 +428,15 @@ func Value(books []Book, capital store.Capital, coins []string) Valuation {
 				c.Unmarked++
 			}
 		}
+	}
+	for _, b := range capital.Buckets {
+		if b.Status == "frozen" || held[b.ID] {
+			continue
+		}
+		g := groups[groupOf(b.Version, b.Anti)]
+		g.ValueCents, g.CashCents, g.Count = g.ValueCents+b.CashCents, g.CashCents+b.CashCents, g.Count+1
+		v.Buckets = append(v.Buckets, Line{Scope: "bucket", Key: b.Name, ValueCents: b.CashCents, CashCents: b.CashCents,
+			ContributedCents: b.ContributedCents, Count: 1})
 	}
 	m := capital.Money
 	money := groups["money"]

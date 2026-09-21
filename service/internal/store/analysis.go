@@ -13,34 +13,53 @@ import (
 // Everything in this file READS, for GET /api/analysis. evaluation and decision grow by hundreds
 // of thousands of rows a day and are partitioned by month, so every query on them is bounded by
 // time AND by market or strategy version: the planner prunes to one partition and walks an
-// index. A settled round is read once (AnalysisWindow) and never again; the caller caches it.
+// index. A settled round is read once its settlement rows are in (AnalysisWindow) and never
+// again; the caller caches it.
 
-// AnalysisMarkets lists the rounds whose result was stored at or after `since`, oldest first.
-// The market table is small (a few hundred rows a day) and not partitioned.
-func (s *Store) AnalysisMarkets(ctx context.Context, since time.Time) ([]analysis.Market, time.Time, error) {
-	latest := since
+// AnalysisSettledCount is how many rounds have a result: the measured figure the caller checks
+// its own list of settled markets against, so that a listing bounded by time can never quietly
+// fall short. It counts exactly what AnalysisMarkets lists.
+func (s *Store) AnalysisSettledCount(ctx context.Context) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `select count(*) from market where result in ('yes', 'no') and closes_at is not null`).Scan(&n)
+	return n, err
+}
+
+// AnalysisMarkets lists the settled rounds that closed at or after `closedSince`, oldest first.
+// It is keyed on closes_at, which is ours and fixed when the round is first seen. It used to be
+// keyed on settled_at, which is KALSHI'S settlement time and says nothing about when the result
+// reached this table: after an outage the poller stores results in no particular order, and one
+// stamped over an hour before the newest already seen was never listed. The market table is
+// small (a few hundred rows a day) and not partitioned.
+func (s *Store) AnalysisMarkets(ctx context.Context, closedSince time.Time) ([]analysis.Market, error) {
 	rows, err := s.pool.Query(ctx, `
-		select m.id, i.underlying, extract(epoch from m.closes_at)::bigint, m.result, m.settled_at
+		select m.id, i.underlying, extract(epoch from m.closes_at)::bigint, m.result
 		  from market m join instrument i on i.id = m.instrument_id
-		 where m.result in ('yes', 'no') and m.closes_at is not null and m.settled_at >= $1
-		 order by m.closes_at, m.id`, since)
+		 where m.result in ('yes', 'no') and m.closes_at is not null and m.closes_at >= $1
+		 order by m.closes_at, m.id`, closedSince)
 	if err != nil {
-		return nil, latest, err
+		return nil, err
 	}
 	defer rows.Close()
 	var out []analysis.Market
 	for rows.Next() {
 		var m analysis.Market
-		var settled time.Time
-		if err := rows.Scan(&m.ID, &m.Coin, &m.Closes, &m.Result, &settled); err != nil {
-			return nil, latest, err
-		}
-		if settled.After(latest) {
-			latest = settled
+		if err := rows.Scan(&m.ID, &m.Coin, &m.Closes, &m.Result); err != nil {
+			return nil, err
 		}
 		out = append(out, m)
 	}
-	return out, latest, rows.Err()
+	return out, rows.Err()
+}
+
+// AnalysisTrials is the number of strategy versions ever registered. The schema names this row
+// count as the number of trials that every significance figure must be corrected for
+// (0001_init.sql, on strategy_version), so it is counted there and not taken from whichever
+// buckets happen to be listed.
+func (s *Store) AnalysisTrials(ctx context.Context) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `select count(*) from strategy_version`).Scan(&n)
+	return n, err
 }
 
 // AnalysisOpenWindows is the closes_at (unix seconds) of every round that has closed and has no
@@ -117,11 +136,19 @@ func (s *Store) AnalysisBuckets(ctx context.Context) ([]analysis.Bucket, map[int
 	return out, ledger, rows.Err()
 }
 
-// AnalysisWindow reads one settled window once: every market in `markets` must share one
-// closes_at. Three queries, each bounded to the window's own minutes.
-func (s *Store) AnalysisWindow(ctx context.Context, modelVersions []int64, markets []analysis.Market) ([]analysis.MarketFacts, error) {
+// AnalysisWindow reads the markets of one settled window: every market in `markets` must share
+// one closes_at. Three queries, each bounded to the window's own minutes.
+//
+// It answers with the facts of the markets whose money is all there, and, by market id, why each
+// of the others is not ready. A round's result is committed before its settlement rows, in
+// separate transactions, and a halted runner or a stop in between never writes them; such a
+// market would read as held bets that paid nothing. So each market's fills are reconciled with
+// its settlement rows per bucket and side (analysis.Reconcile) before anything is made of it. A
+// market that is not ready must NOT be cached: the caller leaves its window out and asks again
+// on a later refresh. Nothing here waits or guesses how long the gap is.
+func (s *Store) AnalysisWindow(ctx context.Context, modelVersions []int64, markets []analysis.Market) (facts []analysis.MarketFacts, unready map[int64]string, err error) {
 	if len(markets) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	ids := make([]int64, len(markets))
 	for i, m := range markets {
@@ -132,60 +159,17 @@ func (s *Store) AnalysisWindow(ctx context.Context, modelVersions []int64, marke
 	// is journaled or traded after the close.
 	from, to := closes.Add(-20*time.Minute), closes.Add(time.Minute)
 
-	// 1. The scorecard's sums. One row per evaluation (a second of one market): the six originals
-	// journal the same model_prob for it, so the first is taken. decision is reached through
-	// (strategy_version_id, at), evaluation through (market_id, at).
-	band := "case"
-	for i, b := range analysis.Bands[:len(analysis.Bands)-1] {
-		band += fmt.Sprintf(" when tau >= %g then %d", b.MinTau, i)
-	}
-	band += fmt.Sprintf(" else %d end", len(analysis.Bands)-1)
-	scores := map[int64]*[5]analysis.BandSum{}
-	rows, err := s.pool.Query(ctx, `
-		with scored as (
-			select distinct on (d.evaluation_id) e.market_id, d.model_prob as p, d.market_prob as q,
-			       extract(epoch from (m.closes_at - d.at))::float8 as tau,
-			       case when m.result = 'yes' then 1.0::float8 else 0.0::float8 end as y
-			  from decision d
-			  join evaluation e on e.id = d.evaluation_id and e.at = d.at
-			  join market m on m.id = e.market_id
-			 where d.strategy_version_id = any($1) and d.at >= $2 and d.at < $3
-			   and e.at >= $2 and e.at < $3 and e.market_id = any($4)
-			   and d.model_prob is not null and d.market_prob is not null
-			 order by d.evaluation_id, d.id)
-		select market_id, `+band+` as band, count(*), sum((p - y) * (p - y))::float8, sum((q - y) * (q - y))::float8
-		  from scored group by 1, 2`, modelVersions, from, to, ids)
-	if err != nil {
-		return nil, fmt.Errorf("scorecard sums: %w", err)
-	}
-	for rows.Next() {
-		var market int64
-		var b int
-		var sum analysis.BandSum
-		if err := rows.Scan(&market, &b, &sum.N, &sum.Model, &sum.Market); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if scores[market] == nil {
-			scores[market] = &[5]analysis.BandSum{}
-		}
-		if b >= 0 && b < len(scores[market]) {
-			scores[market][b] = sum
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("scorecard sums: %w", err)
-	}
-
-	// 2. Every fill, and for a SELL the bid ladder on its side in the latest snapshot of that
+	// 1. Every fill, and for a SELL the bid ladder on its side in the latest snapshot of that
 	// market at or before it (in practice the same instant: the engine sold off that snapshot).
 	// has_depth is false when that snapshot predates the recording of depth (release 87a2100) or
 	// there is none within five seconds: such a sale is counted and never priced.
+	// money_missing is true when detail has no cost, or a sale's has no payout: the zero that
+	// coalesce puts there is then not a figure, and the market is held back (analysis.MoneyMissing).
 	trades := map[int64][]analysis.Trade{}
-	rows, err = s.pool.Query(ctx, `
+	rows, err := s.pool.Query(ctx, `
 		select o.market_id, o.id, o.bucket_id, o.action = 'sell', o.side, o.qty::float8, extract(epoch from o.placed_at)::float8,
 		       coalesce((o.detail->>'cost')::float8, 0), coalesce((o.detail->>'payout')::float8, 0),
+		       (o.detail->>'cost') is null or (o.action = 'sell' and (o.detail->>'payout') is null),
 		       coalesce(jsonb_typeof(book.bids) = 'array', false), coalesce((book.bids->0->>1)::float8, 0)
 		  from trade_order o
 		  left join lateral (
@@ -196,15 +180,15 @@ func (s *Store) AnalysisWindow(ctx context.Context, modelVersions []int64, marke
 		 where o.market_id = any($1) and o.placed_at >= $2 and o.placed_at < $3 and o.status = 'filled'
 		 order by o.id`, ids, from, to)
 	if err != nil {
-		return nil, fmt.Errorf("fills: %w", err)
+		return nil, nil, fmt.Errorf("fills: %w", err)
 	}
 	for rows.Next() {
 		var market int64
 		var t analysis.Trade
 		var qty, at, cost, payout float64
-		if err := rows.Scan(&market, &t.OrderID, &t.BucketID, &t.Sell, &t.Side, &qty, &at, &cost, &payout, &t.HasDepth, &t.Displayed); err != nil {
+		if err := rows.Scan(&market, &t.OrderID, &t.BucketID, &t.Sell, &t.Side, &qty, &at, &cost, &payout, &t.MoneyMissing, &t.HasDepth, &t.Displayed); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, nil, err
 		}
 		// cents as the runner books them into the ledger: math.Round(dollars * 100)
 		t.Qty, t.Second, t.CostCents, t.PayoutCents = int(qty), int64(math.Floor(at)), int64(math.Round(cost*100)), int64(math.Round(payout*100))
@@ -212,40 +196,114 @@ func (s *Store) AnalysisWindow(ctx context.Context, modelVersions []int64, marke
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("fills: %w", err)
+		return nil, nil, fmt.Errorf("fills: %w", err)
 	}
 
-	// 3. What each bucket was paid when the round settled. settlement is not partitioned.
-	payouts := map[int64]map[int64]int64{}
-	rows, err = s.pool.Query(ctx, `select market_id, bucket_id, sum(payout_cents)::bigint from settlement where market_id = any($1) group by 1, 2`, ids)
+	// 2. What each bucket was paid when the round settled, and for HOW MANY contracts, by side.
+	// settlement has one row per (market, bucket, side), a losing hold's included with 0 cents,
+	// and its unique constraint's index leads with market_id. It is not partitioned.
+	settled := map[int64]map[analysis.Holding]analysis.Paid{}
+	rows, err = s.pool.Query(ctx, `select market_id, bucket_id, side, sum(qty)::bigint, sum(payout_cents)::bigint
+	                                 from settlement where market_id = any($1) group by 1, 2, 3`, ids)
 	if err != nil {
-		return nil, fmt.Errorf("settlements: %w", err)
+		return nil, nil, fmt.Errorf("settlements: %w", err)
 	}
 	for rows.Next() {
-		var market, bucket, cents int64
-		if err := rows.Scan(&market, &bucket, &cents); err != nil {
+		var market, qty int64
+		var k analysis.Holding
+		var p analysis.Paid
+		if err := rows.Scan(&market, &k.BucketID, &k.Side, &qty, &p.PayoutCents); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, nil, err
 		}
-		if payouts[market] == nil {
-			payouts[market] = map[int64]int64{}
+		p.Qty = int(qty)
+		if settled[market] == nil {
+			settled[market] = map[analysis.Holding]analysis.Paid{}
 		}
-		payouts[market][bucket] = cents
+		settled[market][k] = p
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("settlements: %w", err)
+		return nil, nil, fmt.Errorf("settlements: %w", err)
 	}
 
-	out := make([]analysis.MarketFacts, 0, len(markets))
+	unready = map[int64]string{}
+	var ready []int64
 	for _, m := range markets {
-		f := analysis.Settle(m, trades[m.ID], payouts[m.ID])
+		if orders := analysis.MoneyMissing(trades[m.ID]); len(orders) > 0 {
+			unready[m.ID] = fmt.Sprintf("orders %v have no recorded cost or payout", orders)
+		} else if bad := analysis.Reconcile(trades[m.ID], settled[m.ID]); len(bad) > 0 {
+			why := make([]string, len(bad))
+			for i, b := range bad {
+				why[i] = fmt.Sprintf("bucket %d held %d %s at the close and its settlement rows cover %d", b.BucketID, b.Held, b.Side, b.Settled)
+			}
+			unready[m.ID] = strings.Join(why, "; ")
+		} else {
+			ready = append(ready, m.ID)
+		}
+	}
+
+	// 3. The scorecard's sums, for the ready markets only: this is the heavy read, and a market
+	// that is not ready will be read again. One row per evaluation (a second of one market): the
+	// six originals journal the same model_prob for it, so the first is taken. decision is
+	// reached through (strategy_version_id, at), evaluation through (market_id, at).
+	scores := map[int64]*[5]analysis.BandSum{}
+	if len(ready) > 0 {
+		band := "case"
+		for i, b := range analysis.Bands[:len(analysis.Bands)-1] {
+			band += fmt.Sprintf(" when tau >= %g then %d", b.MinTau, i)
+		}
+		band += fmt.Sprintf(" else %d end", len(analysis.Bands)-1)
+		rows, err = s.pool.Query(ctx, `
+			with scored as (
+				select distinct on (d.evaluation_id) e.market_id, d.model_prob as p, d.market_prob as q,
+				       extract(epoch from (m.closes_at - d.at))::float8 as tau,
+				       case when m.result = 'yes' then 1.0::float8 else 0.0::float8 end as y
+				  from decision d
+				  join evaluation e on e.id = d.evaluation_id and e.at = d.at
+				  join market m on m.id = e.market_id
+				 where d.strategy_version_id = any($1) and d.at >= $2 and d.at < $3
+				   and e.at >= $2 and e.at < $3 and e.market_id = any($4)
+				   and d.model_prob is not null and d.market_prob is not null
+				 order by d.evaluation_id, d.id)
+			select market_id, `+band+` as band, count(*), sum((p - y) * (p - y))::float8, sum((q - y) * (q - y))::float8
+			  from scored group by 1, 2`, modelVersions, from, to, ready)
+		if err != nil {
+			return nil, nil, fmt.Errorf("scorecard sums: %w", err)
+		}
+		for rows.Next() {
+			var market int64
+			var b int
+			var sum analysis.BandSum
+			if err := rows.Scan(&market, &b, &sum.N, &sum.Model, &sum.Market); err != nil {
+				rows.Close()
+				return nil, nil, err
+			}
+			if scores[market] == nil {
+				scores[market] = &[5]analysis.BandSum{}
+			}
+			if b >= 0 && b < len(scores[market]) {
+				scores[market][b] = sum
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, nil, fmt.Errorf("scorecard sums: %w", err)
+		}
+	}
+
+	facts = make([]analysis.MarketFacts, 0, len(ready))
+	for _, m := range markets {
+		if _, held := unready[m.ID]; held {
+			continue
+		}
+		f := analysis.Settle(m, trades[m.ID], settled[m.ID])
 		if sc := scores[m.ID]; sc != nil {
 			f.Score = *sc
 		}
-		out = append(out, f)
+		facts = append(facts, f)
 	}
-	return out, nil
+	return facts, unready, nil
 }
 
 // AnalysisUnsettled is what is still in play, by bucket: early sales in rounds with no result

@@ -77,7 +77,7 @@ func (f fakeHistory) FirstSnapshot(context.Context, string, string) (store.Value
 	return f.totals[0], true, f.fail
 }
 
-func (f fakeHistory) SnapshotsTakenAt(_ context.Context, _ string, at time.Time) (map[string]store.ValueSnapshot, error) {
+func (f fakeHistory) SnapshotsTakenAt(_ context.Context, _ string, _ []string, at time.Time) (map[string]store.ValueSnapshot, error) {
 	return map[string]store.ValueSnapshot{"strategies": {At: at, ValueCents: 600_000, ContributedCents: 600_000}}, nil
 }
 
@@ -136,9 +136,8 @@ func TestLoadWindow(t *testing.T) {
 
 func testSources(books []runner.Book, capital store.Capital) Sources {
 	return Sources{Release: "test", Healthy: func() bool { return true },
-		Books:   func() []runner.Book { return books },
+		Books:   func() ([]runner.Book, store.Capital, bool) { return books, capital, true },
 		Markers: func(string, float64) []runner.Marker { return nil },
-		Capital: func() (store.Capital, bool) { return capital, true },
 		Feeds:   []Feed{{Coin: "BTC", Product: "BTC-USD", Series: "KXBTC15M", RoundSeconds: 900}},
 		Price:   func(string) (float64, float64, bool) { return 81234.56, 0.2, true },
 		Round: func(string) (kalshi.Status, bool) {
@@ -314,5 +313,215 @@ func TestBucketDocs(t *testing.T) {
 	raw, _ := json.Marshal(bucketDocs(nil, nil))
 	if string(raw) != "[]" {
 		t.Errorf("no buckets serialised as %s", raw)
+	}
+}
+
+// homeWith composes a home document from one bucket's book and whatever the ledger's side and
+// the value history are said to be, and decodes it loosely: null and 0 must be told apart.
+func homeWith(t *testing.T, capital store.Capital, capitalOK bool, w window) map[string]any {
+	t.Helper()
+	books := []runner.Book{{Engine: "v1", Series: "KXBTC15M", Buckets: []runner.BucketBook{{BucketID: 1, Name: "KXBTC15M Value v1", Engine: "v1", World: "real", CashCents: 14_000}}}}
+	src := testSources(books, capital)
+	src.Books = func() ([]runner.Book, store.Capital, bool) { return books, capital, capitalOK }
+	raw, err := json.Marshal(homeDoc(src, "1H", w, time.Unix(1_790_000_000, 0), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+// A ledger that has never been read is not a ledger with nothing in it. Served as zeros, the
+// whole balance would read as lifetime earnings.
+func TestHomeWhenTheLedgerWasNeverRead(t *testing.T) {
+	then := store.ValueSnapshot{At: time.Unix(1_789_996_400, 0), ValueCents: 15_000, ContributedCents: 15_000}
+	w := window{have: true, complete: true, then: then, series: [][2]int64{}, realised: map[string]int64{},
+		groups: map[string]store.ValueSnapshot{"v1": then}}
+
+	doc := homeWith(t, store.Capital{}, false, w)
+	total := doc["total"].(map[string]any)
+	for _, field := range []string{"contributed_cents", "lifetime_earned_cents", "earned_cents", "earned_pct"} {
+		if v, present := total[field]; !present || v != nil {
+			t.Errorf("total.%s is %v, want null: the ledger has never been read", field, v)
+		}
+	}
+	if total["value_cents"] != 14_000.0 {
+		t.Errorf("the books are still known: value %v", total["value_cents"])
+	}
+	for _, row := range doc["composition"].([]any) {
+		if g := row.(map[string]any); g["earned_cents"] != nil {
+			t.Errorf("%s earned %v, want null", g["key"], g["earned_cents"])
+		}
+	}
+	money := doc["money"].(map[string]any)
+	if money["deployed_cents"] != 14_000.0 || money["winnings_cents"] != nil || money["venue_fees_paid_cents"] != nil {
+		t.Errorf("money: %v; deployed cash is the books', the rest is the ledger's and unknown", money)
+	}
+	if doc["capital_error"] != capitalUnknown || doc["healthy"] != false {
+		t.Errorf("capital_error %q, healthy %v", doc["capital_error"], doc["healthy"])
+	}
+
+	// A read that worked once and fails now: the last good figures are served, and said to be old.
+	read := store.Capital{Money: store.MoneyBuckets{Winnings: 100, External: 15_100}, ReadAt: time.Unix(1_789_999_000, 0),
+		Buckets: []store.BucketCapital{{ID: 1, Version: 1, ContributedCents: 15_000}}}
+	doc = homeWith(t, read, false, w)
+	total = doc["total"].(map[string]any)
+	if total["contributed_cents"] != 15_100.0 || total["lifetime_earned_cents"] != -1_000.0 || total["earned_cents"] != -1_000.0 {
+		t.Errorf("stale but known: %v", total)
+	}
+	if doc["capital_error"] != capitalStale || doc["money"].(map[string]any)["winnings_cents"] != 100.0 {
+		t.Errorf("stale but known: capital_error %q, money %v", doc["capital_error"], doc["money"])
+	}
+	if _, present := homeWith(t, read, true, w)["capital_error"]; present {
+		t.Error("capital_error on a good read")
+	}
+}
+
+// A history lookup that failed with nothing earlier to fall back on knows nothing, which is not
+// the same as there being no snapshot yet.
+func TestHomeWhenTheHistoryWasNeverRead(t *testing.T) {
+	cache := &windows{by: map[string]window{}}
+	w := cache.get(fakeHistory{fail: errors.New("relation value_snapshot does not exist")}, "1H", time.Hour)
+	if w.have || !strings.Contains(w.err, "unknown") {
+		t.Fatalf("window: have %v, err %q", w.have, w.err)
+	}
+	capital := store.Capital{Money: store.MoneyBuckets{External: 15_000}, Buckets: []store.BucketCapital{{ID: 1, Version: 1, ContributedCents: 15_000}}}
+	doc := homeWith(t, capital, true, w)
+	total := doc["total"].(map[string]any)
+	if total["earned_cents"] != nil || total["earned_pct"] != nil || total["contributed_cents"] != 15_000.0 || total["window_complete"] != false {
+		t.Errorf("total: %v", total)
+	}
+	for _, row := range doc["composition"].([]any) {
+		if g := row.(map[string]any); g["earned_cents"] != nil {
+			t.Errorf("%s earned %v, want null", g["key"], g["earned_cents"])
+		}
+	}
+	if btc := doc["assets"].([]any)[0].(map[string]any); btc["earned_cents"] != nil {
+		t.Errorf("BTC earned %v, want null", btc["earned_cents"])
+	}
+	if doc["history_error"] != w.err {
+		t.Errorf("history_error %q", doc["history_error"])
+	}
+}
+
+// fakeBuckets is the database behind /api/buckets: it counts how often it is asked.
+type fakeBuckets struct {
+	asked int
+	fail  error
+	name  string
+}
+
+func (f *fakeBuckets) Buckets(context.Context) ([]store.BucketRow, error) {
+	f.asked++
+	return []store.BucketRow{{ID: 1, Name: f.name}}, f.fail
+}
+
+func (f *fakeBuckets) RecentBucketEvents(context.Context, int) ([]store.BucketEventRow, error) {
+	return []store.BucketEventRow{}, nil
+}
+
+func (f *fakeBuckets) CurrentSkimPolicy(context.Context) (store.SkimPolicy, error) {
+	return store.SkimPolicy{ID: 1}, nil
+}
+
+// The bucket list is read at most once a minute whether the read works or not, and a failure
+// serves the last good list and says so.
+func TestBucketListBacksOff(t *testing.T) {
+	start := time.Unix(1_790_000_000, 0)
+	db := &fakeBuckets{fail: errors.New("timeout"), name: "first"}
+	list := &bucketList{}
+
+	if l := list.get(db, start); l.good || db.asked != 1 {
+		t.Fatalf("a first read that failed: good %v after %d reads", l.good, db.asked)
+	}
+	if list.get(db, start.Add(10*time.Second)); db.asked != 1 {
+		t.Errorf("a failed read was tried again after 10 s: %d reads", db.asked)
+	}
+	db.fail = nil
+	if l := list.get(db, start.Add(61*time.Second)); !l.good || l.err != "" || db.asked != 2 || l.rows[0].Name != "first" {
+		t.Errorf("a minute later: %+v after %d reads", l, db.asked)
+	}
+	if list.get(db, start.Add(100*time.Second)); db.asked != 2 {
+		t.Errorf("a good list was read again inside its minute: %d reads", db.asked)
+	}
+	db.fail, db.name = errors.New("timeout"), "second"
+	l := list.get(db, start.Add(125*time.Second))
+	if !l.good || l.err == "" || db.asked != 3 || len(l.rows) != 1 || l.rows[0].Name != "first" {
+		t.Errorf("a failure after a good read must serve the good one and say so: %+v after %d reads", l, db.asked)
+	}
+	if list.get(db, start.Add(130*time.Second)); db.asked != 3 {
+		t.Errorf("no backing off after a failure: %d reads", db.asked)
+	}
+	db.fail = nil
+	if l := list.get(db, start.Add(190*time.Second)); l.err != "" || l.rows[0].Name != "second" {
+		t.Errorf("recovered: %+v", l)
+	}
+}
+
+// A price change is only "over the range" while the candle it is measured from is recent.
+func TestChangeTooOld(t *testing.T) {
+	cases := []struct {
+		age    time.Duration
+		candle int
+		old    bool
+	}{
+		{70 * time.Second, 60, false}, // the ordinary once-a-minute refresh
+		{5 * time.Minute, 60, false},
+		{6 * time.Minute, 60, true},
+		{9 * time.Minute, 300, false},
+		{11 * time.Minute, 300, true},
+		{90 * time.Minute, 3600, false},
+		{3 * time.Hour, 3600, true},
+	}
+	for _, c := range cases {
+		if got := changeTooOld(c.age, c.candle); got != c.old {
+			t.Errorf("a first candle %v old, %d s candles: too old %v, want %v", c.age, c.candle, got, c.old)
+		}
+	}
+}
+
+// A finished candle's close is timed at its end; the one still forming at the fetch, never later.
+func TestCloseTime(t *testing.T) {
+	fetched := time.Unix(1_789_979_722, 0)
+	if got := closeTime(time.Unix(1_789_974_000, 0), 3600, fetched); got != 1_789_977_600 {
+		t.Errorf("a finished candle closed at %v", got)
+	}
+	if got := closeTime(time.Unix(1_789_977_600, 0), 3600, fetched); got != 1_789_979_722 {
+		t.Errorf("the forming candle is timed at %v, want the fetch, not an end %d s in the future", got, 1_789_981_200-1_789_979_722)
+	}
+}
+
+// fakeRounds is the recorded evaluations behind the 15M chart: it counts how often it is asked.
+type fakeRounds struct{ asked int }
+
+func (f *fakeRounds) RoundSeries(_ context.Context, _ string, _ time.Duration) ([]store.SeriesPoint, error) {
+	f.asked++
+	price := 81_234.5
+	return []store.SeriesPoint{{At: time.Unix(1_790_000_000, 0), Price: &price}, {At: time.Unix(1_790_000_005, 0)}}, nil
+}
+
+// However many pages poll the 15M chart, a round's recorded prices are read once per point width.
+func TestRoundPricesAreKeptForOnePoint(t *testing.T) {
+	db, cache, start := &fakeRounds{}, &roundPrices{by: map[string]roundPoints{}}, time.Unix(1_790_000_010, 0)
+	for i := 0; i < 3; i++ {
+		points, err := cache.get(db, "KXBTC15M-A", start.Add(time.Duration(i)*time.Second))
+		if err != nil || len(points) != 1 || points[0] != [2]float64{1_790_000_000, 81_234.5} {
+			t.Fatalf("points %v, err %v: a moment with no price is left out", points, err)
+		}
+	}
+	if db.asked != 1 {
+		t.Errorf("three polls inside five seconds read the database %d times", db.asked)
+	}
+	if cache.get(db, "KXETH15M-A", start); db.asked != 2 {
+		t.Errorf("another round's prices came from the first's: %d reads", db.asked)
+	}
+	if cache.get(db, "KXBTC15M-A", start.Add(6*time.Second)); db.asked != 3 {
+		t.Errorf("not read again after five seconds: %d reads", db.asked)
+	}
+	if cache.get(db, "KXBTC15M-B", start.Add(16*time.Minute)); len(cache.by) != 1 {
+		t.Errorf("%d rounds kept, want only the open one: finished rounds must not pile up", len(cache.by))
 	}
 }

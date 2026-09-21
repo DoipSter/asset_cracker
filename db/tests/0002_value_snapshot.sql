@@ -46,6 +46,41 @@ begin
     raise notice 'ok 3: the series bins to the last value recorded in each bin';
 end $$;
 
+-- A range is never measured from a row written while a bet could not be priced. Two such rows
+-- (value short by a 45,210-cent stake) sit just before 11:00:30; one more is older than all the
+-- history above. Both lookups must pass over them.
+insert into value_snapshot (at, mode, scope, key, value_cents, cash_cents, at_risk_cents, contributed_cents, unmarked) values
+    (timestamptz '2026-09-21 11:00:10+00', 'sim', 'total', 'test-all', 954790, 954790, 45210, 1000000, 3),
+    (timestamptz '2026-09-21 11:00:20+00', 'sim', 'total', 'test-all', 954790, 954790, 45210, 1000000, 1),
+    (timestamptz '2026-09-21 06:00:00+00', 'sim', 'total', 'test-all', 954790, 954790, 45210, 1000000, 2),
+    (timestamptz '2026-09-21 11:00:00+00', 'sim', 'group', 'test-strategies', 600000, 600000, 0, 600000, 0),
+    (timestamptz '2026-09-21 11:00:00+00', 'sim', 'group', 'test-anti', 400000, 400000, 0, 400000, 0),
+    (timestamptz '2026-09-21 11:00:00+00', 'sim', 'group', 'test-other', 1, 1, 0, 1, 0);
+
+do $$
+declare n bigint; v bigint; t timestamptz;
+begin
+    -- 7. SnapshotAt: the newest FULLY PRICED row at or before the moment.
+    select value_cents into v from value_snapshot
+     where mode = 'sim' and scope = 'total' and key = 'test-all' and at <= timestamptz '2026-09-21 11:00:30+00' and unmarked = 0
+     order by at desc limit 1;
+    assert v = 1000000 + 240, 'at-or-before, priced, picked ' || v;
+    raise notice 'ok 7: a range never starts from a row that had unmarked bets';
+
+    -- 8. FirstSnapshot: the oldest fully priced row, not the unpriced one before it.
+    select at into t from value_snapshot
+     where mode = 'sim' and scope = 'total' and key = 'test-all' and unmarked = 0 order by at limit 1;
+    assert t = timestamptz '2026-09-21 07:00:00+00', 'the first priced snapshot is at ' || t;
+    raise notice 'ok 8: the first snapshot is the first fully priced one';
+
+    -- 9. SnapshotsTakenAt: one batch's rows, asked for key by key.
+    select count(*), sum(value_cents) into n, v from value_snapshot
+     where mode = 'sim' and scope = 'group' and key = any(array['test-strategies', 'test-anti']::text[])
+       and at = timestamptz '2026-09-21 11:00:00+00';
+    assert n = 2 and v = 1000000, 'the batch gave ' || n || ' rows worth ' || v;
+    raise notice 'ok 9: a batch is read by its keys and its moment';
+end $$;
+
 do $$
 begin
     -- 4. Append-only, like the other history tables.

@@ -64,13 +64,19 @@ func TestLifeOf(t *testing.T) {
 	}
 }
 
-// The three shapes of bucket_event.detail the service writes.
+// The shapes of bucket_event.detail the service writes, and the one an earlier release wrote.
 func TestEventNote(t *testing.T) {
 	cases := []struct{ kind, detail, want string }{
 		{"seeded", `{"cents": 100000}`, "seeded with $1000.00"},
 		{"tripped", `{"note": "ran out: $0.41 left after 12 rounds"}`, "ran out: $0.41 left after 12 rounds"},
 		{"allocated", `{"winnings": 1250, "replenishment": 500, "tax_reserve": 0, "fee_reserve": 25}`,
 			"winnings $12.50, replenishment $5.00, tax reserve $0.00, fee reserve $0.25"},
+		// Before the rename the event was 'taxed' and the reserves were under "tax" and "fees".
+		{"taxed", `{"winnings": 1250, "replenishment": 500, "tax": 300, "fees": 25}`,
+			"winnings $12.50, replenishment $5.00, tax reserve $3.00, fee reserve $0.25"},
+		// A part the detail does not have is left out, not reported as $0.00.
+		{"taxed", `{"winnings": 1250}`, "winnings $12.50"},
+		{"allocated", `{}`, ""},
 		{"paused", `{}`, ""},
 		{"paused", `not json`, ""},
 	}

@@ -1,6 +1,8 @@
 package runner
 
 import (
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -124,5 +126,92 @@ func TestEarnedAddsUpAcrossARestake(t *testing.T) {
 	}
 	if n := len(after.Snapshots(at, true)); n != 1+4+len(after.Buckets)+len(after.Coins) {
 		t.Errorf("a detailed batch has %d rows", n)
+	}
+}
+
+// Switching an engine off must not read as losing its buckets: a live bucket no engine holds
+// still has its cash in the ledger and is counted at it, so value and contributed go on
+// covering the same buckets.
+func TestUnheldLiveBucketsCountAtTheirLedgerCash(t *testing.T) {
+	coins := []string{"BTC"}
+	books, capital := world1()
+	capital.Buckets = append(capital.Buckets, store.BucketCapital{ID: 2, Name: "KXETH15M Value v1", Status: "active", Version: 1, ContributedCents: 15_000})
+	capital.Money.External += 15_000
+	held := append([]Book{{Engine: "v1", Series: "KXETH15M", Buckets: []BucketBook{{BucketID: 2, Name: "KXETH15M Value v1", Engine: "v1", World: "real", CashCents: 14_937}}}}, books...)
+	on := Value(held, capital, coins)
+
+	// KXETH15M is set to recording only and the service restarts: no book holds bucket 2 any
+	// more, and the capital read brings its ledger cash instead.
+	capital.Buckets[len(capital.Buckets)-1].CashCents = 14_937
+	// Cash the ledger might report for a bucket that IS held, or for a frozen one, is not counted:
+	// the book is the record of the first, and the second was reaped.
+	capital.Buckets[0].CashCents, capital.Buckets[1].CashCents = 99_999, 99_999
+	off := Value(books, capital, coins)
+
+	at := time.Unix(1_790_000_000, 0)
+	if got := store.EarnedBetween(on.Snapshots(at, false)[0], off.Snapshots(at, false)[0]); got != 0 {
+		t.Errorf("switching an engine off earned %d cents, want 0", got)
+	}
+	if on.Total != off.Total {
+		t.Errorf("total with the engine on %+v, off %+v", on.Total, off.Total)
+	}
+	v1 := off.Groups[2]
+	if v1.Key != "v1" || v1.ValueCents != 14_620+14_937 || v1.CashCents != 14_000+14_937 || v1.ContributedCents != 30_000 || v1.Count != 2 {
+		t.Errorf("first engine group: %+v", v1)
+	}
+	var line *Line
+	for i := range off.Buckets {
+		if off.Buckets[i].Key == "KXETH15M Value v1" {
+			line = &off.Buckets[i]
+		}
+	}
+	if line == nil || line.ValueCents != 14_937 || line.CashCents != 14_937 || line.ContributedCents != 15_000 || line.AtRiskCents != 0 {
+		t.Errorf("the unheld bucket's own line: %+v", line)
+	}
+	if len(off.Buckets) != 4 {
+		t.Errorf("%d bucket lines, want the 3 held and the 1 unheld", len(off.Buckets))
+	}
+}
+
+// A snapshot row is there for good, so the minute is skipped whenever the books cannot be
+// trusted or cannot be priced.
+func TestSnapshotRefusal(t *testing.T) {
+	now := time.Unix(1_790_000_105, 0)
+	closed, open := float64(1_790_000_100), float64(1_790_001_000)
+	priced := func(closes float64) Position {
+		return Position{Coin: "BTC", CostCents: 500, ValueCents: ptr(620), Closes: closes}
+	}
+
+	if err := SnapshotRefusal(nil, now); err != nil {
+		t.Errorf("no books: %v", err)
+	}
+	// A losing side with no bid, in a round still open, is fairly worth nothing: written.
+	fine := []Book{{Engine: "v1", Series: "KXBTC15M", Positions: []Position{priced(open)}}, {Engine: "v2", Positions: []Position{{Coin: "ETH", CostCents: 800, Closes: open}}}}
+	if err := SnapshotRefusal(fine, now); err != nil {
+		t.Errorf("every round still open: %v", err)
+	}
+
+	// One bet whose round closed five seconds ago refuses the whole batch, even with a bid on it.
+	waiting := []Book{fine[0], {Engine: "v2", Positions: []Position{priced(open), priced(closed)}}}
+	err := SnapshotRefusal(waiting, now)
+	if !errors.Is(err, ErrAwaitingSettlement) || !strings.HasPrefix(err.Error(), "1 open bets") {
+		t.Errorf("a bet between close and settlement: %v", err)
+	}
+	if err := SnapshotRefusal(waiting, time.Unix(int64(closed), 0)); !errors.Is(err, ErrAwaitingSettlement) {
+		t.Errorf("at the very second of the close: %v", err)
+	}
+	if err := SnapshotRefusal(waiting, time.Unix(int64(closed)-1, 0)); err != nil {
+		t.Errorf("a second before the close: %v", err)
+	}
+	// Once the poller has stopped asking for the result it will not clear by itself: a fault.
+	if err := SnapshotRefusal(waiting, now.Add(16*time.Minute)); err == nil || errors.Is(err, ErrAwaitingSettlement) {
+		t.Errorf("a bet nobody will ever settle: %v", err)
+	}
+
+	// A halted engine's memory and the ledger disagree, whichever engine it is.
+	halted := []Book{fine[0], {Engine: "v2", Halted: "closing kalshi15m2 Scalper v2: connection refused"}}
+	err = SnapshotRefusal(halted, now)
+	if err == nil || errors.Is(err, ErrAwaitingSettlement) || !strings.Contains(err.Error(), "v2 is halted") {
+		t.Errorf("a halted engine: %v", err)
 	}
 }

@@ -60,23 +60,35 @@ func scanSnapshot(row pgx.Row) (ValueSnapshot, bool, error) {
 	return v, err == nil, err
 }
 
-// SnapshotAt is the newest snapshot of a scope taken at or before t; ok is false if there is none.
+// SnapshotAt is the newest FULLY PRICED snapshot of a scope taken at or before t; ok is false if
+// there is none. A range's earnings are measured from this row, and a row written while a bet
+// had no bid counts that bet as 0: measured from it, the whole stake would read as earned a
+// minute later. The writer already refuses the known case (a round closed and not yet settled);
+// skipping every row with unmarked > 0 is the second line of defence, and it also passes over
+// honest rows where a losing side had no bid late in a round. The cost is that the row can be
+// a few minutes older than t; whoever reports the range reports this row's own time.
 func (s *Store) SnapshotAt(ctx context.Context, scope, key string, t time.Time) (ValueSnapshot, bool, error) {
 	return scanSnapshot(s.pool.QueryRow(ctx, `select `+snapshotColumns+` from value_snapshot
-		 where mode = 'sim' and scope = $1 and key = $2 and at <= $3 order by at desc limit 1`, scope, key, t))
+		 where mode = 'sim' and scope = $1 and key = $2 and at <= $3 and unmarked = 0 order by at desc limit 1`, scope, key, t))
 }
 
-// FirstSnapshot is the oldest snapshot of a scope; ok is false before any has been written.
+// FirstSnapshot is the oldest fully priced snapshot of a scope (see SnapshotAt); ok is false
+// before any has been written.
 func (s *Store) FirstSnapshot(ctx context.Context, scope, key string) (ValueSnapshot, bool, error) {
 	return scanSnapshot(s.pool.QueryRow(ctx, `select `+snapshotColumns+` from value_snapshot
-		 where mode = 'sim' and scope = $1 and key = $2 order by at limit 1`, scope, key))
+		 where mode = 'sim' and scope = $1 and key = $2 and unmarked = 0 order by at limit 1`, scope, key))
 }
 
-// SnapshotsTakenAt is every snapshot of one scope written in the same batch, by key. A batch
-// shares one timestamp, so the groups can be compared at exactly the moment the total was.
-func (s *Store) SnapshotsTakenAt(ctx context.Context, scope string, at time.Time) (map[string]ValueSnapshot, error) {
+// SnapshotsTakenAt is the snapshots of one scope written in the same batch, by key. A batch
+// shares one timestamp, so the groups can be compared at exactly the moment the total was. The
+// keys are named so that each is one probe of the (mode, scope, key, at) index: without them
+// the index's `at` column cannot be used and every row of the scope is walked.
+func (s *Store) SnapshotsTakenAt(ctx context.Context, scope string, keys []string, at time.Time) (map[string]ValueSnapshot, error) {
+	if keys == nil {
+		keys = []string{} // a nil slice is sent as NULL, and "= any(NULL)" matches nothing silently
+	}
 	rows, err := s.pool.Query(ctx, `select `+snapshotColumns+` from value_snapshot
-		 where mode = 'sim' and scope = $1 and at = $2`, scope, at)
+		 where mode = 'sim' and scope = $1 and key = any($2::text[]) and at = $3`, scope, keys, at)
 	if err != nil {
 		return nil, err
 	}
@@ -142,6 +154,11 @@ type BucketCapital struct {
 	Version          int   // the strategy version's number: 1 is the first engine, 2 the second
 	Anti             bool  // an anti-world twin
 	ContributedCents int64 // seeds in, less what was reaped, less the sustainment allocation taken
+	// CashCents is the ledger's balance, read ONLY for a live bucket that no running engine holds
+	// (a series switched to recording only, or the second engine switched off); 0 for every other
+	// bucket. A held bucket's cash comes from its engine's book and moves with every fill, which
+	// is exactly why it is not read here. An unheld bucket's cash cannot move, so this stays exact.
+	CashCents int64
 }
 
 // Capital is what the value snapshots need from the ledger that the engines do not carry: where
@@ -151,39 +168,68 @@ type BucketCapital struct {
 type Capital struct {
 	Money   MoneyBuckets // Money.External is everything put in from outside, to date
 	Buckets []BucketCapital
+	ReadAt  time.Time // when this was read from the ledger; zero means it never has been
 }
 
-// ReadCapital reads it from the ledger.
-func (s *Store) ReadCapital(ctx context.Context) (Capital, error) {
+// ReadCapital reads it from the ledger. `held` is the ids of the buckets some running engine
+// holds in memory (see BucketCapitals).
+func (s *Store) ReadCapital(ctx context.Context, held []int64) (Capital, error) {
 	var c Capital
 	var err error
 	if c.Money, err = s.MoneyBucketBalances(ctx); err != nil {
 		return c, err
 	}
-	// Fills, fees and settlements are trading. Everything else that touches a bucket's cash
-	// (seed, reap, sustainment, and the older 'tax' and 'take') is money moved in or out of it.
-	rows, err := s.pool.Query(ctx, `
-		select b.id, b.name, b.status, v.version, coalesce((v.params->>'anti')::boolean, false),
-		       coalesce(sum(e.amount_cents) filter (where t.reason not in ('fill', 'fee', 'settlement')), 0)::bigint
-		  from bucket b
-		  join strategy_version v on v.id = b.strategy_version_id
-		  left join ledger_entry e on e.account_id = b.ledger_account_id
-		  left join ledger_transfer t on t.id = e.transfer_id
-		 where b.mode = 'sim'
-		 group by b.id, v.id
-		 order by b.id`)
-	if err != nil {
+	if c.Buckets, err = s.BucketCapitals(ctx, held); err != nil {
 		return c, err
 	}
+	c.ReadAt = time.Now()
+	return c, nil
+}
+
+// BucketCapitals is every simulated bucket's net contribution, and the ledger cash of the live
+// ones that no engine holds. `held` is the ids of the buckets some running engine holds.
+//
+// Fills, fees and settlements are trading. Everything else that touches a bucket's cash (seed,
+// reap, sustainment, and the older 'tax' and 'take') is money moved in or out of it. The query
+// starts from those few transfers, through the partial index ledger_transfer_capital, whose
+// predicate the where clause below must match word for word: starting from the buckets' entries
+// instead would read every fill ever made, under the engine's lock. The cash column is a full
+// sum of one account's entries, which is why it is taken only for unheld buckets: their entries
+// stopped growing when their engine was switched off.
+func (s *Store) BucketCapitals(ctx context.Context, held []int64) ([]BucketCapital, error) {
+	if held == nil {
+		held = []int64{} // a nil slice is sent as NULL, and "<> all(NULL)" is never true: every bucket would read as held
+	}
+	rows, err := s.pool.Query(ctx, `
+		select b.id, b.name, b.status, v.version, coalesce((v.params->>'anti')::boolean, false),
+		       coalesce(c.cents, 0)::bigint,
+		       (case when b.status <> 'frozen' and b.id <> all($1::bigint[])
+		             then coalesce((select sum(e.amount_cents) from ledger_entry e where e.account_id = b.ledger_account_id), 0)
+		             else 0 end)::bigint
+		  from bucket b
+		  join strategy_version v on v.id = b.strategy_version_id
+		  left join (
+		        select e.account_id, sum(e.amount_cents) as cents
+		          from ledger_transfer t
+		          join ledger_entry e on e.transfer_id = t.id
+		         where t.reason not in ('fill', 'fee', 'settlement')
+		         group by e.account_id
+		       ) c on c.account_id = b.ledger_account_id
+		 where b.mode = 'sim'
+		 order by b.id`, held)
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
+	out := []BucketCapital{}
 	for rows.Next() {
 		var b BucketCapital
-		if err := rows.Scan(&b.ID, &b.Name, &b.Status, &b.Version, &b.Anti, &b.ContributedCents); err != nil {
-			return c, err
+		if err := rows.Scan(&b.ID, &b.Name, &b.Status, &b.Version, &b.Anti, &b.ContributedCents, &b.CashCents); err != nil {
+			return nil, err
 		}
-		c.Buckets = append(c.Buckets, b)
+		out = append(out, b)
 	}
-	return c, rows.Err()
+	return out, rows.Err()
 }
 
 // BucketRow is one bucket as the buckets page lists it: what the database knows. What it is
@@ -260,16 +306,34 @@ func EventNote(kind string, detail []byte) string {
 	if note, ok := d["note"].(string); ok {
 		return note
 	}
-	dollars := func(key string) string {
-		c, _ := d[key].(float64)
-		return fmt.Sprintf("$%.2f", c/100)
+	// dollars reads the first of the keys that the detail really has; ok is false when it has none.
+	dollars := func(keys ...string) (string, bool) {
+		for _, key := range keys {
+			if c, ok := d[key].(float64); ok {
+				return fmt.Sprintf("$%.2f", c/100), true
+			}
+		}
+		return "", false
 	}
 	switch {
 	case d["cents"] != nil:
-		return "seeded with " + dollars("cents")
+		if seed, ok := dollars("cents"); ok {
+			return "seeded with " + seed
+		}
 	case kind == "allocated" || kind == "taxed":
-		return fmt.Sprintf("winnings %s, replenishment %s, tax reserve %s, fee reserve %s",
-			dollars("winnings"), dollars("replenishment"), dollars("tax_reserve"), dollars("fee_reserve"))
+		// 'taxed' rows were written before the rename, with the reserves under "tax" and "fees".
+		// A part the detail does not have is left out: $0.00 would be a figure nobody recorded.
+		var parts []string
+		for _, part := range []struct {
+			label string
+			keys  []string
+		}{{"winnings", []string{"winnings"}}, {"replenishment", []string{"replenishment"}},
+			{"tax reserve", []string{"tax_reserve", "tax"}}, {"fee reserve", []string{"fee_reserve", "fees"}}} {
+			if amount, ok := dollars(part.keys...); ok {
+				parts = append(parts, part.label+" "+amount)
+			}
+		}
+		return strings.Join(parts, ", ")
 	}
 	return ""
 }
@@ -301,24 +365,49 @@ func (s *Store) RecentBucketEvents(ctx context.Context, limit int) ([]BucketEven
 // `since`: everything those rounds paid the buckets (settlements and early sales) less everything
 // the buckets paid for them, fees included. A round still open, or closed and not yet settled, is
 // not in it. Keyed by the instrument's underlying, e.g. "BTC".
+//
+// A round counts only once every bucket that still held contracts in it has its settlement row.
+// market.settled_at is written before the engines book their payouts, each in its own later
+// transaction, so for a moment a round has its stakes in the ledger and not its winnings: read
+// then, it would show as a loss of the whole stake. Both engines write one settlement row per
+// bucket and side that held to the end, losers included (payout 0), and a position sold early
+// nets to no contracts and needs none. A round an engine never booked (it was halted) stays out
+// for good, which is honest: its payouts are not in the ledger either.
+//
+// The query starts from the few markets settled in the range and reaches their orders through
+// trade_order (market_id), so a short range does not read every fill ever made.
 func (s *Store) RealisedByCoin(ctx context.Context, since time.Time) (map[string]int64, error) {
 	rows, err := s.pool.Query(ctx, `
-		with flow as (
-		    select o.market_id, e.amount_cents as cents
-		      from fill f
-		      join trade_order o on o.id = f.order_id
+		with settled as materialized (
+		    select m.id, i.underlying
+		      from market m
+		      join instrument i on i.id = m.instrument_id
+		     where m.settled_at >= $1
+		       and not exists (
+		           select 1
+		             from trade_order o
+		             join bucket b on b.id = o.bucket_id and b.mode = 'sim'
+		             join fill f on f.order_id = o.id
+		            where o.market_id = m.id
+		              and not exists (select 1 from settlement x
+		                               where x.market_id = o.market_id and x.bucket_id = o.bucket_id and x.side = o.side)
+		            group by o.bucket_id, o.side
+		           having sum(case when o.action = 'buy' then f.qty else -f.qty end) > 0)
+		),
+		flow as (
+		    select s.underlying, e.amount_cents as cents
+		      from settled s
+		      join trade_order o on o.market_id = s.id
+		      join fill f on f.order_id = o.id
 		      join ledger_entry e on e.transfer_id = f.transfer_id
 		      join ledger_account a on a.id = e.account_id and a.kind = 'bucket' and a.mode = 'sim'
 		    union all
-		    select x.market_id, x.payout_cents
-		      from settlement x join bucket b on b.id = x.bucket_id and b.mode = 'sim'
+		    select s.underlying, x.payout_cents
+		      from settled s
+		      join settlement x on x.market_id = s.id
+		      join bucket b on b.id = x.bucket_id and b.mode = 'sim'
 		)
-		select i.underlying, sum(flow.cents)::bigint
-		  from flow
-		  join market m on m.id = flow.market_id
-		  join instrument i on i.id = m.instrument_id
-		 where m.settled_at is not null and m.settled_at >= $1
-		 group by i.underlying`, since)
+		select underlying, sum(cents)::bigint from flow group by underlying`, since)
 	if err != nil {
 		return nil, err
 	}

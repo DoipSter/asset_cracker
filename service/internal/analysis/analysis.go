@@ -19,10 +19,33 @@ import (
 // The verdict rule. These are CONVENTIONS, chosen in advance and stated in the JSON as such. They
 // are not measurements of anything.
 const (
-	MinWindows     = 30  // fewer independent windows than this is always "unresolved"
-	MinAbsT        = 2.0 // and so is a mean within two standard errors of zero
-	DominantWindow = 0.5 // one window carrying at least this share of a result is flagged
+	MinWindows     = 30   // fewer independent windows than this is always "unresolved"
+	MinAbsT        = 2.0  // and so is a mean within two standard errors of zero, for ONE hypothesis stated in advance
+	FamilyAlpha    = 0.05 // rows compared side by side: the chance that ANY of them gets a false verdict is held to this
+	DominantWindow = 0.5  // one window carrying at least this share of a result is flagged
 )
+
+// CorrectedT is the |t| a row must reach when `trials` rows are compared side by side: the
+// two-sided Bonferroni cut at FamilyAlpha, sqrt(2) x erfinv(1 - FamilyAlpha/trials), and never
+// below MinAbsT. 18 trials give 2.99; 10 give 2.81; one gives 1.96, so MinAbsT stands.
+//
+// Why: with 18 strategy versions and no edge anywhere, some row passes |t| >= 2 by chance far
+// more often than one time in twenty, and the label then reads as a finding. Bonferroni is itself
+// a convention. It assumes nothing about how the rows depend on each other, and it is
+// conservative when they move together, as a twin and its original do.
+//
+// trials is a MEASURED count (the rows of strategy_version for the leaderboard). 0 or less means
+// it could not be read, and the answer is 0: no threshold, which Verdict reports as "unresolved".
+func CorrectedT(trials int) float64 {
+	if trials <= 0 {
+		return 0
+	}
+	x := 1 - FamilyAlpha/float64(trials)
+	if x >= 1 { // more trials than a float can tell from certainty: the largest cut there is, not +Inf
+		x = math.Nextafter(1, 0)
+	}
+	return math.Max(MinAbsT, finite(math.Sqrt2*math.Erfinv(x)))
+}
 
 // Band is a slice of a round by the seconds left to its close.
 type Band struct {
@@ -71,6 +94,7 @@ type Trade struct {
 	Second            int64 // unix second it was placed
 	CostCents         int64
 	PayoutCents       int64   // sales only
+	MoneyMissing      bool    // the order's detail has no cost (or, for a sale, no payout): it cannot be booked
 	HasDepth          bool    // sales only: the market snapshot at that second recorded the bid ladder
 	Displayed         float64 // sales only: size shown at the best bid on that side; 0 if the ladder was empty
 }
@@ -91,7 +115,8 @@ type PricedSale struct {
 }
 
 // MarketFacts is everything the analysis keeps about one settled market. A settled round never
-// changes, so this is computed once and cached by market id.
+// changes ONCE ITS SETTLEMENT ROWS ARE IN (see Reconcile), so this is computed once and cached by
+// market id.
 type MarketFacts struct {
 	Market
 	Score  [5]BandSum
@@ -99,9 +124,98 @@ type MarketFacts struct {
 	Sales  []PricedSale
 }
 
+// Holding is one bucket's contracts on one side of one market.
+type Holding struct {
+	BucketID int64
+	Side     string // "yes" or "no"
+}
+
+// Paid is one bucket's settlement on one side: how many contracts were settled, and what they
+// paid. A losing hold has a row too, with 0 cents (settlement 174 in the samples: qty 60, paid 0).
+type Paid struct {
+	Qty         int
+	PayoutCents int64
+}
+
+// Mismatch is a holding whose settlement rows do not cover what was held at the close.
+type Mismatch struct {
+	Holding
+	Held, Settled int
+}
+
+// HeldAtClose is what each bucket still held on each side when the round closed: contracts bought
+// less contracts sold. A sale always closes a whole lot, and both sides of that are lot.Contracts
+// in trade_order.qty, so the subtraction is exact. Holdings of zero are left out.
+func HeldAtClose(trades []Trade) map[Holding]int {
+	held := map[Holding]int{}
+	for _, t := range trades {
+		k := Holding{t.BucketID, t.Side}
+		if t.Sell {
+			held[k] -= t.Qty
+		} else {
+			held[k] += t.Qty
+		}
+	}
+	for k, n := range held {
+		if n == 0 {
+			delete(held, k)
+		}
+	}
+	return held
+}
+
+// Reconcile checks a settled market's fills against its settlement rows, per bucket AND side, and
+// lists what does not add up. An empty answer means the market's money is all there.
+//
+// Why: the round's result and its settlement rows are written in separate transactions (the
+// result first; then the first engine's rows; then the second engine's, after it has waited for
+// its mutex), and a runner that is halted, or a process that dies in between, never writes them
+// at all. A market read in that gap has held bets and no payout, which reads as a total loss. The
+// engine writes a settlement row for EVERY lot held to the close, lost ones included, so "held
+// and no row" always means "not written", never "lost": the test is for the quantity, not for a
+// non-zero payout. It is per bucket because the two engines commit their rows separately for the
+// same market, so "some settlement row exists" proves nothing about the other engine's buckets.
+//
+// The match is exact both ways: a settlement for contracts no fill accounts for (a bet placed
+// outside the minutes that were read) is as unbookable as a holding with no settlement.
+func Reconcile(trades []Trade, settled map[Holding]Paid) []Mismatch {
+	held := HeldAtClose(trades)
+	var out []Mismatch
+	for k, n := range held {
+		if settled[k].Qty != n {
+			out = append(out, Mismatch{k, n, settled[k].Qty})
+		}
+	}
+	for k, p := range settled {
+		if _, ok := held[k]; !ok && p.Qty != 0 {
+			out = append(out, Mismatch{k, 0, p.Qty})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].BucketID != out[j].BucketID {
+			return out[i].BucketID < out[j].BucketID
+		}
+		return out[i].Side < out[j].Side
+	})
+	return out
+}
+
+// MoneyMissing lists the orders whose recorded detail lacks the money figure they are booked by.
+// Such a fill would otherwise be booked as a free bet or a worthless sale, so its market is held
+// back and reported exactly as an unreconciled one is.
+func MoneyMissing(trades []Trade) []int64 {
+	var out []int64
+	for _, t := range trades {
+		if t.MoneyMissing {
+			out = append(out, t.OrderID)
+		}
+	}
+	return out
+}
+
 // Settle turns a settled market's fills and payouts into each bucket's result on it and its
-// re-priced early sales. payouts is settlement.payout_cents by bucket id.
-func Settle(m Market, trades []Trade, payouts map[int64]int64) MarketFacts {
+// re-priced early sales. It books what it is given: the caller must have checked Reconcile first.
+func Settle(m Market, trades []Trade, settled map[Holding]Paid) MarketFacts {
 	f := MarketFacts{Market: m, Rounds: map[int64]BucketRound{}}
 	for _, t := range trades {
 		r := f.Rounds[t.BucketID]
@@ -113,10 +227,10 @@ func Settle(m Market, trades []Trade, payouts map[int64]int64) MarketFacts {
 		}
 		f.Rounds[t.BucketID] = r
 	}
-	for bucket, cents := range payouts {
-		r := f.Rounds[bucket]
-		r.PnLCents += cents
-		f.Rounds[bucket] = r
+	for k, p := range settled {
+		r := f.Rounds[k.BucketID]
+		r.PnLCents += p.PayoutCents
+		f.Rounds[k.BucketID] = r
 	}
 	f.Sales = PriceSales(trades, m.Result)
 	return f
@@ -211,9 +325,15 @@ func WindowStat(perWindow []float64) Stat {
 }
 
 // Verdict applies the rule: "unresolved" unless there are at least MinWindows windows AND
-// |t| >= MinAbsT, then whenPositive or whenNegative by the sign of t.
-func Verdict(s Stat, whenPositive, whenNegative string) string {
-	if s.N < MinWindows || math.Abs(s.T) < MinAbsT {
+// |t| >= minAbsT, then whenPositive or whenNegative by the sign of t. minAbsT is MinAbsT for a
+// single hypothesis stated in advance and CorrectedT(n) for n rows compared side by side. A
+// minAbsT of 0 or less means no verdict can be given at all (the figures are partial, or the
+// number of trials is unknown), and the answer is "unresolved" whatever t is.
+//
+// The caller passes t AS PUBLISHED (rounded), so the number on the page and the label beside it
+// can never disagree: a row showing t = 2.00 against a threshold of 2 is never "unresolved".
+func Verdict(s Stat, minAbsT float64, whenPositive, whenNegative string) string {
+	if minAbsT <= 0 || s.N < MinWindows || math.Abs(s.T) < minAbsT {
 		return "unresolved"
 	}
 	if s.T > 0 {

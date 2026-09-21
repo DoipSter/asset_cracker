@@ -148,11 +148,16 @@ type UnsettledMarket struct {
 }
 
 // UnsettledMarkets lists markets of an instrument that closed before `before` and have no
-// result yet, so a restart picks up where the last run stopped.
+// result yet, so a restart picks up where the last run stopped. A round nobody bet on is only
+// worth asking about for an hour. A round somebody bet on is asked about however old it is:
+// until its result is stored the bets on it stay open in the engines, cannot be priced, and hold
+// up the value snapshots (seen on the dev database after it sat stopped for four hours).
 func (s *Store) UnsettledMarkets(ctx context.Context, instrumentID int64, before time.Time) (map[string]UnsettledMarket, error) {
 	rows, err := s.pool.Query(ctx, `
-		select ticker, id, closes_at from market
-		 where instrument_id = $1 and result is null and closes_at < $2 and closes_at > $2 - interval '1 hour'`,
+		select m.ticker, m.id, m.closes_at from market m
+		 where m.instrument_id = $1 and m.result is null and m.closes_at < $2
+		   and (m.closes_at > $2 - interval '1 hour'
+		        or exists (select 1 from trade_order o where o.market_id = m.id))`,
 		instrumentID, before)
 	if err != nil {
 		return nil, err

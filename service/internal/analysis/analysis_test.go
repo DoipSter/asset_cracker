@@ -48,13 +48,35 @@ func TestWindowStatEdges(t *testing.T) {
 
 func TestVerdictRule(t *testing.T) {
 	for _, c := range []struct {
-		n    int
-		t    float64
-		want string
-	}{{29, 9, "unresolved"}, {30, 1.99, "unresolved"}, {30, -1.99, "unresolved"}, {30, 2, "up"}, {30, -2, "down"}, {500, 0, "unresolved"}, {0, 0, "unresolved"}} {
-		if got := Verdict(Stat{N: c.n, T: c.t}, "up", "down"); got != c.want {
-			t.Errorf("n=%d t=%v: got %q, want %q", c.n, c.t, got, c.want)
+		n       int
+		t, minT float64
+		want    string
+	}{{29, 9, 2, "unresolved"}, {30, 1.99, 2, "unresolved"}, {30, -1.99, 2, "unresolved"}, {30, 2, 2, "up"}, {30, -2, 2, "down"}, {500, 0, 2, "unresolved"}, {0, 0, 2, "unresolved"},
+		{30, 2.98, 2.9913, "unresolved"}, {30, 2.99, 2.9913, "unresolved"}, {30, 3, 2.9913, "up"}, {30, -3, 2.9913, "down"},
+		{500, 99, 0, "unresolved"}, {500, -99, -1, "unresolved"}} { // no threshold: no verdict, whatever t is
+		if got := Verdict(Stat{N: c.n, T: c.t}, c.minT, "up", "down"); got != c.want {
+			t.Errorf("n=%d t=%v min %v: got %q, want %q", c.n, c.t, c.minT, got, c.want)
 		}
+	}
+}
+
+// Two-sided Bonferroni at 5%. 18 trials: each row is tested at 0.05/18 = 0.002778, which is
+// 0.001389 in each tail, and the normal deviate that leaves that much above it is 2.9913.
+// 10 cuts: 0.005, 0.0025 a tail, 2.8070. One trial is the plain 1.96, so the convention's 2 stands.
+func TestCorrectedT(t *testing.T) {
+	for trials, want := range map[int]float64{18: 2.9913, 10: 2.8070, 1: 2, 2: 2.2414, 0: 0, -4: 0} {
+		if got := CorrectedT(trials); math.Abs(got-want) > 5e-5 {
+			t.Errorf("%d trials: got %v, want %v", trials, got, want)
+		}
+	}
+	// the cut only ever rises with the number of trials, and is a number however many there are
+	last := 0.0
+	for _, trials := range []int{1, 2, 18, 1000, 1e9, math.MaxInt64} {
+		got := CorrectedT(trials)
+		if math.IsNaN(got) || math.IsInf(got, 0) || got < last || got < MinAbsT {
+			t.Errorf("%d trials: got %v after %v", trials, got, last)
+		}
+		last = got
 	}
 }
 
@@ -141,16 +163,84 @@ func TestPriceSalesWithoutDepthAndEmptyBook(t *testing.T) {
 }
 
 // A bucket buys twice (385 and 115 cents, fees inside), sells one lot early for 200 and is paid
-// 1000 at settlement: 200 + 1000 - 500 = 700. A bucket that only lost its stake: -93.
+// 1200 for the 12 it held at settlement: 200 + 1200 - 500 = 900. A bucket that only lost its
+// stake: -93. A bucket that held both sides is paid on the one that won: 600 - 310 - 95 = 195.
 func TestSettle(t *testing.T) {
-	f := Settle(Market{ID: 5, Coin: "BTC", Closes: 900, Result: "yes"}, []Trade{
+	trades := []Trade{
 		{OrderID: 1, BucketID: 1, Side: "yes", Qty: 12, CostCents: 385},
 		{OrderID: 2, BucketID: 1, Side: "yes", Qty: 3, CostCents: 115},
 		{OrderID: 3, BucketID: 1, Sell: true, Side: "yes", Qty: 3, CostCents: 115, PayoutCents: 200},
 		{OrderID: 4, BucketID: 2, Side: "no", Qty: 1, CostCents: 93},
-	}, map[int64]int64{1: 1000, 2: 0})
-	if f.Rounds[1] != (BucketRound{700, 2}) || f.Rounds[2] != (BucketRound{-93, 1}) || len(f.Sales) != 1 || !f.Sales[0].WithoutDepth {
+		{OrderID: 5, BucketID: 3, Side: "yes", Qty: 6, CostCents: 310},
+		{OrderID: 6, BucketID: 3, Side: "no", Qty: 2, CostCents: 95},
+	}
+	settled := map[Holding]Paid{{1, "yes"}: {12, 1200}, {2, "no"}: {1, 0}, {3, "yes"}: {6, 600}, {3, "no"}: {2, 0}}
+	if bad := Reconcile(trades, settled); len(bad) != 0 {
+		t.Fatalf("this market's money is all there: %+v", bad)
+	}
+	f := Settle(Market{ID: 5, Coin: "BTC", Closes: 900, Result: "yes"}, trades, settled)
+	if f.Rounds[1] != (BucketRound{900, 2}) || f.Rounds[2] != (BucketRound{-93, 1}) || f.Rounds[3] != (BucketRound{195, 2}) || len(f.Sales) != 1 || !f.Sales[0].WithoutDepth {
 		t.Fatalf("got %+v", f)
+	}
+}
+
+func TestHeldAtClose(t *testing.T) {
+	held := HeldAtClose([]Trade{
+		{BucketID: 1, Side: "yes", Qty: 12}, {BucketID: 1, Side: "yes", Qty: 3}, {BucketID: 1, Sell: true, Side: "yes", Qty: 3}, // 12 left
+		{BucketID: 1, Side: "no", Qty: 4}, {BucketID: 1, Sell: true, Side: "no", Qty: 4}, // all sold: not a holding
+		{BucketID: 2, Side: "no", Qty: 60},
+	})
+	if len(held) != 2 || held[Holding{1, "yes"}] != 12 || held[Holding{2, "no"}] != 60 {
+		t.Fatalf("got %+v", held)
+	}
+}
+
+// The defect this guards against: bucket 1 buys 12 yes for 385 cents, holds to the close, yes
+// wins and pays 1200. Read after the result is stored and before the settlement rows are, the
+// same market says -385 where the truth is +815. It must be held back, not booked.
+func TestReconcile(t *testing.T) {
+	win := []Trade{{OrderID: 1, BucketID: 1, Side: "yes", Qty: 12, CostCents: 385}}
+	lose := []Trade{{OrderID: 2, BucketID: 14, Side: "no", Qty: 60, CostCents: 2400}}
+	both := append(append([]Trade{}, win...), lose...)
+	sold := []Trade{{OrderID: 3, BucketID: 5, Side: "yes", Qty: 7, CostCents: 300}, {OrderID: 4, BucketID: 5, Sell: true, Side: "yes", Qty: 7, CostCents: 300, PayoutCents: 350}}
+	for name, c := range map[string]struct {
+		trades  []Trade
+		settled map[Holding]Paid
+		want    []Mismatch
+	}{
+		"nobody traded":                     {nil, nil, nil},
+		"everything sold before the close":  {sold, nil, nil},
+		"held, settlement not yet written":  {win, nil, []Mismatch{{Holding{1, "yes"}, 12, 0}}},
+		"held and paid":                     {win, map[Holding]Paid{{1, "yes"}: {12, 1200}}, nil},
+		"a losing hold HAS a row, paying 0": {lose, map[Holding]Paid{{14, "no"}: {60, 0}}, nil}, // settlement 174 in the samples
+		"a losing hold with no row":         {lose, nil, []Mismatch{{Holding{14, "no"}, 60, 0}}},
+		// the two engines commit separately: one engine's rows being there says nothing of the other's
+		"one bucket's rows in, another's not": {both, map[Holding]Paid{{1, "yes"}: {12, 1200}}, []Mismatch{{Holding{14, "no"}, 60, 0}}},
+		"rows on the wrong side":              {win, map[Holding]Paid{{1, "no"}: {12, 0}}, []Mismatch{{Holding{1, "no"}, 0, 12}, {Holding{1, "yes"}, 12, 0}}},
+		"rows for fewer contracts than held":  {win, map[Holding]Paid{{1, "yes"}: {5, 500}}, []Mismatch{{Holding{1, "yes"}, 12, 5}}},
+		"a payout nobody's fills account for": {nil, map[Holding]Paid{{9, "yes"}: {3, 300}}, []Mismatch{{Holding{9, "yes"}, 0, 3}}},
+		"sold more than was bought":           {sold[1:], nil, []Mismatch{{Holding{5, "yes"}, -7, 0}}},
+	} {
+		got := Reconcile(c.trades, c.settled)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: got %+v, want %+v", name, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: got %+v, want %+v", name, got, c.want)
+			}
+		}
+	}
+}
+
+func TestMoneyMissing(t *testing.T) {
+	got := MoneyMissing([]Trade{{OrderID: 1}, {OrderID: 2, MoneyMissing: true}, {OrderID: 3, Sell: true, MoneyMissing: true}})
+	if len(got) != 2 || got[0] != 2 || got[1] != 3 {
+		t.Fatalf("got %v", got)
+	}
+	if got := MoneyMissing(nil); len(got) != 0 {
+		t.Fatalf("got %v", got)
 	}
 }
 
@@ -220,8 +310,9 @@ func TestLeaderboardKeepsEveryLife(t *testing.T) {
 	facts := []MarketFacts{round1(1, 900, 1, -100000, 40), round1(2, 1800, 2, 90000, 3), round1(3, 1800, 2, 7000, 1), round1(4, 2700, 2, 3000, 2),
 		round1(5, 3600, 2, 1000, 1), round1(6, 3600, 3, -500, 1),
 		round1(7, 4500, 2, 999999, 9)} // window 4500 is incomplete: left out everywhere
-	doc := Build(Inputs{Facts: facts, Buckets: buckets, BookCents: map[int64]int64{2: 101000, 4: 100000}, Incomplete: map[int64]bool{4500: true}, MarketsSettled: 9})
-	if doc.WindowsRecorded != 4 || doc.Coverage.WindowsIncomplete != 1 || doc.Coverage.Complete || doc.Coverage.MarketsAggregated != 7 {
+	// window 4500 is left out because a market in it has no result yet; every SETTLED market is read
+	doc := Build(Inputs{Facts: facts, Buckets: buckets, BookCents: map[int64]int64{2: 101000, 4: 100000}, Incomplete: map[int64]bool{4500: true}, MarketsSettled: 7, Trials: 18})
+	if doc.WindowsRecorded != 4 || doc.Coverage != (Coverage{MarketsSettled: 7, MarketsAggregated: 7, WindowsIncomplete: 1, Complete: true}) {
 		t.Errorf("coverage: %d %+v", doc.WindowsRecorded, doc.Coverage)
 	}
 	rows := map[string]LeaderRow{}
@@ -229,15 +320,15 @@ func TestLeaderboardKeepsEveryLife(t *testing.T) {
 		rows[r.Strategy+" "+r.World] = r
 	}
 	s := rows["Scalper real"]
-	if s.Lives != 2 || s.LifetimePnLCents != 1000 || s.Bets != 47 || s.Windows != 4 || s.MeanWindowPnLCents != 250 || s.EquityCents != 101000 ||
+	if s.Lives != 2 || s.LifetimePnLCents != 1000 || s.Bets != 47 || s.Windows != 4 || s.MeanWindowPnLCents != 250 || s.BookCents != 101000 ||
 		s.TopWindowShare != 97 || s.Verdict != "unresolved" || len(s.Flags) != 2 || !strings.Contains(s.Flags[0], "life 2") || !strings.Contains(s.Flags[1], "more than the whole result") {
 		t.Errorf("Scalper: %+v", s)
 	}
-	if a := rows["Scalper anti"]; a.Windows != 1 || a.LifetimePnLCents != -500 || a.SECents != 0 || a.T != 0 || a.EquityCents != 0 || a.TopWindowShare != 1 ||
+	if a := rows["Scalper anti"]; a.Windows != 1 || a.LifetimePnLCents != -500 || a.SECents != 0 || a.T != 0 || a.BookCents != 0 || a.TopWindowShare != 1 ||
 		len(a.Flags) != 2 || a.Flags[0] != "ran out and was not staked again" || !strings.Contains(a.Flags[1], "only one window") {
 		t.Errorf("twin: %+v", a)
 	}
-	if l := rows["Late real"]; l.Windows != 0 || l.Bets != 0 || l.T != 0 || l.TopWindowShare != 0 || l.EquityCents != 100000 || len(l.Flags) != 0 || l.Verdict != "unresolved" {
+	if l := rows["Late real"]; l.Windows != 0 || l.Bets != 0 || l.T != 0 || l.TopWindowShare != 0 || l.BookCents != 100000 || len(l.Flags) != 0 || l.Verdict != "unresolved" {
 		t.Errorf("never bet: %+v", l)
 	}
 	if doc.Leaderboard.Rows[0].Strategy != "Scalper" || doc.Leaderboard.Rows[0].World != "real" {
@@ -246,10 +337,133 @@ func TestLeaderboardKeepsEveryLife(t *testing.T) {
 }
 
 func TestLeaderboardDominantWindowFlag(t *testing.T) {
-	doc := Build(Inputs{Buckets: []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v1", World: "real"}},
+	value := []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v1", World: "real"}}
+	doc := Build(Inputs{Buckets: value, Trials: 18,
 		Facts: []MarketFacts{round1(1, 900, 1, 970, 1), round1(2, 1800, 1, 20, 1), round1(3, 2700, 1, 10, 1)}})
 	if r := doc.Leaderboard.Rows[0]; r.TopWindowShare != 0.97 || len(r.Flags) != 1 || r.Flags[0] != "one window is 97% of the result" {
 		t.Errorf("got %+v", r)
+	}
+	// The flag is decided on the share AS PUBLISHED. 496 of 1000 is 0.496, shown as 0.5, and a row
+	// showing 0.5 beside a stated threshold of 0.5 must carry the flag.
+	doc = Build(Inputs{Buckets: value, Trials: 18, Facts: []MarketFacts{round1(1, 900, 1, 496, 1), round1(2, 1800, 1, 300, 1), round1(3, 2700, 1, 204, 1)}})
+	if r := doc.Leaderboard.Rows[0]; r.TopWindowShare != 0.5 || len(r.Flags) != 1 || r.Flags[0] != "one window is 50% of the result" {
+		t.Errorf("got %+v", r)
+	}
+}
+
+// forty windows making 100 and 300 cents alternately: mean 200, sd = 100 x sqrt(40/39),
+// SE = 100/sqrt(39) = 16.01, t = 12.49. Forty windows and a t like that is "ahead" by any rule.
+func steady(bucket int64) []MarketFacts {
+	var facts []MarketFacts
+	for i := range 40 {
+		f := round1(int64(i+1), int64(900*(i+1)), bucket, int64(100+200*(i%2)), 1)
+		f.Score[2] = BandSum{10, 2.0 + 0.1 + 0.2*float64(i%2), 2.0} // and a model worse by 0.01 or 0.03: t = 12.49 too
+		facts = append(facts, f)
+	}
+	return facts
+}
+
+// While fewer markets are aggregated than are settled the document is part of the history, read
+// newest first. It must say so everywhere a reader could look, and give no verdict at all.
+func TestPartialCoverageGivesNoVerdict(t *testing.T) {
+	buckets := []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v2", World: "real"}}
+	whole := Build(Inputs{Facts: steady(1), Buckets: buckets, MarketsSettled: 40, Trials: 18})
+	if r := whole.Leaderboard.Rows[0]; r.T != 12.49 || r.Verdict != "ahead" || len(r.Flags) != 0 || whole.Scorecard.Overall.Verdict != "model worse" ||
+		whole.Scorecard.ByBand[2].Verdict != "model worse" || whole.Scorecard.ByCoin[0].Verdict != "model worse" || !whole.Coverage.Complete {
+		t.Fatalf("with everything read the same evidence is a verdict: %+v %+v", r, whole.Scorecard)
+	}
+	if strings.Contains(whole.Leaderboard.What+whole.Fills.What+whole.Scorecard.What, "artial") {
+		t.Errorf("a whole document must not call itself partial")
+	}
+
+	doc := Build(Inputs{Facts: steady(1), Buckets: buckets, MarketsSettled: 3360, Unreconciled: 2, Trials: 18})
+	if doc.Coverage != (Coverage{MarketsSettled: 3360, MarketsAggregated: 40, MarketsUnreconciled: 2, Complete: false}) {
+		t.Errorf("coverage: %+v", doc.Coverage)
+	}
+	r := doc.Leaderboard.Rows[0]
+	if r.Verdict != "unresolved" || r.T != 12.49 || r.LifetimePnLCents != 8000 { // the figures stay; the label goes
+		t.Errorf("row: %+v", r)
+	}
+	if len(r.Flags) != 1 || !strings.HasPrefix(r.Flags[0], "partial: only 40 of 3360 settled markets read (2 held back") {
+		t.Errorf("flags: %q", r.Flags)
+	}
+	rows := append(append([]ScoreRow{doc.Scorecard.Overall}, doc.Scorecard.ByBand...), doc.Scorecard.ByCoin...)
+	for _, s := range rows {
+		if s.Verdict != "unresolved" {
+			t.Errorf("scorecard row %+v", s)
+		}
+	}
+	for _, what := range []string{doc.Scorecard.What, doc.Fills.What, doc.Leaderboard.What} {
+		if !strings.HasPrefix(what, "Partial: only 40 of 3360 settled markets read") {
+			t.Errorf("what: %q", what)
+		}
+	}
+}
+
+// The leaderboard's threshold rises with the number of versions compared, and the by-band and
+// by-coin rows' with their own count of ten. t = 2.5 over 40 windows is a verdict for the one
+// hypothesis stated in advance and for nothing else.
+func TestVerdictsAreCorrectedForTheNumberOfRows(t *testing.T) {
+	// Forty windows built to give a chosen t: x_i = m + d or m - d alternately has mean m,
+	// sd = d x sqrt(40/39) and SE = d/sqrt(39), so t = m x sqrt(39)/d. With d = 1000, m = t x 1000/sqrt(39).
+	windows := func(bucket int64, tt float64) []MarketFacts {
+		var facts []MarketFacts
+		m := tt * 1000 / math.Sqrt(39)
+		for i := range 40 {
+			v := m + 1000*float64(1-2*(i%2))
+			f := round1(int64(i+1), int64(900*(i+1)), bucket, 0, 1)
+			f.Rounds[bucket] = BucketRound{int64(math.Round(v * 1000)), 1} // in thousandths, so whole cents lose nothing
+			f.Score[2] = BandSum{1000, 2000 + v, 2000}
+			facts = append(facts, f)
+		}
+		return facts
+	}
+	buckets := []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v2", World: "real"}}
+	for _, c := range []struct {
+		t                  float64
+		trials             int
+		leader, cut, whole string
+	}{
+		{2.5, 18, "unresolved", "unresolved", "model worse"}, // under 2.9913 and under 2.8070, over 2
+		{2.9, 18, "unresolved", "model worse", "model worse"},
+		{3.1, 18, "ahead", "model worse", "model worse"},
+		{-3.1, 18, "behind", "model better", "model better"},
+		{2.5, 1, "ahead", "unresolved", "model worse"},     // a registry of one is one hypothesis
+		{9, 0, "unresolved", "model worse", "model worse"}, // the count could not be read: no leaderboard verdict, and the row says why
+	} {
+		doc := Build(Inputs{Facts: windows(1, c.t), Buckets: buckets, Trials: c.trials})
+		r, band, overall := doc.Leaderboard.Rows[0], doc.Scorecard.ByBand[2], doc.Scorecard.Overall
+		if r.T != c.t || band.T != c.t || overall.T != c.t {
+			t.Fatalf("t=%v: the fixture gives %v, %v, %v", c.t, r.T, band.T, overall.T)
+		}
+		if r.Verdict != c.leader || band.Verdict != c.cut || doc.Scorecard.ByCoin[0].Verdict != c.cut || overall.Verdict != c.whole {
+			t.Errorf("t=%v, %d trials: leaderboard %q, band %q, overall %q", c.t, c.trials, r.Verdict, band.Verdict, overall.Verdict)
+		}
+		if unknown := len(r.Flags) == 1 && strings.Contains(r.Flags[0], "could not be read"); unknown != (c.trials == 0) {
+			t.Errorf("%d trials: flags %q", c.trials, r.Flags)
+		}
+	}
+	cv := Build(Inputs{Trials: 18}).Conventions
+	if cv.Trials != 18 || cv.LeaderboardMinAbsT != 2.9913 || cv.ScorecardCuts != 10 || cv.ScorecardCutMinAbsT != 2.807 || cv.MinAbsT != 2 || cv.FamilyAlpha != 0.05 {
+		t.Errorf("conventions: %+v", cv)
+	}
+	if cv := Build(Inputs{}).Conventions; cv.Trials != 0 || cv.LeaderboardMinAbsT != 0 {
+		t.Errorf("no count: %+v", cv)
+	}
+}
+
+// The verdict is decided on t AS PUBLISHED. mean/SE = 1.996 is shown as 2.00, and a row showing
+// 2.00 under a stated threshold of 2 must not read "unresolved".
+func TestVerdictIsDecidedOnThePublishedT(t *testing.T) {
+	var facts []MarketFacts
+	m := 1.996 * 1000 / math.Sqrt(39)
+	for i := range 40 {
+		f := MarketFacts{Market: Market{ID: int64(i + 1), Coin: "BTC", Closes: int64(900 * (i + 1))}}
+		f.Score[2] = BandSum{1000, 2000 + m + 1000*float64(1-2*(i%2)), 2000}
+		facts = append(facts, f)
+	}
+	if o := Build(Inputs{Facts: facts}).Scorecard.Overall; o.T != 2 || o.Verdict != "model worse" {
+		t.Errorf("got %+v", o)
 	}
 }
 
@@ -275,7 +489,12 @@ func TestFillsByStrategy(t *testing.T) {
 func TestDocumentIsAlwaysCleanJSON(t *testing.T) {
 	one := score(1, "BTC", 900, 1, 3, 0.4, 0.2)
 	one.Rounds = map[int64]BucketRound{1: {0, 1}}
-	for name, in := range map[string]Inputs{"empty": {}, "one window": {Facts: []MarketFacts{one}, Buckets: []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v1", World: "real"}}}} {
+	value := []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v1", World: "real"}}
+	for name, in := range map[string]Inputs{"empty": {}, "one window": {Facts: []MarketFacts{one}, Buckets: value},
+		"partial, nothing read yet": {Buckets: value, MarketsSettled: 3360, Trials: 18},
+		"partial":                   {Facts: steady(1), Buckets: value, MarketsSettled: 3360, Unreconciled: 5, Trials: 18},
+		"absurd counts":             {Facts: steady(1), Buckets: value, MarketsSettled: 40, Unreconciled: -3, Trials: math.MaxInt64},
+		"no trial count":            {Facts: steady(1), Buckets: value, MarketsSettled: 40, Trials: -1}} {
 		raw, err := json.Marshal(Build(in))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)

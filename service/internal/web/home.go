@@ -39,7 +39,8 @@ var assets = []Asset{
 }
 
 // Feed says where one coin's price and rounds come from. RoundSeconds is the series' configured
-// round length, used to say when the open round opened; it is a setting, not Kalshi's open_time.
+// round length: a setting, not Kalshi's open_time, and used to say when the open round opened
+// only if Kalshi sent no open time for it.
 type Feed struct {
 	Coin, Product, Series string
 	RoundSeconds          float64
@@ -49,9 +50,12 @@ type Feed struct {
 type Sources struct {
 	Release string
 	Healthy func() bool
-	Books   func() []runner.Book
+	// Books is every engine's book and the ledger's side of the balance sheet, read TOGETHER: the
+	// second engine gives both under one hold of its lock, so an allocation or a restake cannot
+	// fall between them. ok is false when the ledger's side could not be read; Capital.ReadAt is
+	// zero when it never has been.
+	Books   func() ([]runner.Book, store.Capital, bool)
 	Markers func(coin string, since float64) []runner.Marker
-	Capital func() (store.Capital, bool) // ok is false when the ledger's side could not be read
 	Feeds   []Feed
 	Price   func(product string) (price, ageSeconds float64, ok bool)
 	Round   func(series string) (kalshi.Status, bool)
@@ -66,16 +70,20 @@ func (s Sources) feed(coin string) (Feed, bool) {
 	return Feed{}, false
 }
 
-// Valuation marks the books to market right now.
-func (s Sources) Valuation() (runner.Valuation, []runner.Book, bool) {
-	books := s.Books()
-	capital, ok := s.Capital()
+// Valuation marks the books to market right now, and gives back what it was made from.
+func (s Sources) Valuation() (runner.Valuation, []runner.Book, store.Capital, bool) {
+	books, capital, ok := s.Books()
 	coins := make([]string, len(assets))
 	for i, a := range assets {
 		coins[i] = a.Coin
 	}
-	return runner.Value(books, capital, coins), books, ok
+	return runner.Value(books, capital, coins), books, capital, ok
 }
+
+// capitalKnown says whether the ledger's side has EVER been read. Until it has, contributed is
+// not 0 but unknown, and everything worked out from it (earned, lifetime earned, the money
+// buckets) is unknown too: served as 0, the whole balance would read as earnings.
+func capitalKnown(c store.Capital, ok bool) bool { return ok || !c.ReadAt.IsZero() }
 
 // homeRanges are the spans the balance sheet can be asked for. ALL has no length: it runs from
 // the first snapshot ever written.
@@ -109,7 +117,7 @@ type window struct {
 type homeReader interface {
 	SnapshotAt(ctx context.Context, scope, key string, t time.Time) (store.ValueSnapshot, bool, error)
 	FirstSnapshot(ctx context.Context, scope, key string) (store.ValueSnapshot, bool, error)
-	SnapshotsTakenAt(ctx context.Context, scope string, at time.Time) (map[string]store.ValueSnapshot, error)
+	SnapshotsTakenAt(ctx context.Context, scope string, keys []string, at time.Time) (map[string]store.ValueSnapshot, error)
 	SnapshotSeries(ctx context.Context, scope, key string, since time.Time, maxPoints int) ([][2]int64, error)
 	RealisedByCoin(ctx context.Context, since time.Time) (map[string]int64, error)
 }
@@ -134,7 +142,7 @@ func loadWindow(ctx context.Context, db homeReader, length time.Duration, now ti
 	if !w.have {
 		return w, nil
 	}
-	if w.groups, err = db.SnapshotsTakenAt(ctx, "group", w.then.At); err != nil {
+	if w.groups, err = db.SnapshotsTakenAt(ctx, "group", runner.Groups, w.then.At); err != nil {
 		return w, err
 	}
 	// One point is left for the value right now, which the handler adds.
@@ -155,13 +163,17 @@ type windows struct {
 	by map[string]window
 }
 
-func (c *windows) get(ctx context.Context, db homeReader, key string, length time.Duration) window {
+// get fills the cache under its own deadline, not the request's: the window is shared by every
+// viewer, and one phone hanging up mid-lookup must not fail it for all of them.
+func (c *windows) get(db homeReader, key string, length time.Duration) window {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
 	if w, ok := c.by[key]; ok && now.Sub(w.fetched) < time.Minute {
 		return w
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 	w, err := loadWindow(ctx, db, length, now)
 	if err != nil {
 		slog.Warn("home: value history lookup failed", "range", key, "err", err)
@@ -170,6 +182,9 @@ func (c *windows) get(ctx context.Context, db homeReader, key string, length tim
 			w.series = [][2]int64{}
 		}
 		w.err, w.fetched = "value history could not be read; earned figures may be out of date", now.Add(-50*time.Second)
+		if !w.have {
+			w.err = "value history could not be read; earned figures are unknown"
+		}
 	}
 	c.by[key] = w
 	return w
@@ -195,9 +210,34 @@ func unixf(t time.Time) float64 { return float64(t.UnixNano()) / 1e9 }
 
 func atof(s string) float64 { v, _ := strconv.ParseFloat(s, 64); return v }
 
-func moneyDoc(m store.MoneyBuckets, deployed int64) map[string]any {
-	return map[string]any{"deployed_cents": deployed, "winnings_cents": m.Winnings, "replenishment_cents": m.Replenishment,
-		"tax_reserve_cents": m.TaxReserve, "fee_reserve_cents": m.FeeReserve, "venue_fees_paid_cents": m.FeesPaid}
+// moneyDoc is where the money sits. Deployed cash comes from the engines' books; the rest is the
+// ledger's, and is null, not 0, while the ledger has never been read.
+func moneyDoc(m store.MoneyBuckets, deployed int64, known bool) map[string]any {
+	doc := map[string]any{"deployed_cents": deployed, "winnings_cents": nil, "replenishment_cents": nil,
+		"tax_reserve_cents": nil, "fee_reserve_cents": nil, "venue_fees_paid_cents": nil}
+	if known {
+		doc["winnings_cents"], doc["replenishment_cents"] = m.Winnings, m.Replenishment
+		doc["tax_reserve_cents"], doc["fee_reserve_cents"], doc["venue_fees_paid_cents"] = m.TaxReserve, m.FeeReserve, m.FeesPaid
+	}
+	return doc
+}
+
+// The two things capital_error can say. Stale figures are still the last good ones; figures
+// that were never read are not figures at all.
+const (
+	capitalStale   = "the ledger's side of the balance sheet could not be read; contributed and earned figures may be out of date"
+	capitalUnknown = "the ledger's side of the balance sheet has not been read since the service started: contributed, earned and the money buckets are unknown (null), and the total leaves the money buckets out"
+)
+
+// capitalError is the capital_error string for a document, or "" when the read is good.
+func capitalError(c store.Capital, ok bool) string {
+	switch {
+	case ok:
+		return ""
+	case capitalKnown(c, ok):
+		return capitalStale
+	}
+	return capitalUnknown
 }
 
 // deployedCents is the cash in every live bucket right now, from the books.
@@ -222,8 +262,11 @@ func stake(l runner.Line) (cost int64, value *int64, open, unmarked int) {
 
 // homeDoc composes the balance sheet from a valuation taken now and a window from the database.
 func homeDoc(src Sources, key string, w window, now time.Time, changes map[string]*float64) map[string]any {
-	v, books, capitalOK := src.Valuation()
-	capital, _ := src.Capital()
+	v, books, capital, capitalOK := src.Valuation()
+	known := capitalKnown(capital, capitalOK)
+	// A lookup that failed with no earlier good one to fall back on knows nothing: not "no
+	// snapshot yet", which is a real answer and reads as nothing earned since now.
+	historyKnown := w.have || w.err == ""
 
 	halted := []string{}
 	for _, b := range books {
@@ -236,18 +279,25 @@ func homeDoc(src Sources, key string, w window, now time.Time, changes map[strin
 	if w.have {
 		since = unixf(w.then.At)
 	}
-	total := map[string]any{"value_cents": v.Total.ValueCents, "earned_cents": cents, "earned_pct": pct, "range": key, "since": since,
+	total := map[string]any{"value_cents": v.Total.ValueCents, "earned_cents": nil, "earned_pct": nil, "range": key, "since": since,
 		"window_complete": w.complete, "at_risk_cents": v.Total.AtRiskCents,
 		"unrealized_cents": v.Total.ValueCents - v.Total.CashCents - v.Total.AtRiskCents,
-		"unmarked_bets":    v.Total.Unmarked, "contributed_cents": v.Total.ContributedCents,
-		"lifetime_earned_cents": v.Total.ValueCents - v.Total.ContributedCents}
+		"unmarked_bets":    v.Total.Unmarked, "contributed_cents": nil, "lifetime_earned_cents": nil}
+	if known {
+		total["contributed_cents"], total["lifetime_earned_cents"] = v.Total.ContributedCents, v.Total.ValueCents-v.Total.ContributedCents
+	}
+	if known && historyKnown {
+		total["earned_cents"], total["earned_pct"] = cents, pct
+	}
 
 	composition := []map[string]any{}
 	for _, g := range v.Groups {
 		row := map[string]any{"key": g.Key, "label": groupLabels[g.Key], "buckets": g.Count, "value_cents": g.ValueCents, "earned_cents": nil}
-		if !w.have {
+		switch then, ok := w.groups[g.Key]; {
+		case !known || !historyKnown:
+		case !w.have:
 			row["earned_cents"] = int64(0)
-		} else if then, ok := w.groups[g.Key]; ok {
+		case ok:
 			row["earned_cents"], _ = earned(g, then, true)
 		}
 		composition = append(composition, row)
@@ -263,7 +313,7 @@ func homeDoc(src Sources, key string, w window, now time.Time, changes map[strin
 		row := map[string]any{"coin": a.Coin, "name": a.Name, "sign": a.Sign, "colour": a.Colour, "decimals": a.Decimals,
 			"price": nil, "price_age_s": nil, "change_pct": changes[a.Coin], "stake_cents": cost, "stake_value_cents": value,
 			"open_bets": open, "unmarked_bets": unmarked, "earned_cents": nil, "round": nil}
-		if w.realised != nil || !w.have {
+		if w.realised != nil || (!w.have && historyKnown) {
 			row["earned_cents"] = w.realised[a.Coin]
 		}
 		if f, ok := src.feed(a.Coin); ok {
@@ -281,13 +331,13 @@ func homeDoc(src Sources, key string, w window, now time.Time, changes map[strin
 	series := append([][2]int64{}, w.series...)
 	series = append(series, [2]int64{now.Unix(), v.Total.ValueCents})
 	doc := map[string]any{"simulated": true, "release": src.Release, "as_of": unixf(now), "healthy": src.Healthy() && capitalOK,
-		"halted": halted, "total": total, "series": series, "money": moneyDoc(capital.Money, deployedCents(v)),
+		"halted": halted, "total": total, "series": series, "money": moneyDoc(capital.Money, deployedCents(v), known),
 		"composition": composition, "assets": list}
 	if w.err != "" {
 		doc["history_error"] = w.err
 	}
-	if !capitalOK {
-		doc["capital_error"] = "the ledger's side of the balance sheet could not be read; contributed and earned figures may be out of date"
+	if msg := capitalError(capital, capitalOK); msg != "" {
+		doc["capital_error"] = msg
 	}
 	return doc
 }
@@ -297,21 +347,36 @@ func homeDoc(src Sources, key string, w window, now time.Time, changes map[strin
 // in the background, at most once a minute per coin and range.
 type changes struct {
 	mu       sync.Mutex
-	first    map[string]float64 // product+range -> the first candle's close
-	fetched  map[string]time.Time
+	first    map[string]float64   // product+range -> the first candle's close
+	firstAt  map[string]time.Time // when that close was last fetched successfully
+	fetched  map[string]time.Time // the last attempt, good or bad
 	inflight map[string]bool
+}
+
+// changeTooOld says whether a first candle fetched `age` ago can still stand for the start of a
+// range made of candles `candleSeconds` wide. While Coinbase's candles cannot be fetched the live
+// price keeps moving, and a change worked out against an hours-old candle would still be
+// labelled "1H". The allowance is a choice, not a measurement: two candles, and never under five
+// minutes, so that the ordinary once-a-minute refresh and one or two failures do not blank it.
+func changeTooOld(age time.Duration, candleSeconds int) bool {
+	allowed := 2 * time.Duration(candleSeconds) * time.Second
+	if allowed < 5*time.Minute {
+		allowed = 5 * time.Minute
+	}
+	return age > allowed
 }
 
 func (c *changes) get(userAgent string, src Sources, key string) map[string]*float64 {
 	out := map[string]*float64{}
-	if _, ok := ranges[key]; !ok { // ALL: there is no candle range that means "since the first snapshot"
+	spec, ok := ranges[key]
+	if !ok { // ALL: there is no candle range that means "since the first snapshot"
 		return out
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, f := range src.Feeds {
 		k := f.Product + key
-		if first, ok := c.first[k]; ok && first > 0 {
+		if first, ok := c.first[k]; ok && first > 0 && !changeTooOld(time.Since(c.firstAt[k]), spec[0]) {
 			if p, _, ok := src.Price(f.Product); ok {
 				pct := (p/first - 1) * 100
 				out[f.Coin] = &pct
@@ -329,7 +394,7 @@ func (c *changes) get(userAgent string, src Sources, key string) map[string]*flo
 			defer c.mu.Unlock()
 			c.inflight[k], c.fetched[k] = false, time.Now()
 			if err == nil && len(h.Closes) > 0 {
-				c.first[k] = h.Closes[0]
+				c.first[k], c.firstAt[k] = h.Closes[0], h.fetched
 			}
 		}(f.Product)
 	}
@@ -345,7 +410,8 @@ const maxMarkers = 500
 // homeRoutes mounts the three routes of docs/api-home.md that this file serves.
 func homeRoutes(mux *http.ServeMux, db *store.Store, userAgent string, src Sources) {
 	cache := &windows{by: map[string]window{}}
-	moves := &changes{first: map[string]float64{}, fetched: map[string]time.Time{}, inflight: map[string]bool{}}
+	moves := &changes{first: map[string]float64{}, firstAt: map[string]time.Time{}, fetched: map[string]time.Time{}, inflight: map[string]bool{}}
+	rounds := &roundPrices{by: map[string]roundPoints{}}
 
 	mux.HandleFunc("GET /api/home", func(w http.ResponseWriter, r *http.Request) {
 		key, length, ok := parseRange(r.URL.Query().Get("range"), "24H", homeRanges)
@@ -353,9 +419,7 @@ func homeRoutes(mux *http.ServeMux, db *store.Store, userAgent string, src Sourc
 			http.Error(w, "range must be 1H, 24H, 7D or ALL", http.StatusBadRequest)
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-		defer cancel()
-		writeJSON(w, homeDoc(src, key, cache.get(ctx, db, key, length), time.Now(), moves.get(userAgent, src, key)))
+		writeJSON(w, homeDoc(src, key, cache.get(db, key, length), time.Now(), moves.get(userAgent, src, key)))
 	})
 
 	mux.HandleFunc("GET /api/asset", func(w http.ResponseWriter, r *http.Request) {
@@ -374,7 +438,7 @@ func homeRoutes(mux *http.ServeMux, db *store.Store, userAgent string, src Sourc
 		ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 		defer cancel()
 		feed, fed := src.feed(coin)
-		points := [][2]float64{}
+		var points [][2]float64
 		var round any
 		since := unixf(time.Now().Add(-assetRanges[key]))
 		switch {
@@ -384,17 +448,17 @@ func homeRoutes(mux *http.ServeMux, db *store.Store, userAgent string, src Sourc
 			if !ok || st.Ticker == "" {
 				break
 			}
-			opens := unixf(st.Closes) - feed.RoundSeconds
-			round, since = map[string]any{"ticker": st.Ticker, "strike": st.Strike, "opens": opens, "closes": unixf(st.Closes)}, opens
-			recorded, err := db.RoundSeries(ctx, st.Ticker, 5*time.Second)
-			if err != nil {
+			// When the round opened is Kalshi's own open time if it sent one. Only without it is
+			// the series' configured round length used, and the document says which it was.
+			opens, measured := unixf(st.Opens), !st.Opens.IsZero()
+			if !measured {
+				opens = unixf(st.Closes) - feed.RoundSeconds
+			}
+			round, since = map[string]any{"ticker": st.Ticker, "strike": st.Strike, "opens": opens, "opens_measured": measured, "closes": unixf(st.Closes)}, opens
+			var err error
+			if points, err = rounds.get(db, st.Ticker, time.Now()); err != nil {
 				http.Error(w, "query failed", http.StatusInternalServerError)
 				return
-			}
-			for _, p := range recorded {
-				if p.Price != nil {
-					points = append(points, [2]float64{unixf(p.At), *p.Price})
-				}
 			}
 		default:
 			h, err := priceHistory(ctx, userAgent, feed.Product, key)
@@ -412,8 +476,11 @@ func homeRoutes(mux *http.ServeMux, db *store.Store, userAgent string, src Sourc
 		if len(points) > maxPoints {
 			points = points[len(points)-maxPoints:]
 		}
+		if points == nil {
+			points = [][2]float64{} // a list, not null, for the page that iterates it
+		}
 
-		v, books, _ := src.Valuation()
+		v, books, _, _ := src.Valuation()
 		var line runner.Line
 		for _, c := range v.Coins {
 			if c.Key == coin {
@@ -448,44 +515,128 @@ func homeRoutes(mux *http.ServeMux, db *store.Store, userAgent string, src Sourc
 			"markers": markers, "markers_truncated": truncated})
 	})
 
-	// The buckets page asks the database, so its answer is kept for ten seconds.
-	var (
-		listMu   sync.Mutex
-		listed   time.Time
-		listRows []store.BucketRow
-		listEvts []store.BucketEventRow
-		listPol  store.SkimPolicy
-	)
+	list := &bucketList{}
 	mux.HandleFunc("GET /api/buckets", func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
-		defer cancel()
-		listMu.Lock()
-		if time.Since(listed) > 10*time.Second {
-			rows, err1 := db.Buckets(ctx)
-			events, err2 := db.RecentBucketEvents(ctx, 30)
-			policy, err3 := db.CurrentSkimPolicy(ctx)
-			if err := firstErr(err1, err2, err3); err != nil {
-				listMu.Unlock()
-				slog.Warn("buckets: query failed", "err", err)
-				http.Error(w, "query failed", http.StatusInternalServerError)
-				return
-			}
-			listRows, listEvts, listPol, listed = rows, events, policy, time.Now()
+		l := list.get(db, time.Now())
+		if !l.good {
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
 		}
-		rows, events, p := listRows, listEvts, listPol
-		listMu.Unlock()
-
-		v, books, _ := src.Valuation()
-		capital, _ := src.Capital()
-		writeJSON(w, map[string]any{
+		v, books, capital, capitalOK := src.Valuation()
+		p := l.policy
+		doc := map[string]any{
 			"simulated": true,
 			"policy": map[string]any{"id": p.ID, "since_at": p.EffectiveAt.UTC().Format(time.RFC3339), "note": p.Note,
 				"winnings_bps": p.Winnings, "replenish_bps": p.Replenish, "tax_bps": p.Tax, "fees_bps": p.Fees},
-			"money":   moneyDoc(capital.Money, deployedCents(v)),
-			"buckets": bucketDocs(rows, books),
-			"events":  events,
-		})
+			"money":   moneyDoc(capital.Money, deployedCents(v), capitalKnown(capital, capitalOK)),
+			"buckets": bucketDocs(l.rows, books),
+			"events":  l.events,
+		}
+		if l.err != "" {
+			doc["buckets_error"] = l.err
+		}
+		if msg := capitalError(capital, capitalOK); msg != "" {
+			doc["capital_error"] = msg
+		}
+		writeJSON(w, doc)
 	})
+}
+
+type roundReader interface {
+	RoundSeries(ctx context.Context, ticker string, every time.Duration) ([]store.SeriesPoint, error)
+}
+
+// roundPoints is one round's recorded prices as last read, or why they could not be.
+type roundPoints struct {
+	fetched time.Time
+	points  [][2]float64
+	err     error
+}
+
+// roundPrices keeps each open round's recorded prices for five seconds, which is the width of
+// one of its points, so nothing newer could be shown sooner. The read walks up to a whole
+// round of once-a-second evaluations, and without this every viewer's every poll ran it, all at
+// once, each holding one of the pool's few connections. Reads are one at a time, under their
+// own deadline and not the request's, and a failure is kept for the five seconds too.
+type roundPrices struct {
+	mu sync.Mutex
+	by map[string]roundPoints
+}
+
+const roundPricesFor = 5 * time.Second
+
+func (c *roundPrices) get(db roundReader, ticker string, now time.Time) ([][2]float64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if p, ok := c.by[ticker]; ok && now.Sub(p.fetched) < roundPricesFor {
+		return p.points, p.err
+	}
+	for old, p := range c.by { // rounds that are over: there are five new tickers every quarter hour
+		if now.Sub(p.fetched) > time.Minute {
+			delete(c.by, old)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	recorded, err := db.RoundSeries(ctx, ticker, roundPricesFor)
+	p := roundPoints{fetched: now, points: [][2]float64{}, err: err}
+	for _, r := range recorded {
+		if r.Price != nil {
+			p.points = append(p.points, [2]float64{unixf(r.At), *r.Price})
+		}
+	}
+	c.by[ticker] = p
+	return p.points, p.err
+}
+
+type bucketReader interface {
+	Buckets(ctx context.Context) ([]store.BucketRow, error)
+	RecentBucketEvents(ctx context.Context, limit int) ([]store.BucketEventRow, error)
+	CurrentSkimPolicy(ctx context.Context) (store.SkimPolicy, error)
+}
+
+// bucketListing is the database's part of /api/buckets as last read.
+type bucketListing struct {
+	rows   []store.BucketRow
+	events []store.BucketEventRow
+	policy store.SkimPolicy
+	good   bool   // false until a read has worked
+	err    string // set while the newest attempt is a failed one
+}
+
+// bucketList keeps that part for a minute. It adds up every bucket's whole ledger and order
+// history, which only grows, and what moves second by second (cash, equity, at risk) is laid
+// over it from the engines' books on every request anyway. A failed read is not tried again on
+// the next poll but a minute later, like a good one, however many pages are polling; meanwhile
+// the last good listing is served and the document says so. It reads under its own deadline,
+// not the request's, because the result is shared.
+type bucketList struct {
+	mu    sync.Mutex
+	tried time.Time // the last attempt, good or bad
+	last  bucketListing
+}
+
+const bucketListFor = time.Minute
+
+func (c *bucketList) get(db bucketReader, now time.Time) bucketListing {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.tried.IsZero() && now.Sub(c.tried) < bucketListFor {
+		return c.last
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	rows, err1 := db.Buckets(ctx)
+	events, err2 := db.RecentBucketEvents(ctx, 30)
+	policy, err3 := db.CurrentSkimPolicy(ctx)
+	c.tried = now
+	if err := firstErr(err1, err2, err3); err != nil {
+		slog.Warn("buckets: query failed", "err", err)
+		c.last.err = "the bucket list could not be read; seed, allocated, bets, status and events are the last good ones"
+		return c.last
+	}
+	c.last = bucketListing{rows: rows, events: events, policy: policy, good: true}
+	return c.last
 }
 
 func firstErr(errs ...error) error {

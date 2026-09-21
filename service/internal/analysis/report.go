@@ -21,20 +21,35 @@ type Bucket struct {
 
 // Coverage says how much of the settled history the figures rest on. The per-market aggregates
 // are filled a few windows per refresh, so after a restart the document is PARTIAL for a while
-// and must say so rather than pass a part off as the whole.
+// and must say so rather than pass a part off as the whole. While Complete is false every verdict
+// is "unresolved", every leaderboard row is flagged, and every "what" opens by saying so.
 type Coverage struct {
-	MarketsSettled    int  `json:"markets_settled"`
-	MarketsAggregated int  `json:"markets_aggregated"`
-	WindowsIncomplete int  `json:"windows_incomplete"` // left out: a market in them is unsettled or not yet aggregated
-	Complete          bool `json:"complete"`
+	MarketsSettled    int `json:"markets_settled"`
+	MarketsAggregated int `json:"markets_aggregated"`
+	// Read, and held back: what their buckets held at the close does not match their settlement
+	// rows (see Reconcile), or a fill has no recorded money. They are read again every refresh. A
+	// number that stays above 0 is a round whose settlement was never written: a halted runner,
+	// or a stop between the result and the payouts.
+	MarketsUnreconciled int  `json:"markets_unreconciled"`
+	WindowsIncomplete   int  `json:"windows_incomplete"` // left out whole: a market in them is unsettled, unreconciled or not yet read
+	Complete            bool `json:"complete"`           // markets_aggregated has reached markets_settled
 }
 
 // Conventions is the verdict rule, stated so nobody mistakes it for a finding.
 type Conventions struct {
-	Note           string  `json:"note"`
-	MinWindows     int     `json:"min_windows"`
-	MinAbsT        float64 `json:"min_abs_t"`
-	DominantWindow float64 `json:"dominant_window_share"`
+	Note       string  `json:"note"`
+	MinWindows int     `json:"min_windows"`
+	MinAbsT    float64 `json:"min_abs_t"` // one hypothesis stated in advance: the scorecard's overall row
+	// The correction for looking at many rows at once. Trials is MEASURED (the rows of
+	// strategy_version, which the schema names as the number of trials); the thresholds follow
+	// from it by CorrectedT. 0 trials means the count could not be read: leaderboard_min_abs_t is
+	// then 0 and no leaderboard verdict is given.
+	FamilyAlpha         float64 `json:"family_alpha"`
+	Trials              int     `json:"trials"`
+	LeaderboardMinAbsT  float64 `json:"leaderboard_min_abs_t"`
+	ScorecardCuts       int     `json:"scorecard_cuts"`
+	ScorecardCutMinAbsT float64 `json:"scorecard_cut_min_abs_t"`
+	DominantWindow      float64 `json:"dominant_window_share"`
 }
 
 // ScoreRow is one line of the scorecard. Brier figures are means over WINDOWS of each window's
@@ -63,7 +78,7 @@ type FillRow struct {
 	Strategy           string  `json:"strategy"`
 	Engine             string  `json:"engine"`
 	World              string  `json:"world"`
-	Sells              int     `json:"sells"`        // every early sale, priced or not
+	Sells              int     `json:"sells"`        // every early sale in the windows read, priced or not, plus unsettled_sells
 	SellsPriced        int     `json:"sells_priced"` // settled, with depth recorded: what the figures below cover
 	ContractsSold      int     `json:"contracts_sold"`
 	ContractsBeyondBid int     `json:"contracts_beyond_bid"`
@@ -84,7 +99,7 @@ type LeaderRow struct {
 	Engine             string   `json:"engine"`
 	World              string   `json:"world"`
 	Lives              int      `json:"lives"`
-	EquityCents        int64    `json:"equity_cents"`
+	BookCents          int64    `json:"book_cents"` // cash plus open bets AT COST. Not equity: api/buckets marks the same bets at the bid
 	LifetimePnLCents   int64    `json:"lifetime_pnl_cents"`
 	Bets               int      `json:"bets"`
 	Windows            int      `json:"windows"`
@@ -124,6 +139,8 @@ type Inputs struct {
 	BookCents      map[int64]int64 // live buckets: ledger cash plus open bets at cost
 	UnsettledSells map[int64]int   // by bucket: early sales in rounds with no result yet
 	MarketsSettled int
+	Unreconciled   int // settled markets held back: see Coverage.MarketsUnreconciled
+	Trials         int // select count(*) from strategy_version; 0 if it could not be read
 }
 
 const (
@@ -136,12 +153,39 @@ const (
 		"so seconds are not evenly covered."
 	fillsWhat = "The simulator sells any size at the bid. This re-prices every early sale as if only the size actually displayed at that second had filled, the rest riding to settlement " +
 		"(1.00 a contract if its side won, else nothing). Sales by one bucket in the same second share one displayed size. " +
+		"The displayed size is the BEST BID LEVEL ALONE. The simulator books a sale one cent under the bid, and size bid within that cent is not counted, " +
+		"so contracts_beyond_bid is an upper bound on the size that was not there. " +
 		"contracts_sold, contracts_beyond_bid, share_beyond and both P&L figures cover only the sells_priced sales: settled rounds where depth was recorded. " +
 		"Proceeds and cost are the recorded ones pro rata, fees inside; the fee's round-up to a cent is not recomputed, so a sale can be off by under a cent."
 	leaderboardWhat = "Per strategy version. Windows are the independent sample, not bets. Lifetime includes every earlier life of a strategy that ran out. " +
 		"lifetime_pnl_cents is realised trading P&L on settled windows (payouts and sale proceeds less what the bets cost, fees inside), before any sustainment allocation; " +
-		"bets and windows count the same settled windows. equity_cents is the live bucket's ledger cash plus its open bets at cost (book value, not marked to market); 0 if no bucket is live."
+		"bets and windows count the same settled windows. It is not book or equity less the seed. " +
+		"book_cents is the live buckets' ledger cash plus their open bets AT COST; 0 if no bucket is live. It is not equity: api/buckets equity_cents marks the same bets at the bid. " +
+		"A first-engine version spans its BTC and ETH buckets, which api/buckets lists apart. " +
+		"The verdict threshold is conventions.leaderboard_min_abs_t, raised for the conventions.trials versions compared here at once."
+	conventionsNote = "The verdict rule is a convention chosen in advance, not a measurement: unresolved unless n_windows >= min_windows AND |t| reaches a threshold, " +
+		"with t as published here, to two places. For ONE hypothesis stated in advance the threshold is min_abs_t: that is the scorecard's overall row (does the model beat the market's own price?). " +
+		"The leaderboard compares `trials` strategy versions at once (trials is measured: the row count of strategy_version). With that many rows and no edge anywhere, " +
+		"some row would pass min_abs_t by chance far more often than one time in twenty, so its threshold is leaderboard_min_abs_t: the two-sided Bonferroni cut " +
+		"sqrt(2) x erfinv(1 - family_alpha / trials), never below min_abs_t, which holds the chance of ANY false verdict among the rows to family_alpha. " +
+		"The scorecard's by_band and by_coin rows are scorecard_cuts exploratory cuts of the same rows, looked at together to see where the model is better or worse; " +
+		"they use the same correction with their own count: scorecard_cut_min_abs_t. Bonferroni is a convention too: it assumes nothing about how rows depend on each other " +
+		"and is conservative when they move together, as a twin and its original do. It corrects for the rows shown side by side, and for nothing else " +
+		"(not for strategies tried and never registered). While coverage.complete is false every verdict is unresolved."
 )
+
+// partialNote is the plain sentence every part of a partial document carries, "" when every
+// settled market is in the figures.
+func partialNote(c Coverage) string {
+	if c.Complete {
+		return ""
+	}
+	s := fmt.Sprintf("partial: only %d of %d settled markets read", c.MarketsAggregated, c.MarketsSettled)
+	if c.MarketsUnreconciled > 0 {
+		s += fmt.Sprintf(" (%d held back: what was held at the close does not match their settlement rows; they are read again every minute)", c.MarketsUnreconciled)
+	}
+	return s
+}
 
 // Build combines the cached per-market facts into the document. It never returns a nil slice
 // (the page iterates them) and never a NaN or Inf.
@@ -159,18 +203,46 @@ func Build(in Inputs) Document {
 	for w := range in.Incomplete {
 		left[w] = true
 	}
-	doc := Document{Simulated: true, ComputedAt: in.ComputedAt, WindowsRecorded: len(windows),
-		Coverage:    Coverage{MarketsSettled: in.MarketsSettled, MarketsAggregated: len(in.Facts), WindowsIncomplete: len(left), Complete: len(in.Facts) >= in.MarketsSettled},
-		Conventions: Conventions{Note: "The verdict rule is a convention chosen in advance, not a measurement: unresolved unless n_windows >= min_windows AND |t| >= min_abs_t.", MinWindows: MinWindows, MinAbsT: MinAbsT, DominantWindow: DominantWindow}}
-	doc.Scorecard = buildScorecard(facts)
+	cov := Coverage{MarketsSettled: in.MarketsSettled, MarketsAggregated: len(in.Facts), MarketsUnreconciled: max(in.Unreconciled, 0),
+		WindowsIncomplete: len(left), Complete: len(in.Facts) >= in.MarketsSettled}
+	// The thresholds are applied exactly as published (four places), against t as published (two).
+	rule := thresholds{overall: MinAbsT, cut: round(CorrectedT(len(Bands)+len(Coins)), 4), leaderboard: round(CorrectedT(in.Trials), 4)}
+	doc := Document{Simulated: true, ComputedAt: in.ComputedAt, WindowsRecorded: len(windows), Coverage: cov,
+		Conventions: Conventions{Note: conventionsNote, MinWindows: MinWindows, MinAbsT: MinAbsT, FamilyAlpha: FamilyAlpha, Trials: max(in.Trials, 0),
+			LeaderboardMinAbsT: rule.leaderboard, ScorecardCuts: len(Bands) + len(Coins), ScorecardCutMinAbsT: rule.cut, DominantWindow: DominantWindow}}
+	partial := partialNote(cov)
+	if partial != "" {
+		// Part of the history, read newest first, is not the history. Its t is a fair figure for
+		// the windows it covers, but the labels say "lifetime" and "overall", and they would flip
+		// as older windows load. So no verdict is given until everything is read. The figures
+		// themselves are still shown: a zero would be a number that is not the real one either.
+		rule = thresholds{}
+	}
+	doc.Scorecard = buildScorecard(facts, rule)
 	doc.Fills = buildFills(facts, in.Buckets, in.UnsettledSells)
-	doc.Leaderboard = buildLeaderboard(facts, in.Buckets, in.BookCents)
+	doc.Leaderboard = buildLeaderboard(facts, in.Buckets, in.BookCents, rule, in.Trials > 0, partial)
+	if partial != "" {
+		lead := "P" + partial[1:] + ". Every figure here covers those markets only, and every verdict is unresolved until all are read. "
+		doc.Scorecard.What, doc.Fills.What, doc.Leaderboard.What = lead+doc.Scorecard.What, lead+doc.Fills.What, lead+doc.Leaderboard.What
+	}
 	return doc
 }
 
+// thresholds is the |t| each kind of row must reach for a verdict; 0 means none can be given.
+//
+// Which rows are corrected, and for what. The scorecard's overall row is ONE hypothesis, stated
+// before any data: does the model beat the market's own price? It keeps MinAbsT. The five bands
+// and five coins are ten exploratory cuts of those same rows. Nobody said in advance which of
+// them would differ, they are read together, and whichever stands out will be read as a finding,
+// so they get the family correction with their own count (len(Bands) + len(Coins), taken from
+// the lists themselves). The leaderboard's family is the registry of strategy versions, which
+// the schema names as the number of trials every significance figure must be corrected for
+// (0001_init.sql). The two families answer different questions and are corrected separately.
+type thresholds struct{ overall, cut, leaderboard float64 }
+
 // scoreRow scores the rows that keep() admits: a Brier pair per window, then the window stat of
 // their difference.
-func scoreRow(facts []MarketFacts, keep func(coin string, band int) bool) ScoreRow {
+func scoreRow(facts []MarketFacts, minAbsT float64, keep func(coin string, band int) bool) ScoreRow {
 	type sums struct{ n, model, market float64 }
 	per := map[int64]*sums{}
 	var rows int64
@@ -195,20 +267,21 @@ func scoreRow(facts []MarketFacts, keep func(coin string, band int) bool) ScoreR
 		diff = append(diff, (s.model-s.market)/s.n)
 	}
 	st := WindowStat(diff)
+	t := round(st.T, 2) // the verdict is decided on the figure the page shows
 	return ScoreRow{NRows: rows, NWindows: st.N, BrierModel: round(WindowStat(model).Mean, 4), BrierMarket: round(WindowStat(market).Mean, 4),
-		Diff: round(st.Mean, 4), SE: round(st.SE, 4), T: round(st.T, 2), Verdict: Verdict(st, "model worse", "model better")}
+		Diff: round(st.Mean, 4), SE: round(st.SE, 4), T: t, Verdict: Verdict(Stat{N: st.N, T: t}, minAbsT, "model worse", "model better")}
 }
 
-func buildScorecard(facts []MarketFacts) Scorecard {
+func buildScorecard(facts []MarketFacts, rule thresholds) Scorecard {
 	sc := Scorecard{What: scorecardWhat, ByBand: []ScoreRow{}, ByCoin: []ScoreRow{}}
-	sc.Overall = scoreRow(facts, func(string, int) bool { return true })
+	sc.Overall = scoreRow(facts, rule.overall, func(string, int) bool { return true })
 	for i, b := range Bands {
-		r := scoreRow(facts, func(_ string, band int) bool { return band == i })
+		r := scoreRow(facts, rule.cut, func(_ string, band int) bool { return band == i })
 		r.Band = b.Label
 		sc.ByBand = append(sc.ByBand, r)
 	}
 	for _, c := range Coins {
-		r := scoreRow(facts, func(coin string, _ int) bool { return coin == c })
+		r := scoreRow(facts, rule.cut, func(coin string, _ int) bool { return coin == c })
 		r.Coin = c
 		sc.ByCoin = append(sc.ByCoin, r)
 	}
@@ -284,7 +357,7 @@ func buildFills(facts []MarketFacts, buckets []Bucket, unsettled map[int64]int) 
 	return out
 }
 
-func buildLeaderboard(facts []MarketFacts, buckets []Bucket, book map[int64]int64) Leaderboard {
+func buildLeaderboard(facts []MarketFacts, buckets []Bucket, book map[int64]int64, rule thresholds, trialsKnown bool, partial string) Leaderboard {
 	byBucket, versions := versionsOf(buckets)
 	type tally struct {
 		windows map[int64]float64 // closes -> P&L in cents, windows with at least one bet
@@ -314,9 +387,17 @@ func buildLeaderboard(facts []MarketFacts, buckets []Bucket, book map[int64]int6
 			total += t.windows[w]
 		}
 		st := WindowStat(per)
+		// t and the share are rounded once, and the verdict and the flags are decided on the rounded
+		// figures, so what the row shows and what it says can never disagree.
+		tt, share := round(st.T, 2), round(TopWindowShare(per), 2)
 		row := LeaderRow{Strategy: v.strategy, Engine: v.engine, World: v.world, Lives: 1, LifetimePnLCents: int64(total), Bets: t.bets,
-			Windows: st.N, MeanWindowPnLCents: int64(round(st.Mean, 0)), SECents: int64(round(st.SE, 0)), T: round(st.T, 2),
-			TopWindowShare: round(TopWindowShare(per), 2), Verdict: Verdict(st, "ahead", "behind"), Flags: []string{}}
+			Windows: st.N, MeanWindowPnLCents: int64(round(st.Mean, 0)), SECents: int64(round(st.SE, 0)), T: tt,
+			TopWindowShare: share, Verdict: Verdict(Stat{N: st.N, T: tt}, rule.leaderboard, "ahead", "behind"), Flags: []string{}}
+		if partial != "" {
+			row.Flags = append(row.Flags, partial+"; lifetime_pnl_cents, bets, windows and t cover those only, and no verdict is given until all are read")
+		} else if !trialsKnown {
+			row.Flags = append(row.Flags, "the number of strategy versions compared could not be read, so no verdict can be given")
+		}
 		live := false
 		for _, b := range buckets {
 			if b.VersionID != id {
@@ -327,7 +408,7 @@ func buildLeaderboard(facts []MarketFacts, buckets []Bucket, book map[int64]int6
 			}
 			if !b.Frozen {
 				live = true
-				row.EquityCents += book[b.ID]
+				row.BookCents += book[b.ID]
 			}
 		}
 		if row.Lives > 1 {
@@ -336,7 +417,7 @@ func buildLeaderboard(facts []MarketFacts, buckets []Bucket, book map[int64]int6
 		if !live {
 			row.Flags = append(row.Flags, "ran out and was not staked again")
 		}
-		switch share := TopWindowShare(per); {
+		switch {
 		case st.N == 1:
 			row.Flags = append(row.Flags, "only one window: nothing can be said yet")
 		case share > 1:

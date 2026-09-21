@@ -2,14 +2,648 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Asset Cracker</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Asset Cracker · The Ledger</title>
+<script>
+(function(){var m=/[?&]theme=(dark|light)/.exec(location.search);if(m)document.documentElement.setAttribute("data-theme",m[1]);})();
+</script>
+<style>
+:root{
+  --paper:#f3eee1;--paper2:#e9e2d0;--ink:#1d1b17;--mute:#5f594c;--rule:#bfb59e;--hair:#d9d0bb;
+  --up:#1b6a3a;--dn:#a1261c;--warn:#8a5a00;
+  --serif:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Roboto Mono",monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --paper:#15171a;--paper2:#1f2226;--ink:#e9e5da;--mute:#a59f90;--rule:#4a4e53;--hair:#2e3135;
+  --up:#7fcb98;--dn:#f09184;--warn:#e0b060}}
+:root[data-theme=dark]{
+  --paper:#15171a;--paper2:#1f2226;--ink:#e9e5da;--mute:#a59f90;--rule:#4a4e53;--hair:#2e3135;
+  --up:#7fcb98;--dn:#f09184;--warn:#e0b060}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.35 var(--serif);
+  padding-bottom:calc(64px + env(safe-area-inset-bottom,0px))}
+[hidden]{display:none!important}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;margin:0;cursor:pointer;-webkit-tap-highlight-color:transparent}
+:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.f{font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.up{color:var(--up)}.dn{color:var(--dn)}.mu{color:var(--mute)}
+.k{font:600 10px/1.2 var(--sans);letter-spacing:.12em;text-transform:uppercase;color:var(--mute)}
+.wrap{max-width:1360px;margin:0 auto;padding:0 max(12px,env(safe-area-inset-right,0px)) 0 max(12px,env(safe-area-inset-left,0px))}
+
+/* nameplate strip: always on screen, always says SIMULATED MONEY */
+.strip{position:sticky;top:0;z-index:5;background:var(--paper);border-bottom:1px solid var(--ink);padding-top:env(safe-area-inset-top,0px)}
+.strip .wrap{display:flex;align-items:center;gap:10px;height:34px}
+.name{font:700 15px/1 var(--serif);letter-spacing:.01em;white-space:nowrap}
+.name i{font-weight:400}
+.sim{margin-left:auto;font:700 10px/1 var(--sans);letter-spacing:.14em;border:1.5px solid var(--ink);padding:4px 6px 3px;white-space:nowrap}
+.tabs{position:fixed;left:0;right:0;bottom:0;z-index:6;display:flex;background:var(--paper);border-top:1px solid var(--ink);
+  box-shadow:0 -3px 0 var(--paper),0 -4px 0 var(--ink);padding-bottom:env(safe-area-inset-bottom,0px)}
+.tabs button{flex:1;height:54px;font:600 12px/1 var(--sans);letter-spacing:.14em;text-transform:uppercase;color:var(--mute);border-right:1px solid var(--hair)}
+.tabs button:last-child{border-right:0}
+.tabs button[aria-current=page]{color:var(--ink);background:var(--paper2);box-shadow:inset 0 3px 0 var(--ink)}
+.dateline{display:flex;justify-content:space-between;gap:8px;padding:5px 0 4px;border-bottom:3px double var(--ink);font:11px/1.2 var(--sans);color:var(--mute)}
+.alert{margin:8px 0 0;padding:8px 10px;background:var(--ink);color:var(--paper);font:600 12px/1.35 var(--sans);letter-spacing:.02em}
+.alert b{letter-spacing:.12em}
+.alert.soft{background:none;color:var(--warn);border:1px solid var(--warn)}
+
+/* the lede: total value */
+.lede{padding:12px 0 0}
+.total{font:700 46px/1 var(--serif);letter-spacing:-.025em;margin:3px 0 0;font-variant-numeric:lining-nums tabular-nums;white-space:nowrap}
+.total .cur{font-size:.5em;font-weight:400;letter-spacing:0;vertical-align:.62em;margin-right:3px}
+.total small{font-size:.5em;font-weight:400;letter-spacing:0;vertical-align:.62em;margin-left:1px}
+.earn{margin:7px 0 0;font-size:14px;display:flex;flex-wrap:wrap;gap:2px 8px;align-items:baseline}
+.earn .f{font-size:14px;font-weight:600}
+.earn em{color:var(--mute);font-size:13px}
+.chips{display:flex;gap:0;border:1px solid var(--ink);width:max-content}
+.chips button{min-width:44px;height:32px;padding:0 9px;font:600 11px/1 var(--sans);letter-spacing:.08em;border-right:1px solid var(--ink);position:relative}
+.chips button::after{content:"";position:absolute;inset:-7px 0}
+.chips button:last-child{border-right:0}
+.chips button[aria-pressed=true]{background:var(--ink);color:var(--paper)}
+.scl{display:flex;align-items:flex-end;gap:12px;margin:9px 0 0}
+#spark{flex:1;min-width:0}
+.spark{display:block;width:100%;height:34px;overflow:visible}
+.dbl{border:0;border-top:3px double var(--ink);margin:6px 0 0}
+
+/* ruled ledger rows */
+.row{display:flex;flex-wrap:wrap;gap:0 12px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--hair)}
+.row>span:first-child{flex:1;min-width:0}
+.row .f{text-align:right;font-size:13px}
+.row .e{min-width:78px;font-size:12px}
+.row .v{min-width:96px}
+.row.hd{padding:6px 0 4px;border-bottom:1px solid var(--ink)}
+.row.hd .k{text-align:right}.row.hd .k:first-child{text-align:left}
+.ip{visibility:hidden}
+.row .n{font-size:11px;color:var(--mute);font-family:var(--sans)}
+.row .note{flex:0 0 100%;order:9;font-style:italic;font-size:12px;color:var(--mute);margin-top:-2px}
+.memo{font:11px/1.5 var(--sans);color:var(--mute);margin:5px 0 0;display:flex;flex-wrap:wrap;gap:0 9px}
+.memo .f{font-size:11px;color:var(--ink)}.memo .f.up{color:var(--up)}.memo .f.dn{color:var(--dn)}
+.memo i{font-family:var(--serif)}
+.row.sum{border-bottom:0;border-top:1px solid var(--ink);font-weight:700;margin-top:-1px}
+.row.sub{padding:4px 0;border-bottom:0}
+.row.sub span:first-child{color:var(--mute);font-size:12.5px}
+h2{font:700 19px/1.1 var(--serif);margin:0;letter-spacing:-.01em}
+.sec{margin-top:18px;border-top:1px solid var(--ink);padding-top:6px}
+.sec>.k{display:block;margin-bottom:2px}
+.what{font-style:italic;color:var(--mute);font-size:12.5px;margin:4px 0 8px;max-width:70ch}
+
+/* the middle: rail + box, side by side at every width */
+.mid{display:grid;grid-template-columns:112px minmax(0,1fr);margin-top:16px;border-top:1px solid var(--ink);border-bottom:1px solid var(--ink)}
+.rail{border-right:1px solid var(--ink);display:flex;flex-direction:column}
+.rail .k{padding:6px 0 5px;border-bottom:1px solid var(--rule)}
+.rail button{overflow:hidden;display:block;width:100%;text-align:left;min-height:66px;padding:6px 7px 5px 6px;border-bottom:1px solid var(--rule);border-left:3px solid transparent;margin-left:-3px;width:calc(100% + 3px)}
+.rail button:last-child{border-bottom:0}
+.rail button[aria-pressed=true]{background:var(--paper2);border-left-color:var(--ink)}
+.rail .l1{display:flex;align-items:baseline;gap:4px}
+.rail .sg{font:700 14px/1 var(--sans);width:13px;text-align:center;overflow:hidden;white-space:nowrap;flex:none}
+.rail .tk{overflow:hidden;text-overflow:ellipsis}
+.rail .tk{font:700 12.5px/1 var(--sans);letter-spacing:.05em}
+.rail .ch{margin-left:auto;font-size:10.5px}
+.rail .px{display:block;font-size:12.5px;font-weight:600;margin-top:3px}
+.rail .l1,.rail .px,.rail .st{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rail .sp{display:block;height:18px}
+.rail svg{display:block;width:100%;height:15px;margin-top:3px;overflow:visible}
+.rail .st{display:block;font:10px/15px var(--sans);height:15px;color:var(--mute);margin-top:2px;white-space:nowrap}
+.rail .st .stale{line-height:1.1;padding:1px 3px;vertical-align:1px}
+.stale{display:inline-block;font:700 9.5px/1.25 var(--sans);letter-spacing:.04em;color:var(--dn);border:1px solid var(--dn);padding:1px 3px;white-space:nowrap}
+.box{padding:8px 0 10px 10px;min-width:0}
+.bh{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px}
+.bh h2{font-size:20px}
+.bh .p{font-size:17px;font-weight:600;margin-left:auto}
+.bh .c{font-size:12px;flex-basis:100%;text-align:right;color:var(--mute)}
+.bh .flag{flex-basis:100%;margin-top:4px}
+.bh .flag .stale{white-space:normal;padding:3px 5px;font-size:10px}
+.more{display:block;width:100%;min-height:44px;font:600 11px/1 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--mute);border-bottom:1px solid var(--hair)}
+#stake table{table-layout:fixed}#stake th+th{width:64px}#stake td:first-child{overflow:hidden;text-overflow:ellipsis}
+#dl-rel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}#dl-date{white-space:nowrap}
+td small{overflow:hidden;text-overflow:ellipsis;display:block;font:10.5px/1.3 var(--mono);color:var(--mute);margin-top:1px;white-space:nowrap}
+.box .chips{margin:7px 0 6px}
+.cvw{position:relative;height:214px;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)}
+canvas{display:block;width:100%;height:100%;touch-action:pan-y}
+.cap{font-style:italic;font-size:12.5px;line-height:1.35;color:var(--mute);margin:6px 0 0}
+.cap b{font-style:normal;color:var(--ink);font-weight:600}
+.cap .f{font-style:normal;font-size:11.5px;color:var(--ink)}
+.leg{font:10.5px/1.4 var(--sans);color:var(--mute);margin:4px 0 0}
+.stake{margin-top:12px;border-top:1px solid var(--ink);padding-top:5px}
+.stake .row{padding:5px 0}
+table{border-collapse:collapse;width:100%}
+th{font:600 9.5px/1.2 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--mute);text-align:right;padding:6px 0 4px 6px;border-bottom:1px solid var(--ink);vertical-align:bottom}
+td{padding:6px 0 6px 6px;border-bottom:1px solid var(--hair);text-align:right;font-size:12px;vertical-align:baseline}
+th:first-child,td:first-child{text-align:left;padding-left:0}
+td:first-child{font-size:13px}
+td.f,td .f{font-size:11.5px}
+.tag{font:600 9px/1 var(--sans);letter-spacing:.06em;text-transform:uppercase;color:var(--mute);border:1px solid var(--rule);padding:1px 3px;margin-left:3px;white-space:nowrap;vertical-align:1px}
+.tag.bad{color:var(--dn);border-color:var(--dn)}.tag.warn{color:var(--warn);border-color:var(--warn)}
+.empty{font-style:italic;color:var(--mute);padding:8px 0;font-size:13px}
+
+/* buckets */
+.bk{padding:7px 0 8px;border-bottom:1px solid var(--hair);break-inside:avoid}
+.bk.frozen b,.bk.frozen .t .f{color:var(--mute)}
+.bk .t{display:flex;align-items:baseline;gap:6px}
+.bk .t b{font-size:14.5px}
+.bk .t .f{margin-left:auto;font-size:13.5px;font-weight:600}
+.bk .t .d{font-size:11px;min-width:54px;text-align:right;margin-left:0;font-weight:400}
+.bar{position:relative;height:4px;margin:7px 0 6px;background:var(--hair)}
+.bar i{position:absolute;left:0;top:0;bottom:0;background:var(--ink)}
+.bar i.up{background:var(--up)}.bar i.dn{background:var(--dn)}
+.bar s{position:absolute;top:-4px;bottom:-4px;width:2px;margin-left:-1px;background:var(--ink)}
+.bar u{position:absolute;top:-4px;bottom:-4px;width:5px;margin-left:-4px;border:1.5px solid var(--ink);border-left:0}
+.jump{display:flex;flex-wrap:wrap;gap:0;margin:8px 0 0;border:1px solid var(--rule);border-width:1px 0 0 1px}
+.jump button{flex:1 0 auto;min-height:40px;padding:0 10px;font:600 10.5px/1 var(--sans);letter-spacing:.06em;text-transform:uppercase;color:var(--mute);border:1px solid var(--rule);border-width:0 1px 1px 0}
+summary{list-style:none;cursor:pointer;display:flex;align-items:baseline;gap:8px;min-height:44px;padding-top:4px;border-bottom:1px solid var(--rule)}
+summary::-webkit-details-marker{display:none}
+summary::before{content:"+";font:400 16px/1 var(--mono);color:var(--mute);width:10px}
+details[open]>summary::before{content:"−"}
+summary h2{flex:1}summary .f{font-size:13px;font-weight:600}
+[id^=j-]{scroll-margin-top:calc(52px + env(safe-area-inset-top,0px))}
+.bk .m{font:11px/1.3 var(--sans);color:var(--mute);display:flex;flex-wrap:wrap;gap:0 9px}
+.bk .m .f{font-size:10.5px;color:var(--ink)}
+.cols{margin-top:14px}.cols .sec{margin:0 0 18px}
+.grp h2 small{display:block;font:italic 400 12.5px var(--serif);color:var(--mute);letter-spacing:0}
+.gsum small{display:block;font:400 11px/1.4 var(--sans);color:var(--mute)}
+.gsum{display:flex;justify-content:space-between;align-items:baseline;gap:8px;padding:6px 0;border-top:1px solid var(--ink);border-bottom:3px double var(--ink);font-weight:700;margin-top:-1px}
+.pol{display:flex;height:9px;border:1px solid var(--ink);margin:8px 0 2px}
+.pol i{display:block;border-right:1px solid var(--paper)}
+.notset{border:1px dashed var(--rule);padding:8px 10px;margin:6px 0 4px;font-size:13px}
+.notset b{font:700 10px var(--sans);letter-spacing:.12em;text-transform:uppercase;display:block;margin-bottom:2px}
+.ev{display:grid;grid-template-columns:86px 1fr;gap:0 8px;padding:6px 0;border-bottom:1px solid var(--hair);font-size:13px}
+.ev time{font:10.5px/1.5 var(--mono);color:var(--mute)}
+.ev .k{color:var(--ink);margin-right:6px}
+
+/* evidence */
+.verdict{display:grid;grid-template-columns:1fr;gap:4px;padding:8px 0 10px;border-bottom:1px solid var(--hair)}
+.verdict h3{font:700 24px/1.05 var(--serif);margin:0;letter-spacing:-.015em}
+.verdict h3 span{display:block;font-weight:400;font-style:italic;font-size:19px;margin-top:2px}
+.meter{display:grid;grid-template-columns:96px 1fr 70px;gap:8px;align-items:center;font:11px var(--sans);color:var(--mute)}
+.meter .bar{margin:0;height:4px}
+.meter .f{text-align:right;color:var(--ink);font-size:11.5px}
+.prog{display:inline-block;min-width:54px;text-align:right;font:11px var(--mono);color:var(--mute)}
+.prog i{display:block;height:2px;background:var(--hair);margin-top:2px;position:relative}
+.prog i b{position:absolute;left:0;top:0;bottom:0;background:var(--mute)}
+.vd{font:700 10px var(--sans);letter-spacing:.08em;text-transform:uppercase}
+.lb{padding:7px 0;border-bottom:1px solid var(--hair);break-inside:avoid}
+.lb .t{display:flex;align-items:baseline;gap:6px}
+.lb .r{font:11px var(--mono);color:var(--mute);width:18px}
+.lb .t b{font-size:14.5px}
+.lb .t .f{margin-left:auto;font-size:13px}
+.lb .m{font:11px/1.45 var(--sans);color:var(--mute);margin-left:24px;display:flex;flex-wrap:wrap;gap:0 10px;align-items:baseline}
+.lb .m .f{font-size:10.5px;color:var(--ink)}
+.lb .fl{margin:2px 0 0 24px;font-style:italic;font-size:12.5px;color:var(--warn)}
+.scroll{overflow-x:auto}
+footer{margin:22px 0 8px;padding-top:6px;border-top:1px solid var(--ink);font:11px/1.4 var(--sans);color:var(--mute)}
+footer a{color:inherit;text-decoration:underline;text-underline-offset:2px}
+
+@media (min-width:430px){.mid{grid-template-columns:128px minmax(0,1fr)}.box{padding-left:12px}}
+@media (min-width:860px){
+  body{padding-bottom:24px;font-size:15px}
+  .strip .wrap{height:44px}.name{font-size:20px}
+  .tabs{position:static;border:0;box-shadow:none;padding:0;margin-left:24px;background:none}
+  .tabs button{flex:none;height:44px;padding:0 16px;border-right:0}
+  .tabs button[aria-current=page]{background:none;color:var(--ink);box-shadow:inset 0 -3px 0 var(--ink)}
+  #p-home{display:grid;grid-template-columns:372px minmax(0,1fr);gap:0 28px}
+  #p-home .ledger{border-right:1px solid var(--rule);padding-right:28px}
+  .total{font-size:54px}
+  .mid{grid-template-columns:210px minmax(0,1fr);margin-top:12px;border-top:0;align-self:start}
+  .rail button{min-height:78px;padding:9px 12px 8px 10px}
+  .rail .tk{font-size:14px}.rail .px{font-size:15px}.rail .ch{font-size:12px}.rail svg{height:20px}.rail .st{font-size:11px}
+  .box{padding:10px 0 14px 22px}
+  .bh h2{font-size:28px}.bh .p{font-size:24px}.bh .c{font-size:13px}
+  .cvw{height:380px}
+  .memo{display:block}.memo>span{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--hair);font-size:12.5px}.memo>i{display:block;margin-top:4px}
+  .jump{display:none}
+  .cols{columns:3;column-gap:36px;column-rule:1px solid var(--rule)}
+  .cols .grp{break-inside:avoid-column}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:0 36px}
+  .two>*+*{border-left:0}
+  .lbcols{columns:2;column-gap:36px;column-rule:1px solid var(--rule)}
+  td{font-size:13px}td.f,td .f{font-size:12.5px}
+}
+@media (min-width:1180px){
+  .box{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:0 24px;align-content:start}
+  .box>.bh,.box>.chips{grid-column:1/-1}
+  .box .fig{grid-column:1}.stake{grid-column:2;grid-row:3;margin-top:0;border-top:0;padding-top:0}
+}
+@media (prefers-reduced-motion:no-preference){.rail button,.chips button,.tabs button{transition:background-color .12s}}
+</style>
 </head>
 <body>
-<!-- A placeholder. The real home page is being designed separately and replaces this file;
-     it reads api/home, api/asset, api/buckets and api/analysis (docs/api-home.md). -->
-<h1>Asset Cracker</h1>
-<p>Simulated money. No real orders are placed.</p>
-<p><a href="widget">The phone widget</a></p>
+<header class="strip"><div class="wrap">
+  <span class="name">Asset Cracker <i>Ledger</i></span>
+  <nav class="tabs" aria-label="Sections">
+    <button type="button" data-pane="home">Home</button>
+    <button type="button" data-pane="buckets">Buckets</button>
+    <button type="button" data-pane="evidence">Evidence</button>
+  </nav>
+  <span class="sim" title="Every figure on this page is simulated money">SIMULATED MONEY</span>
+</div></header>
+
+<div class="wrap">
+  <div class="dateline"><span id="dl-date">&nbsp;</span><span id="dl-rel" class="f"></span></div>
+  <div id="alerts" aria-live="polite"></div>
+
+  <main>
+  <section id="p-home" aria-label="Home">
+    <div class="ledger">
+      <div class="lede">
+        <span class="k">Total value · all buckets, marked to market</span>
+        <p class="total" id="total">—</p>
+        <p class="earn" id="earn">&nbsp;</p>
+        <div class="scl"><div class="chips" id="scale" role="group" aria-label="Time scale for earned"></div><div id="spark"></div></div>
+        <hr class="dbl">
+      </div>
+      <div id="comp" aria-label="Composition"></div>
+    </div>
+    <div class="mid">
+      <div class="rail" id="rail" role="group" aria-label="Assets"></div>
+      <article class="box" aria-live="off">
+        <div class="bh" id="bh"></div>
+        <div class="chips" id="crange" role="group" aria-label="Chart range"></div>
+        <div class="fig">
+          <div class="cvw"><canvas id="cv" role="img" aria-label="Price chart"></canvas></div>
+          <p class="cap" id="cap"></p>
+          <p class="leg" id="leg"></p>
+        </div>
+        <div class="stake" id="stake"></div>
+      </article>
+    </div>
+  </section>
+
+  <section id="p-buckets" aria-label="Buckets" hidden></section>
+  <section id="p-evidence" aria-label="Evidence" hidden></section>
+  </main>
+
+  <footer id="foot">Simulated money. No real orders are placed and no real funds are held. <a href="widget">Sean's widget</a></footer>
+</div>
+
+<script>
+"use strict";
+var $=function(id){return document.getElementById(id)};
+var SCALES=["1H","24H","7D","ALL"],CRANGES=["15M","1H","24H","7D"],DEF_COINS=["BTC","ETH","SOL","XRP","DOGE"];
+var SCALE_WORDS={"1H":"past hour","24H":"past 24 hours","7D":"past 7 days","ALL":"all time"};
+var RANGE_S={"15M":900,"1H":3600,"24H":86400,"7D":604800};
+var S={pane:"home",coin:"BTC",scale:"24H",cr:"15M",home:null,asset:null,buckets:null,analysis:null,sparks:{},sparkKey:"",fail:{},hover:null,allBets:false,fold:{}};
+try{var sv=JSON.parse(localStorage.getItem("ac.home")||"{}");if(SCALES.indexOf(sv.scale)>=0)S.scale=sv.scale;if(CRANGES.indexOf(sv.cr)>=0)S.cr=sv.cr;if(/^[A-Z0-9]{2,8}$/.test(sv.coin))S.coin=sv.coin}catch(e){}
+function save(){try{localStorage.setItem("ac.home",JSON.stringify({scale:S.scale,cr:S.cr,coin:S.coin}))}catch(e){}}
+
+/* ---------- formatting: never throw, dash for anything missing ----------
+   One sign convention: a negative is in (parentheses) and ink-red, a gain is "+" and ink-green.
+   fig() is for ruled columns: no "$" (totals pass dollar=true) and an invisible ")" after positives so digits line up. */
+var IP='<span class="ip">)</span>';
+function num(v){return typeof v==="number"&&isFinite(v)?v:null}
+function str(v){return typeof v==="string"?v:""}
+function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]})}
+function grp(x,d){return x.toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d})}
+function usd(c){c=num(c);if(c==null)return"—";var s="$"+grp(Math.abs(c)/100,2);return c<0?"("+s+")":s}
+function sgn(c){c=num(c);if(c==null)return"—";return c>0?"+"+usd(c):usd(c)}
+function fig(c,dollar,plus){c=num(c);if(c==null)return"—"+IP;var s=(dollar?"$":"")+grp(Math.abs(c)/100,2);return c<0?"("+s+")":(plus&&c>0?"+":"")+s+IP}
+function cls(v){v=num(v);return v==null||v===0?"mu":v>0?"up":"dn"}
+function pct(p,d){p=num(p);if(p==null)return"—";var s=Math.abs(p).toFixed(d==null?2:d)+"%";return p<0?"("+s+")":p>0?"+"+s:s}
+function px(v,d){v=num(v);d=num(d);return v==null?"—":grp(v,d==null?2:Math.max(0,Math.min(10,d)))}
+function fx(v,d){v=num(v);return v==null?"—":v.toFixed(d)}
+function arr(a){return Array.isArray(a)?a:[]}
+function objs(a){return arr(a).filter(function(o){return o&&typeof o==="object"})}
+function clock(t,sec){t=num(t);if(t==null)return"—";var o={hour:"numeric",minute:"2-digit"};if(sec)o.second="2-digit";return new Date(t*1000).toLocaleTimeString([],o)}
+function sinceText(t){t=num(t);if(t==null)return"—";var d=new Date(t*1000),n=new Date();
+  if(d.toDateString()===n.toDateString())return clock(t);
+  return d.toLocaleDateString([],{month:"short",day:"numeric"})+", "+clock(t)}
+function iso(s){var d=new Date(s);if(!s||isNaN(d))return"—";return d.toLocaleDateString([],{month:"short",day:"numeric"})+" "+d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",hour12:false})}
+function age(s){s=num(s);if(s==null)return"";return s<90?Math.round(s)+" s":s<5400?Math.round(s/60)+" min":Math.round(s/3600)+" h"}
+function mmss(s){s=Math.max(0,Math.floor(s));return Math.floor(s/60)+":"+("0"+s%60).slice(-2)}
+function setHTML(el,html){if(!el||el.__h===html)return;var a=document.activeElement,key=a&&el.contains(a)?a.getAttribute("data-k"):null;
+  el.innerHTML=html;el.__h=html;if(key){var bs=el.querySelectorAll("[data-k]");for(var i=0;i<bs.length;i++)if(bs[i].getAttribute("data-k")===key){bs[i].focus();break}}}
+function cssv(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()}
+function rgb(hex){var m=/^#?([0-9a-f]{6})$/i.exec(hex||"");if(!m)return null;var n=parseInt(m[1],16);return[n>>16&255,n>>8&255,n&255]}
+function lum(c){c=c.map(function(v){v/=255;return v<=.03928?v/12.92:Math.pow((v+.055)/1.055,2.4)});return .2126*c[0]+.7152*c[1]+.0722*c[2]}
+/* the asset's own colour, mixed toward ink until it reaches 3:1 against the current paper */
+function legible(hex){var c=rgb(hex),p=rgb(cssv("--paper")),k=rgb(cssv("--ink"));if(!c||!p||!k)return"var(--ink)";var lp=lum(p);
+  for(var i=0;i<=10;i++){var m=c.map(function(v,j){return Math.round(v+(k[j]-v)*i/10)}),l=lum(m);if((Math.max(l,lp)+.05)/(Math.min(l,lp)+.05)>=3)return"rgb("+m.join(",")+")"}return"var(--ink)"}
+function cleanPts(p){return arr(p).filter(function(q){return q&&num(q[0])!=null&&num(q[1])!=null})}
+function sparkPath(pts,w,h){pts=cleanPts(pts);if(pts.length<2)return null;
+  var x0=pts[0][0],x1=pts[pts.length-1][0],lo=Infinity,hi=-Infinity;pts.forEach(function(p){lo=Math.min(lo,p[1]);hi=Math.max(hi,p[1])});
+  if(hi===lo){hi+=1;lo-=1}var d="",y=function(v){return(h-1)-(v-lo)/(hi-lo)*(h-2)};
+  pts.forEach(function(p,i){d+=(i?"L":"M")+((p[0]-x0)/((x1-x0)||1)*w).toFixed(1)+" "+y(p[1]).toFixed(1)});
+  return{d:d,y0:y(pts[0][1]),yn:y(pts[pts.length-1][1])}}
+function assets(){var l=objs((S.home||{}).assets).filter(function(a){return str(a.coin)});return l.length?l:DEF_COINS.map(function(c){return{coin:c}})}
+function coins(){return assets().map(function(a){return a.coin})}
+function assetOf(c){var a=assets();for(var i=0;i<a.length;i++)if(a[i].coin===c)return a[i];return null}
+/* ASSUMPTION (the contract does not define it): an engine belongs to a coin when its name contains the ticker, e.g. KXETH15M. */
+function haltedNames(){return arr((S.home||{}).halted).filter(function(n){return str(n)})}
+function haltedFor(c){return haltedNames().filter(function(n){return n.toUpperCase().indexOf(String(c).toUpperCase())>=0})}
+function priceAge(a){var s=num(a&&a.price_age_s);if(s==null)return null;return s+(S.okAt?Math.max(0,(Date.now()-S.okAt)/1000):0)}
+
+/* ---------- fetching and the poll clock ---------- */
+function get(u){var ac=window.AbortController?new AbortController():null,to=setTimeout(function(){if(ac)ac.abort()},8000),o={cache:"no-store"};if(ac)o.signal=ac.signal;
+  return fetch(u,o).then(function(r){if(!r.ok)throw new Error(r.status);return r.json()}).then(function(j){clearTimeout(to);return j},function(e){clearTimeout(to);throw e})}
+var due={home:0,asset:0,buckets:0,analysis:0,sparks:0},busy={};
+function loadHome(){var sc=S.scale;if(busy.home===sc)return;busy.home=sc;due.home=Date.now()+5000;
+  get("api/home?range="+encodeURIComponent(sc)).then(function(j){if(busy.home===sc)busy.home=null;if(sc!==S.scale)return;S.home=j&&typeof j==="object"?j:{};S.fail.home=0;S.okAt=Date.now();
+    var cs=coins();if(cs.indexOf(S.coin)<0){S.coin=cs[0];S.asset=null;due.asset=0}renderHome();renderBox();if(!due.sparks)loadSparks()})
+  .catch(function(){if(busy.home===sc)busy.home=null;S.fail.home=(S.fail.home||0)+1;due.home=Date.now()+2000;renderAlerts()})}
+function loadAsset(){var c=S.coin,r=S.cr,k=c+"|"+r;if(busy.asset===k)return;busy.asset=k;due.asset=Date.now()+5000;
+  get("api/asset?coin="+encodeURIComponent(c)+"&range="+encodeURIComponent(r)).then(function(j){if(busy.asset===k)busy.asset=null;if(c!==S.coin||r!==S.cr)return;S.asset=j&&typeof j==="object"?j:{};S.fail.asset=0;renderBox()})
+  .catch(function(){if(busy.asset===k)busy.asset=null;S.fail.asset=(S.fail.asset||0)+1;due.asset=Date.now()+2000;renderBox()})}
+/* rail sparklines: api/home carries no per-asset series, so read api/asset one coin at a time, every five minutes; the live price is appended on each poll */
+function loadSparks(){if(!S.home)return;due.sparks=Date.now()+300000;var r={"1H":"1H","24H":"24H","7D":"7D","ALL":"7D"}[S.scale]||"24H";
+  if(S.sparkKey!==r){S.sparks={};S.sparkKey=r}var q=coins().slice();
+  (function next(){var c=q.shift();if(!c||S.sparkKey!==r)return;
+    if(c===S.coin&&S.cr===r&&S.asset&&cleanPts(S.asset.points).length>1){S.sparks[c]=S.asset.points;renderRail();return next()}
+    get("api/asset?coin="+encodeURIComponent(c)+"&range="+r).then(function(j){if(S.sparkKey===r){S.sparks[c]=arr(j&&j.points);renderRail()}},function(){}).then(next)})()}
+function loadBuckets(){if(busy.buckets)return;busy.buckets=1;due.buckets=Date.now()+15000;get("api/buckets").then(function(j){busy.buckets=0;S.buckets=j&&typeof j==="object"?j:{};S.fail.buckets=0;renderBuckets()}).catch(function(){busy.buckets=0;S.fail.buckets=1;due.buckets=Date.now()+2000;renderBuckets()})}
+function loadAnalysis(){if(busy.analysis)return;busy.analysis=1;due.analysis=Date.now()+60000;get("api/analysis").then(function(j){busy.analysis=0;S.analysis=j&&typeof j==="object"?j:{};S.fail.analysis=0;renderEvidence()}).catch(function(){busy.analysis=0;S.fail.analysis=1;due.analysis=Date.now()+5000;renderEvidence()})}
+function tick(){
+  if(document.hidden&&S.home)return;var n=Date.now(); /* a tab opened in the background still gets its first figures */
+  if(n>=due.home)loadHome();
+  if(S.pane==="home"){if(n>=due.asset)loadAsset();if(n>=due.sparks)loadSparks();renderBoxHead();renderCaption();if(S.cr==="15M")drawChart()}
+  if(S.pane==="buckets"&&n>=due.buckets)loadBuckets();
+  if(S.pane==="evidence"&&n>=due.analysis)loadAnalysis();
+  renderDateline()}
+setInterval(tick,1000);
+document.addEventListener("visibilitychange",function(){if(!document.hidden)tick()});
+
+/* ---------- routing ---------- */
+function pick(c){if(c!==S.coin){S.coin=c;S.asset=null;S.hover=null;S.allBets=false;due.asset=0;save()}}
+function route(){var h=location.hash.replace(/^#/,""),m=/^asset=([A-Za-z0-9]{2,8})$/.exec(h);
+  if(m){var c=m[1].toUpperCase();if(!S.home||coins().indexOf(c)>=0)pick(c);S.pane="home"}
+  else if(h==="buckets"||h==="evidence"||h==="home")S.pane=h;
+  ["home","buckets","evidence"].forEach(function(p){$("p-"+p).hidden=p!==S.pane});
+  [].forEach.call(document.querySelectorAll(".tabs button"),function(b){if(b.getAttribute("data-pane")===S.pane)b.setAttribute("aria-current","page");else b.removeAttribute("aria-current")});
+  if(S.pane==="home"){renderRail();renderBox()}
+  if(S.pane==="buckets")renderBuckets();if(S.pane==="evidence")renderEvidence();
+  tick()}
+window.addEventListener("hashchange",route);
+document.querySelector(".tabs").addEventListener("click",function(e){var b=e.target.closest("button");if(!b)return;location.hash=b.getAttribute("data-pane");window.scrollTo(0,0)});
+
+/* ---------- chips ---------- */
+function chips(el,list,cur,pre){setHTML(el,list.map(function(v){return'<button type="button" data-k="'+pre+v+'" data-v="'+v+'" aria-pressed="'+(v===cur)+'">'+v+"</button>"}).join(""))}
+$("scale").addEventListener("click",function(e){var b=e.target.closest("button");if(!b)return;S.scale=b.getAttribute("data-v");save();chips($("scale"),SCALES,S.scale,"s");due.home=0;due.sparks=0;tick()});
+$("crange").addEventListener("click",function(e){var b=e.target.closest("button");if(!b)return;S.cr=b.getAttribute("data-v");S.asset=null;S.hover=null;save();chips($("crange"),CRANGES,S.cr,"c");renderBox();due.asset=0;tick()});
+$("rail").addEventListener("click",function(e){var b=e.target.closest("button");if(!b)return;var c=b.getAttribute("data-v");if(!c)return;
+  if(history.replaceState)history.replaceState(null,"","#asset="+encodeURIComponent(c));else location.hash="asset="+c;
+  pick(c);renderRail();renderBox();tick()});
+$("stake").addEventListener("click",function(e){if(e.target.closest(".more")){S.allBets=!S.allBets;renderBox()}});
+
+/* ---------- dateline + alerts ---------- */
+function renderDateline(){var h=S.home||{},n=new Date();
+  $("dl-date").textContent=n.toLocaleDateString([],{weekday:"long",month:"long",day:"numeric",year:"numeric"})+" · "+n.toLocaleTimeString([],{hour:"numeric",minute:"2-digit",second:"2-digit"});
+  $("dl-rel").textContent=str(h.release)?"rel "+h.release:""}
+function renderAlerts(){var h=S.home||{},out="",raw=arr(h.halted),hn=haltedNames();
+  if(raw.length)out+='<div class="alert" role="alert"><b>HALTED</b> · '+(hn.length?hn.map(esc).join(", ")+" · "+(hn.length>1?"these engines are":"this engine is"):"an engine the service did not name is")+" placing no new bets</div>";
+  if(S.home&&h.healthy===false)out+='<div class="alert" role="alert"><b>UNHEALTHY</b> · the service reports it is not healthy</div>';
+  if(S.fail.home>=2)out+='<div class="alert soft" role="status">No answer from the service'+(S.okAt?" since "+clock(S.okAt/1000,1)+". Figures below are the last received.":".")+"</div>";
+  if(S.home&&h.simulated!==true)out+='<div class="alert soft">The service did not confirm simulated: true.</div>';
+  setHTML($("alerts"),out)}
+
+/* ---------- home: lede, composition, rail ---------- */
+function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.total:{};renderDateline();renderAlerts();
+  var v=num(t.value_cents);
+  if(v==null)setHTML($("total"),"—");else{var s=grp(Math.abs(v)/100,2),i=s.lastIndexOf(".");setHTML($("total"),(v<0?"(":"")+'<span class="cur">$</span>'+s.slice(0,i)+"<small>"+s.slice(i)+(v<0?")":"")+"</small>")}
+  var e=num(t.earned_cents),c=cls(e),rg=str(t.range)||S.scale,when,nohist=cleanPts(h.series).length<2,p=num(t.earned_pct);
+  if(t.window_complete===false){var just=num(t.since)!=null&&num(h.as_of)!=null&&h.as_of-t.since<120;
+    when="since "+sinceText(t.since)+(nohist?(just?" · recording began just now":" · no history on record yet"):"");
+    if(nohist&&!e)p=null}   /* nothing to compare with yet: a dash, not an invented 0.00% */
+  else when=SCALE_WORDS[rg]||rg;
+  setHTML($("earn"),'<span class="f '+c+'">'+sgn(e)+'</span><span class="f '+c+'">'+pct(p)+"</span><em>earned "+esc(when)+"</em>");
+  chips($("scale"),SCALES,S.scale,"s");
+  var sp=sparkPath(h.series,300,34);
+  setHTML($("spark"),sp?'<svg class="spark" viewBox="0 0 300 34" preserveAspectRatio="none" role="img" aria-label="Total value over the period"><line x1="0" x2="300" y1="'+sp.y0.toFixed(1)+'" y2="'+sp.y0.toFixed(1)+'" stroke="var(--rule)" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/><path d="'+sp.d+'" fill="none" stroke="var(--ink)" stroke-opacity=".55" stroke-width="1.25" vector-effect="non-scaling-stroke"/></svg>':"");
+  var rows='<div class="row hd"><span class="k">Composition</span><span class="k e">Earned</span><span class="k v">Value</span></div>';
+  rows+=objs(h.composition).map(function(r){var anti=r.key==="anti";
+    return'<div class="row"><span>'+esc(r.label||r.key||"—")+(num(r.buckets)!=null?' <span class="n">'+r.buckets+"</span>":"")+'</span><span class="f e '+cls(r.earned_cents)+'">'+fig(r.earned_cents,0,1)+'</span><span class="f v">'+fig(r.value_cents)+"</span>"+(anti?'<span class="note">a measurement, not a competitor</span>':"")+"</div>"}).join("");
+  rows+='<div class="row sum"><span>Total value</span><span class="f e '+c+'">'+fig(e,0,1)+'</span><span class="f v">'+fig(t.value_cents,1)+'</span></div><hr class="dbl" style="margin:0">';
+  rows+='<p class="memo"><i>Memo, outside the sum:</i><span>at risk <span class="f">'+fig(t.at_risk_cents)+'</span></span><span>unrealised <span class="f '+cls(t.unrealized_cents)+'">'+fig(t.unrealized_cents,0,1)+'</span></span><span>venue fees paid <span class="f">'+fig((h.money||{}).venue_fees_paid_cents)+"</span></span></p>";
+  setHTML($("comp"),rows);renderRail()}
+/* rail rows are built once per coin list and then only re-inked, so a tap or keyboard focus is never lost to a poll */
+var railSig=null;
+function renderRail(){var list=assets(),sig=list.map(function(a){return a.coin}).join("|"),el=$("rail");
+  if(sig!==railSig){el.innerHTML='<span class="k">Assets</span>'+list.map(function(){return'<button type="button"><span class="l1"></span><span class="px f"></span><span class="sp"></span><span class="st"></span></button>'}).join("");railSig=sig}
+  var bs=el.querySelectorAll("button"),asOf=num((S.home||{}).as_of);
+  list.forEach(function(a,i){var b=bs[i];if(!b)return;var c=a.coin,ch=num(a.change_pct),pa=num(a.price_age_s),stale=pa!=null&&pa>5,halt=haltedFor(c).length>0,ob=num(a.open_bets);
+    b.setAttribute("data-v",c);b.setAttribute("aria-pressed",String(c===S.coin));b.setAttribute("aria-label",(str(a.name)||c)+(halt?", engine halted":"")+(stale?", price is stale":""));
+    var pts=cleanPts(S.sparks[c]);if(pts.length&&asOf!=null&&num(a.price)!=null&&!stale&&asOf>pts[pts.length-1][0])pts=pts.concat([[asOf,a.price]]);var sp=sparkPath(pts,100,15);
+    setHTML(b.children[0],'<span class="sg" style="color:'+legible(a.colour)+'">'+esc(str(a.sign))+'</span><span class="tk">'+esc(c)+'</span><span class="ch f '+cls(ch)+'">'+pct(ch)+"</span>");
+    setHTML(b.children[1],px(a.price,a.decimals));
+    setHTML(b.children[2],sp?'<svg viewBox="0 0 100 15" preserveAspectRatio="none" aria-hidden="true"><path d="'+sp.d+'" fill="none" stroke="'+(ch>0?"var(--up)":ch<0?"var(--dn)":"var(--mute)")+'" stroke-width="1.2" vector-effect="non-scaling-stroke"/></svg>':"");
+    setHTML(b.children[3],stale||halt?'<span class="stale">'+(halt?"HALTED":"")+(halt&&stale?" · ":"")+(stale?"STALE "+age(pa):"")+"</span>":ob?ob+" open · $"+grp(Math.round((num(a.stake_cents)||0)/100),0):ob===0?"no stake":"—")})}
+
+/* ---------- the box ---------- */
+function initials(names){var m={},by={};names.forEach(function(n){var k=(n||"?")[0];(by[k]=by[k]||[]).push(n)});
+  Object.keys(by).forEach(function(k){by[k].forEach(function(n){m[n]=by[k].length>1?(n||"?").slice(0,2):k})});return m}
+function renderBoxHead(){var a=assetOf(S.coin)||{},d=S.asset||{},dec=num(d.decimals)!=null?d.decimals:a.decimals,pa=priceAge(a),stale=num(a.price_age_s)!=null&&a.price_age_s>5,hl=haltedFor(S.coin);
+  /* the change shown here is measured on the chart's own points, so it always matches the range chips under it */
+  var pts=cleanPts(d.points),chg=null,lab="";
+  if(pts.length>1&&pts[0][1]){chg=(pts[pts.length-1][1]-pts[0][1])/pts[0][1]*100;
+    lab=S.cr==="15M"&&d.round&&num(d.round.opens)!=null&&pts[0][0]<=d.round.opens+30?"since this round opened":pts[0][0]>Date.now()/1000-(RANGE_S[S.cr]||0)*.9?"since "+sinceText(pts[0][0]):"over this "+S.cr+" chart"}
+  setHTML($("bh"),"<h2>"+esc(str(a.name)||S.coin)+'</h2><span class="k">'+esc(S.coin)+'</span><span class="p f">'+px(a.price,dec)+"</span>"+
+    '<span class="c">'+(chg==null?"&nbsp;":'<span class="f '+cls(chg)+'">'+pct(chg)+"</span> "+esc(lab))+"</span>"+
+    (stale?'<span class="flag"><span class="stale">STALE · this price is '+age(pa)+" old</span></span>":"")+
+    (hl.length?'<span class="flag"><span class="stale">HALTED · '+hl.map(esc).join(", ")+" is placing no new bets</span></span>":""))}
+function renderBox(){var a=assetOf(S.coin)||{},d=S.asset||{};
+  renderBoxHead();chips($("crange"),CRANGES,S.cr,"c");renderCaption();drawChart();
+  /* stake: a small balance sheet */
+  var sc=num(d.stake_cents)!=null?d.stake_cents:a.stake_cents,svl=S.asset?d.stake_value_cents:a.stake_value_cents,diff=num(sc)!=null&&num(svl)!=null?svl-sc:null;
+  var out='<span class="k">Stake held in '+esc(S.coin)+"</span>";
+  out+='<div class="row"><span>At cost</span><span class="f">'+fig(sc)+"</span></div>";
+  out+='<div class="row"><span>Value now <span class="n">at the bid</span></span><span class="f">'+(num(svl)==null&&num(sc)?'<span class="mu">no bid</span>'+IP:fig(svl))+"</span></div>";
+  out+='<div class="row sum"><span>Unrealised</span><span class="f '+cls(diff)+'">'+fig(diff,1,1)+'</span></div><hr class="dbl" style="margin:0 0 8px">';
+  var pos=objs(d.positions),g={},keys=[];
+  pos.forEach(function(p){var k=[p.world==="anti"?1:0,str(p.engine),str(p.strategy),str(p.side)].join("|");
+    if(!g[k]){g[k]={p:p,ct:0,cost:0,val:0,pw:0,nov:false,noc:false};keys.push(k)}var o=g[k],n=num(p.contracts);
+    if(n==null)o.noc=true;else{o.ct+=n;if(num(p.entry_price)!=null)o.pw+=n*p.entry_price;else o.noc=true}
+    if(num(p.cost_cents)!=null)o.cost+=p.cost_cents;else o.nocost=true;if(num(p.value_cents)==null)o.nov=true;else o.val+=p.value_cents});
+  keys.sort();
+  if(!S.asset)out+='<p class="empty">'+(S.fail.asset?"No answer for this asset yet.":"Reading the book…")+"</p>";
+  else if(!keys.length)out+='<p class="empty">No open bets on '+esc(S.coin)+" right now.</p>";
+  else{var CAP=5,show=S.allBets||keys.length<=CAP+1?keys:keys.slice(0,CAP);
+    out+="<table><thead><tr><th>Open bets, by strategy</th><th>Cost</th><th>Now</th></tr></thead><tbody>";
+    show.forEach(function(k){var o=g[k],p=o.p,dn=o.nov||o.nocost?null:o.val-o.cost;
+      out+="<tr><td>"+esc(str(p.strategy)||"—")+(p.world==="anti"?'<span class="tag">anti</span>':"")+(p.engine==="v1"?'<span class="tag">v1</span>':"")+
+        "<small>"+esc(str(p.side)||"—")+" · "+(o.ct?o.ct:"—")+" @ "+(o.ct&&!o.noc?fx(o.pw/o.ct,2):"—")+'</small></td><td class="f">'+fig(o.nocost?null:o.cost)+'</td><td class="f '+cls(dn)+'">'+(o.nov?"—"+IP:fig(o.val))+"</td></tr>"});
+    out+="</tbody></table>";
+    if(keys.length>CAP+1)out+='<button type="button" class="more" data-k="more">'+(S.allBets?"Show fewer":"Show all "+keys.length+" lines")+"</button>"}
+  setHTML($("stake"),out)}
+function nearMarkers(){var g=S.geo,d=S.asset||{};if(S.hover==null||!g)return[];
+  return objs(d.markers).filter(function(m){return num(m.t)!=null&&Math.abs(g.X(m.t)-S.hover)<=9})}
+function renderCaption(){var a=assetOf(S.coin)||{},d=S.asset||{},r=d.round&&typeof d.round==="object"?d.round:null,hr=a.round&&typeof a.round==="object"?a.round:{},dec=num(d.decimals)!=null?d.decimals:a.decimals,out="",pts=cleanPts(d.points);
+  if(S.cr==="15M"&&r&&num(r.strike)!=null){var p=pts.length?pts[pts.length-1][1]:num(a.price),left=num(r.closes)!=null?r.closes-Date.now()/1000:null;
+    out=left==null?"":left>0?"<b>Closes in <span class=\"f\">"+mmss(left)+"</span></b> at "+clock(r.closes)+". ":"<b>Closed</b> at "+clock(r.closes)+"; awaiting the next round. ";
+    if(p!=null){var df=p-r.strike;out+="Spot is <span class=\"f "+(df>=0?"up":"dn")+"\">"+px(Math.abs(df),dec)+"</span> "+(df>=0?"above":"below")+" the strike of <span class=\"f\">"+px(r.strike,dec)+"</span>. "}
+    else out+="Strike <span class=\"f\">"+px(r.strike,dec)+"</span>. ";
+    if(num(hr.yes_bid)!=null||num(hr.yes_ask)!=null)out+="Yes <span class=\"f\">"+fx(hr.yes_bid,2)+"</span> bid / <span class=\"f\">"+fx(hr.yes_ask,2)+"</span> ask."}
+  else if(S.asset){if(pts.length>1){var lo=Infinity,hi=-Infinity;pts.forEach(function(q){lo=Math.min(lo,q[1]);hi=Math.max(hi,q[1])});
+      out="<b>"+esc(str(a.name)||S.coin)+", "+S.cr+".</b> "+sinceText(pts[0][0])+" to "+clock(pts[pts.length-1][0])+". Low <span class=\"f\">"+px(lo,dec)+"</span>, high <span class=\"f\">"+px(hi,dec)+"</span>."+
+        (pts[0][0]>Date.now()/1000-(RANGE_S[S.cr]||0)*.9?" The record is shorter than "+S.cr+".":"")}
+    else out="No prices on record for this range yet."}
+  setHTML($("cap"),out);
+  var mk=objs(d.markers).filter(function(m){return num(m.t)!=null&&num(m.price)!=null}),names={};mk.forEach(function(m){if(str(m.strategy))names[m.strategy]=1});var ini=initials(Object.keys(names).sort()),near=nearMarkers();
+  if(near.length)setHTML($("leg"),"<b>At "+clock(near[0].t,1)+":</b> "+near.slice(0,6).map(function(m){return esc(str(m.strategy)||"—")+(m.world==="anti"?" (anti)":"")+" "+(m.kind&&m.kind!=="bet"?"sold ":"")+esc(str(m.side))}).join(" · ")+(near.length>6?" · and "+(near.length-6)+" more":""));
+  else setHTML($("leg"),mk.length?"▲ bet UP · ▼ bet DOWN · □ early sale · hollow = anti-world twin · ×n = several together; touch the chart to read them"+(Object.keys(ini).length?" · ":"")+Object.keys(ini).map(function(n){return"<b>"+esc(ini[n])+"</b> "+esc(n)}).join(", "):"")}
+
+function drawChart(){var cv=$("cv");if(!cv||S.pane!=="home")return;var W=cv.clientWidth,H=cv.clientHeight;if(!W||!H)return;
+  var dpr=window.devicePixelRatio||1;if(cv.width!==Math.round(W*dpr)||cv.height!==Math.round(H*dpr)){cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr)}
+  var x=cv.getContext("2d");x.setTransform(dpr,0,0,dpr,0,0);x.clearRect(0,0,W,H);S.geo=null;
+  var ink=cssv("--ink"),mute=cssv("--mute"),rule=cssv("--rule"),hair=cssv("--hair"),paper=cssv("--paper"),mono="10px "+cssv("--mono"),sans="600 9px "+cssv("--sans");
+  var d=S.asset||{},a=assetOf(S.coin)||{},dec=num(d.decimals)!=null?d.decimals:num(a.decimals)!=null?a.decimals:2;
+  var pts=cleanPts(d.points);
+  if(!pts.length){x.fillStyle=mute;x.font="italic 13px "+cssv("--serif");x.textAlign="center";x.fillText(S.asset?"No prices on record yet":"Reading prices…",W/2,H/2);return}
+  var r=S.cr==="15M"&&d.round&&typeof d.round==="object"?d.round:null,strike=r?num(r.strike):null,mk=objs(d.markers).filter(function(m){return num(m.t)!=null&&num(m.price)!=null});
+  var t0=pts[0][0],t1=pts[pts.length-1][0];if(r&&num(r.opens)!=null&&num(r.closes)!=null){t0=Math.min(r.opens,t0);t1=Math.max(r.closes,t1)}if(t1<=t0)t1=t0+1;
+  var lo=Infinity,hi=-Infinity;pts.forEach(function(p){lo=Math.min(lo,p[1]);hi=Math.max(hi,p[1])});mk.forEach(function(m){lo=Math.min(lo,m.price);hi=Math.max(hi,m.price)});
+  if(strike!=null){lo=Math.min(lo,strike);hi=Math.max(hi,strike)}if(hi===lo){hi+=Math.abs(hi)*.001||1;lo-=Math.abs(lo)*.001||1}var pad=(hi-lo)*.16;lo-=pad;hi+=pad;
+  x.font=mono;var lw=Math.ceil(x.measureText(px(hi,dec)).width)+8,L=2,R=W-lw,T=14,B=H-17;
+  var X=function(t){return L+(t-t0)/(t1-t0)*(R-L)},Y=function(v){return B-(v-lo)/(hi-lo)*(B-T)};S.geo={X:X};
+  var lp=pts[pts.length-1],lx=X(lp[0]),lyy=Y(lp[1]);
+  /* grid and axis figures */
+  x.lineWidth=1;x.textBaseline="middle";x.textAlign="left";
+  for(var i=0;i<4;i++){var v=lo+(hi-lo)*(i+.5)/4,y=Math.round(Y(v))+.5;x.strokeStyle=hair;x.setLineDash([1,3]);x.beginPath();x.moveTo(L,y);x.lineTo(R,y);x.stroke();x.setLineDash([]);if(Math.abs(y-lyy)>13){x.fillStyle=mute;x.fillText(px(v,dec),R+6,y)}}
+  x.strokeStyle=rule;x.beginPath();x.moveTo(R+.5,T-8);x.lineTo(R+.5,B);x.stroke();
+  x.textBaseline="alphabetic";var long=t1-t0>86400*1.5;
+  [0,.5,1].forEach(function(f){var t=t0+(t1-t0)*f;x.textAlign=f===0?"left":f===1?"right":"center";x.fillStyle=mute;
+    x.fillText(long?new Date(t*1000).toLocaleDateString([],{month:"short",day:"numeric"}):clock(t),f===1?R:f===0?L:(L+R)/2,H-3)});
+  /* the part of the round still to come */
+  if(r&&lp[0]<t1){x.save();x.beginPath();x.rect(lx,T-8,R-lx,B-T+8);x.clip();x.strokeStyle=hair;x.beginPath();for(var k=-H;k<W;k+=7){x.moveTo(lx+k,B);x.lineTo(lx+k+H,B-H)}x.stroke();x.restore();
+    x.font=sans;x.fillStyle=mute;x.textAlign="right";if(R-lx>70)x.fillText("CLOSE "+clock(r.closes),R-3,T-3)}
+  /* strike line, labelled; the label sits on the far side of the line from the price, and moves right when the price line runs through the left corner */
+  if(strike!=null){var ys=Math.round(Y(strike))+.5;x.strokeStyle=ink;x.setLineDash([5,3]);x.beginPath();x.moveTo(L,ys);x.lineTo(R,ys);x.stroke();x.setLineDash([]);
+    x.font=sans;var lab="STRIKE "+px(strike,dec),tw=x.measureText(lab).width+8,up=lp[1]>=strike,ly=up?ys+3:ys-14,bx0=L+3;
+    var hit=function(bx){return pts.some(function(p){var qx=X(p[0]),qy=Y(p[1]);return qx>=bx-2&&qx<=bx+tw+2&&qy>=ly-5&&qy<=ly+16})};
+    if(hit(bx0)&&!hit(R-tw-3))bx0=R-tw-3;
+    x.fillStyle=paper;x.fillRect(bx0,ly,tw,11);x.strokeStyle=ink;x.strokeRect(bx0+.5,ly+.5,tw-1,10);x.fillStyle=ink;x.textAlign="left";x.textBaseline="middle";x.fillText(lab,bx0+4,ly+6);x.textBaseline="alphabetic"}
+  /* the price */
+  x.strokeStyle=ink;x.lineWidth=1.4;x.lineJoin="round";x.beginPath();pts.forEach(function(p,i){i?x.lineTo(X(p[0]),Y(p[1])):x.moveTo(X(p[0]),Y(p[1]))});x.stroke();
+  /* bets: markers that would land on each other are drawn once, with a count */
+  var names={};mk.forEach(function(m){if(str(m.strategy))names[m.strategy]=1});var ini=initials(Object.keys(names).sort()),cl=[];
+  mk.forEach(function(m){var mx=X(m.t);if(mx<L-2||mx>R+2)return;var kind=m.kind&&m.kind!=="bet"?"s":m.side==="UP"?"u":"d",c=null;
+    for(var j=0;j<cl.length;j++)if(cl[j].k===kind&&Math.abs(cl[j].x-mx)<=11){c=cl[j];break}
+    if(!c){c={k:kind,x:mx,y:0,n:0,real:0,name:""};cl.push(c)}c.y=(c.y*c.n+Y(m.price))/(c.n+1);c.n++;if(m.world!=="anti"){c.real++;c.name=c.name||str(m.strategy)}});
+  x.textAlign="center";var s=4.5;
+  cl.forEach(function(c){x.lineWidth=1.2;x.strokeStyle=ink;x.fillStyle=c.real?ink:paper;x.beginPath();var ty;
+    if(c.k==="s"){x.rect(c.x-3.5,c.y-3.5,7,7);ty=c.y-7}
+    else if(c.k==="u"){var o=c.y-5;x.moveTo(c.x,o-s*1.6);x.lineTo(c.x+s,o);x.lineTo(c.x-s,o);x.closePath();ty=o-s*1.6-3}
+    else{var o2=c.y+5;x.moveTo(c.x,o2+s*1.6);x.lineTo(c.x+s,o2);x.lineTo(c.x-s,o2);x.closePath();ty=o2+s*1.6+9}
+    x.fill();x.stroke();
+    var t=c.n>1?"×"+c.n:c.real&&c.k!=="s"?ini[c.name]||"":"";if(!t)return;
+    x.font="700 9px "+cssv("--sans");ty=Math.max(9,Math.min(B-1,ty));x.strokeStyle=paper;x.lineWidth=3;x.strokeText(t,c.x,ty);x.fillStyle=ink;x.fillText(t,c.x,ty)});
+  /* last price: a dot inked by which side of the strike it is on, and the figure boxed on the axis */
+  x.fillStyle=strike==null?ink:lp[1]>=strike?cssv("--up"):cssv("--dn");x.strokeStyle=paper;x.lineWidth=1.5;x.beginPath();x.arc(lx,lyy,3.5,0,6.3);x.fill();x.stroke();
+  x.font=mono;x.fillStyle=ink;x.fillRect(R+1,lyy-7,lw,14);x.fillStyle=paper;x.textAlign="left";x.textBaseline="middle";x.fillText(px(lp[1],dec),R+6,lyy+.5);x.textBaseline="alphabetic";
+  /* reading under the finger */
+  if(S.hover!=null){var bi=0,bd=Infinity;pts.forEach(function(p,i){var dd=Math.abs(X(p[0])-S.hover);if(dd<bd){bd=dd;bi=i}});var hp=pts[bi],hx=Math.round(X(hp[0]))+.5;
+    x.strokeStyle=mute;x.lineWidth=1;x.beginPath();x.moveTo(hx,T-8);x.lineTo(hx,B);x.stroke();x.fillStyle=ink;x.beginPath();x.arc(hx,Y(hp[1]),2.5,0,6.3);x.fill();
+    var txt=(long?sinceText(hp[0]):clock(hp[0],t1-t0<7200))+"  "+px(hp[1],dec);x.font=mono;var ww=x.measureText(txt).width+8,bx=Math.max(L,Math.min(R-ww,hx-ww/2));
+    x.fillStyle=paper;x.fillRect(bx,0,ww,13);x.fillStyle=ink;x.textAlign="left";x.fillText(txt,bx+4,10)}}
+(function(){var cv=$("cv");function mv(e){var b=cv.getBoundingClientRect();S.hover=e.clientX-b.left;drawChart();renderCaption()}
+  cv.addEventListener("pointermove",mv);cv.addEventListener("pointerdown",mv);cv.addEventListener("pointerleave",function(){S.hover=null;drawChart();renderCaption()})})();
+window.addEventListener("resize",drawChart);
+if(window.matchMedia){var mq=matchMedia("(prefers-color-scheme:dark)"),rd=function(){[].forEach.call($("rail").querySelectorAll("span"),function(n){n.__h=null});renderRail();drawChart()};mq.addEventListener?mq.addEventListener("change",rd):mq.addListener&&mq.addListener(rd)}
+
+/* ---------- buckets pane ---------- */
+/* the bar is equity against seed: the centre tick is the seed, the fill runs from it to equity, the bracket marks high water; one scale for every row */
+function bucketRow(b,D){var eq=num(b.equity_cents),seed=num(b.seed_cents),hw=num(b.high_water_cents),st=str(b.status)||"—";
+  var coin=/^KX([A-Z]+)15M/.exec(str(b.name)),d=eq!=null&&seed?((eq-seed)/seed*100):null;
+  var pos=function(v){return Math.max(0,Math.min(100,50+(v/seed-1)/D*50))},bar="";
+  if(seed&&eq!=null){var pe=pos(eq);bar='<i class="'+(eq>=seed?"up":"dn")+'" style="left:'+Math.min(50,pe).toFixed(1)+"%;width:"+Math.abs(pe-50).toFixed(1)+'%"></i>'}
+  bar+='<s style="left:50%"></s>';if(seed&&hw!=null&&hw>seed*1.002)bar+='<u style="left:'+pos(hw).toFixed(1)+'%"></u>';
+  var stTag=st==="active"?"active":'<span class="tag '+(st==="tripped"?"bad":st==="winding_down"?"warn":"")+'" style="margin-left:0">'+esc(st.replace("_"," "))+"</span>";
+  return'<div class="bk'+(st==="frozen"?" frozen":"")+'"><div class="t"><b>'+esc(str(b.strategy)||str(b.name)||"—")+"</b>"+(coin?'<span class="k">'+esc(coin[1])+"</span>":"")+(num(b.life)>1?'<span class="tag">life '+b.life+"</span>":"")+
+    '<span class="f">'+fig(eq)+'</span><span class="f d '+cls(d)+'">'+pct(d,1)+"</span></div>"+
+    '<div class="bar" role="img" aria-label="Equity '+usd(eq)+", seed "+usd(seed)+", high-water "+usd(hw)+'">'+bar+"</div>"+
+    '<div class="m"><span>'+stTag+"</span><span>life "+(num(b.life)!=null?b.life:"—")+"</span><span>"+(num(b.bets)!=null?b.bets:"—")+" bets</span><span>seed <span class=\"f\">"+usd(seed)+"</span></span><span>high <span class=\"f\">"+usd(hw)+"</span></span><span>allocated <span class=\"f\">"+usd(b.allocated_cents)+"</span></span>"+(num(b.at_risk_cents)?"<span>at risk <span class=\"f\">"+usd(b.at_risk_cents)+"</span></span>":"")+"</div></div>"}
+function pc(bps){return(bps/100).toFixed(bps%100?2:0)+"%"}
+function renderBuckets(){var el=$("p-buckets"),d=S.buckets;
+  if(!d){setHTML(el,'<p class="empty" style="margin-top:14px">'+(S.fail.buckets?"No answer from api/buckets yet. Trying again shortly.":"Reading the buckets…")+"</p>");return}
+  var bs=objs(d.buckets),G=[["strategies","Strategies","",[]],["anti","Anti-world twins","a measurement, not a competitor",[]],["v1","First engine","v1",[]]],D=.1;
+  bs.forEach(function(b){G[b.engine==="v1"?2:b.world==="anti"?1:0][3].push(b);var s=num(b.seed_cents);if(s){[b.equity_cents,b.high_water_cents].forEach(function(v){if(num(v)!=null)D=Math.max(D,Math.abs(v/s-1))})}});
+  var cut=D*1.05>.5;D=Math.min(.5,Math.ceil(D*1.05*20)/20);
+  var out='<div class="lede"><span class="k">The money story</span><h2 style="font-size:26px;margin-top:3px">Buckets</h2><p class="what">Bar: equity against seed. The centre tick <b style="font-style:normal">|</b> is the seed, the fill runs from it to equity, and the bracket <b style="font-style:normal">]</b> marks high water. Every bar spans ±'+Math.round(D*100)+"% of seed"+(cut?"; a bar that reaches the edge is cut off there":"")+". “Allocated” is the sustainment allocation taken to date.</p>"+
+    '<div class="jump" role="group" aria-label="Jump to">'+[["g0","Strategies"],["g1","Anti-world"],["g2","First engine"],["rule","Allocation rule"],["money","Set aside"],["ev","Notices"]].map(function(j){return'<button type="button" data-k="j'+j[0]+'" data-j="j-'+j[0]+'">'+j[1]+"</button>"}).join("")+'</div></div><div class="cols">';
+  G.forEach(function(g,gi){var eq=0,seed=0,al=0;g[3].forEach(function(b){eq+=num(b.equity_cents)||0;seed+=num(b.seed_cents)||0;al+=num(b.allocated_cents)||0});
+    out+='<details class="grp sec" id="j-g'+gi+'" data-g="'+g[0]+'"'+(S.fold[g[0]]?"":" open")+'><summary data-k="sum'+gi+'"><h2>'+g[1]+(g[2]?" <small>"+g[2]+"</small>":"")+'</h2><span class="f">'+(g[3].length?usd(eq):"—")+"</span></summary>"+
+      (g[3].length?g[3].map(function(b){return bucketRow(b,D)}).join("")+'<div class="gsum"><span>'+g[3].length+" buckets<small>seeded "+usd(seed)+" · allocated to date "+usd(al)+'</small></span><span class="f">'+usd(eq)+"</span></div>":'<p class="empty">None deployed.</p>')+"</details>"});
+  out+="</div>";
+  /* the rule in force */
+  var p=d.policy&&typeof d.policy==="object"?d.policy:{},rates=[["Winnings",p.winnings_bps,""],["Replenishment",p.replenish_bps,""],["Tax reserve",p.tax_bps,"government tax"],["Fee reserve",p.fees_bps,""]];
+  var sum=0,known=true;rates.forEach(function(r){if(num(r[1])==null)known=false;else sum+=r[1]});var unset=known&&sum===0;
+  out+='<div class="two"><div><div class="sec" id="j-rule"><span class="k">Sustainment allocation · rule in force</span><h2>'+(unset?"Not set yet":"Rule "+(num(p.id)!=null?"no. "+p.id:""))+'</h2><p class="what">'+(p.since_at?"In force since "+esc(iso(p.since_at))+". ":"")+(str(p.note)?"“"+esc(p.note)+"”":"")+"</p>";
+  if(unset)out+='<div class="notset"><b>All four rates are 0%</b>Nothing is taken from any bucket; all of a bucket’s gains stay in the bucket. This is the intended starting state, not a fault.</div>';
+  else if(known)out+='<div class="pol" role="img" aria-label="Allocation split">'+rates.map(function(r,i){return'<i style="width:'+Math.max(0,Math.min(100,r[1]/100))+"%;background:var(--ink);opacity:"+(1-i*.2)+'"></i>'}).join("")+"</div>";
+  rates.forEach(function(r){out+='<div class="row"><span>'+r[0]+' <span class="n">'+r[2]+'</span></span><span class="f '+(unset?"mu":"")+'">'+(num(r[1])==null?"—":pc(r[1]))+"</span></div>"});
+  out+='<div class="row sum"><span>Stays in the bucket that earned it</span><span class="f">'+(known?pc(10000-sum):"—")+'</span></div><hr class="dbl" style="margin:0"></div>';
+  /* money buckets */
+  var m=d.money&&typeof d.money==="object"?d.money:{},mb=[["Winnings",m.winnings_cents,""],["Replenishment",m.replenishment_cents,""],["Tax reserve",m.tax_reserve_cents,"government tax"],["Fee reserve",m.fee_reserve_cents,""]],ms=0,mkn=true;
+  mb.forEach(function(r){if(num(r[1])==null)mkn=false;else ms+=r[1]});
+  out+='<div class="sec" id="j-money"><span class="k">The four money buckets</span><h2>Set aside</h2>';
+  if(mkn&&ms===0&&unset)out+='<p class="what">All four are empty, as expected while the allocation rule is unset.</p>';
+  mb.forEach(function(r){out+='<div class="row"><span>'+r[0]+(r[2]?' <span class="n">'+r[2]+"</span>":"")+'</span><span class="f '+(r[1]===0?"mu":"")+'">'+fig(r[1])+"</span></div>"});
+  out+='<div class="row sum"><span>Set aside, total</span><span class="f">'+(mkn?fig(ms,1):"—"+IP)+'</span></div><hr class="dbl" style="margin:0">';
+  out+='<div class="row sub" style="margin-top:6px"><span>Deployed in live buckets</span><span class="f">'+fig(m.deployed_cents)+"</span></div>";
+  var vf=num(m.venue_fees_paid_cents);
+  out+='<div class="row sub"><span>Venue fees paid to date</span><span class="f '+(vf?"dn":"")+'">'+fig(vf==null?null:-Math.abs(vf))+"</span></div></div></div>";
+  /* events, identical neighbours folded */
+  var ev=objs(d.events),fold=[];ev.forEach(function(e){var l=fold[fold.length-1];if(l&&l.e.kind===e.kind&&l.e.note===e.note&&l.e.at===e.at)l.n++;else fold.push({e:e,n:1})});
+  out+='<div><div class="sec" id="j-ev"><span class="k">Recent bucket events · newest first</span><h2>Notices</h2>';
+  out+=fold.length?fold.map(function(f){var e=f.e;return'<div class="ev"><time>'+esc(iso(e.at))+'</time><span><span class="k">'+esc(str(e.kind)||"—")+"</span>"+(f.n>1?"<b>"+f.n+" buckets</b>":str(e.bucket)?"<b>"+esc(e.bucket)+"</b>":"")+(str(e.note)?' <span class="mu">· '+esc(e.note)+"</span>":"")+"</span></div>"}).join(""):'<p class="empty">Nothing has happened to a bucket yet.</p>';
+  out+="</div></div></div>";setHTML(el,out)}
+$("p-buckets").addEventListener("toggle",function(e){var g=e.target&&e.target.getAttribute&&e.target.getAttribute("data-g");if(g)S.fold[g]=!e.target.open},true);
+$("p-buckets").addEventListener("click",function(e){var b=e.target.closest("[data-j]");if(!b)return;var t=$(b.getAttribute("data-j"));if(t){if(t.tagName==="DETAILS")t.open=true;t.scrollIntoView()}});
+
+/* ---------- evidence pane ---------- */
+/* The verdict rule comes from the API (conventions). These are only the fallback when it is missing. The leaderboard and the
+   scorecard's exploratory cuts need a larger |t|, corrected for how many were tried. */
+var NEED_W=30,NEED_T=2,NEED_T_LB=2,NEED_T_CUT=2;
+function rules(d){var c=d&&d.conventions&&typeof d.conventions==="object"?d.conventions:{};
+  NEED_W=num(c.min_windows)||30;NEED_T=num(c.min_abs_t)||2;NEED_T_LB=num(c.leaderboard_min_abs_t)||NEED_T;NEED_T_CUT=num(c.scorecard_cut_min_abs_t)||NEED_T}
+function resolved(v){return str(v)&&v!=="unresolved"}
+function sdiff(v){v=num(v);if(v==null)return"—";return v<0?"("+fx(-v,4)+")":(v>0?"+":"")+fx(v,4)+IP}
+function vcell(r,need){need=need||NEED_T;var v=r.verdict,n=num(r.n_windows!=null?r.n_windows:r.windows);
+  if(resolved(v)){var good=v==="model better"||v==="ahead";return'<span class="vd '+(good?"up":"dn")+'">'+esc(v.replace("model ",""))+"</span>"}
+  if(n==null)return'<span class="prog">—</span>';
+  if(n<NEED_W)return'<span class="prog" title="unresolved: '+n+" of "+NEED_W+' windows">'+n+" of "+NEED_W+'<i><b style="width:'+Math.max(0,Math.min(100,n/NEED_W*100))+'%"></b></i></span>';
+  return'<span class="prog" title="unresolved: |t| below '+fx(need,2)+'">|t| '+fx(Math.abs(num(r.t)||0),2)+" &lt; "+fx(need,2)+"</span>"}
+function scoreTable(title,rows,key){rows=objs(rows);if(!rows.length)return"";
+  return'<div class="scroll"><table><thead><tr><th>'+title+"</th><th>Model</th><th>Market</th><th>Diff</th><th>Verdict</th></tr></thead><tbody>"+rows.map(function(r){var z=!num(r.n_windows),res=resolved(r.verdict);
+    return"<tr><td>"+esc(str(r[key])||"—")+'</td><td class="f">'+(z?"—":fx(r.brier_model,4))+'</td><td class="f">'+(z?"—":fx(r.brier_market,4))+'</td><td class="f '+(res?(r.diff<0?"up":"dn"):"mu")+'">'+(z?"—"+IP:sdiff(r.diff))+"</td><td>"+vcell(r,NEED_T_CUT)+"</td></tr>"}).join("")+"</tbody></table></div>"}
+function sname(r){return esc(str(r.strategy)||"—")+(r.world==="anti"?" anti":"")+" "+esc(str(r.engine))}
+function renderEvidence(){var el=$("p-evidence"),d=S.analysis;
+  if(!d){setHTML(el,'<p class="empty" style="margin-top:14px">'+(S.fail.analysis?"No answer from api/analysis yet. Trying again shortly.":"Reading the evidence…")+"</p>");return}
+  rules(d);var cov=d.coverage&&typeof d.coverage==="object"?d.coverage:{};
+  var sc=d.scorecard&&typeof d.scorecard==="object"?d.scorecard:{},o=sc.overall&&typeof sc.overall==="object"?sc.overall:{},n=num(o.n_windows)||0,t=num(o.t),res=resolved(o.verdict);
+  var out='<div class="lede"><span class="k">The evidence · computed '+clock(d.computed_at)+" · "+(num(d.windows_recorded)!=null?d.windows_recorded:"—")+' windows recorded</span></div>'+
+    (d.stale?'<p class="what"><b>Not current.</b> The last refresh failed'+(str(d.stale_reason)?": "+esc(d.stale_reason):"")+". These are the figures from "+clock(d.computed_at)+".</p>":"")+
+    (cov.complete===false?'<p class="what"><b>Still reading history.</b> '+(num(cov.markets_aggregated)!=null?grp(cov.markets_aggregated,0):"—")+" of "+(num(cov.markets_settled)!=null?grp(cov.markets_settled,0):"—")+" settled rounds read so far"+(num(cov.markets_unreconciled)?", "+cov.markets_unreconciled+" held back because their payouts are not all written yet":"")+". No verdict is given until every round is in.</p>":"")+
+    '<div class="two"><div><div class="sec" style="margin-top:10px"><span class="k">Scorecard · model v. market</span>';
+  out+='<div class="verdict"><h3>'+(res?esc(o.verdict.charAt(0).toUpperCase()+o.verdict.slice(1)):"Unresolved, as expected <span>"+(n<NEED_W?n+" of "+NEED_W+" windows":"|t| "+fx(Math.abs(t||0),2)+" of "+NEED_T)+"</span>")+"</h3>"+
+    '<p class="what" style="margin:2px 0 6px">'+(res?"Enough independent windows, and the difference can be told from zero.":(n===0?"No settled windows yet. ":"")+"A verdict needs "+NEED_W+" independent windows and |t| of at least "+NEED_T+"; until then a difference cannot be told from zero. A window is 15 minutes, so this takes days to weeks.")+"</p>"+
+    '<div class="meter"><span>Settled windows</span><div class="bar"><i style="width:'+Math.min(100,n/NEED_W*100)+'%"></i><s style="left:100%"></s></div><span class="f">'+n+" / "+NEED_W+"</span></div>"+
+    '<div class="meter"><span>|t| statistic</span><div class="bar"><i style="width:'+Math.min(100,Math.abs(t||0)/4*100)+'%"></i><s style="left:50%"></s></div><span class="f">'+(n&&t!=null?fx(Math.abs(t),2):"—")+" / "+NEED_T+"</span></div></div>";
+  out+='<div class="row"><span>Model Brier <span class="n">lower is better</span></span><span class="f">'+(n?fx(o.brier_model,4):"—")+IP+"</span></div>";
+  out+='<div class="row"><span>Market Brier</span><span class="f">'+(n?fx(o.brier_market,4):"—")+IP+"</span></div>";
+  out+='<div class="row sum"><span>Difference <span class="n" style="font-weight:400">± s.e.; positive = model worse</span></span><span class="f '+(res?(o.diff<0?"up":"dn"):"")+'">'+(n?sdiff(o.diff).replace(IP,"")+" ± "+fx(o.se,4)+IP:"—"+IP)+'</span></div><hr class="dbl" style="margin:0">';
+  out+='<p class="what">'+esc(str(sc.what))+" "+(num(o.n_rows)!=null?grp(o.n_rows,0)+" rows.":"")+"</p>";
+  out+=scoreTable("By time to close",sc.by_band,"band")+'<div style="height:10px"></div>'+scoreTable("By coin",sc.by_coin,"coin")+"</div></div>";
+  /* fills: strategies with no early sales fold into one line */
+  var f=d.fills&&typeof d.fills==="object"?d.fills:{},fr=objs(f.by_strategy),sold=fr.filter(function(r){return num(r.sells)>0}),none=fr.filter(function(r){return!(num(r.sells)>0)});
+  out+='<div><div class="sec" style="margin-top:10px"><span class="k">Fill realism</span><h2>Would those sales have filled?</h2><p class="what">'+esc(str(f.what))+"</p>";
+  if(sold.length){var nod=0,tot=0;out+='<div class="scroll"><table><thead><tr><th>Strategy</th><th>Sells</th><th>Beyond bid</th><th>Sale P&amp;L</th><th>If capped</th></tr></thead><tbody>'+sold.map(function(r){nod+=num(r.sells_without_depth)||0;tot+=r.sells;
+      return"<tr><td>"+esc(str(r.strategy)||"—")+(r.world==="anti"?'<span class="tag">anti</span>':"")+(r.engine==="v1"?'<span class="tag">v1</span>':"")+'</td><td class="f">'+r.sells+(num(r.sells_without_depth)?'<span class="mu">†</span>':'<span class="ip">†</span>')+'</td><td class="f">'+(num(r.share_beyond)==null?"—":Math.round(r.share_beyond*100)+"%")+'</td><td class="f '+cls(r.sale_pnl_cents)+'">'+fig(r.sale_pnl_cents)+'</td><td class="f '+cls(r.sale_pnl_capped_cents)+'">'+fig(r.sale_pnl_capped_cents)+"</td></tr>"}).join("")+"</tbody></table></div>";
+    if(nod)out+='<p class="what">† '+nod+" of "+tot+" sales were made before order-book depth was recorded. They are counted, never guessed at, so “if capped” covers only the rest.</p>"}
+  if(none.length)out+='<p class="what" style="font-style:normal"><b>No early sales yet:</b> '+none.map(sname).join(" · ")+".</p>";
+  if(!fr.length)out+='<p class="empty">No early sales on record yet.</p>';
+  out+="</div></div></div>";
+  /* leaderboard */
+  var lb=d.leaderboard&&typeof d.leaderboard==="object"?d.leaderboard:{},lr=objs(lb.rows);
+  out+='<div class="sec"><span class="k">Leaderboard · per strategy version</span><h2>Standings</h2><p class="what">'+esc(str(lb.what))+"</p>"+(d.conventions&&str(d.conventions.note)?'<p class="what">'+esc(d.conventions.note)+"</p>":"")+'<div class="lbcols">';
+  out+=lr.length?lr.map(function(r,i){var w=num(r.windows),res=resolved(r.verdict);
+    return'<div class="lb"><div class="t"><span class="r">'+(i+1)+"</span><b>"+esc(str(r.strategy)||"—")+"</b>"+(r.world==="anti"?'<span class="tag">anti</span>':"")+'<span class="tag">'+esc(str(r.engine)||"—")+"</span>"+(num(r.lives)>1?'<span class="tag">'+r.lives+" lives</span>":"")+
+      '<span class="f">'+fig(r.book_cents!=null?r.book_cents:r.equity_cents)+'</span><span class="f '+cls(r.lifetime_pnl_cents)+'" style="margin-left:0;min-width:78px;text-align:right">'+fig(r.lifetime_pnl_cents,0,1)+"</span></div>"+
+      '<div class="m"><span>'+(res?vcell(r,NEED_T_LB):w!=null&&w>=NEED_W?"unresolved, |t| below "+fx(NEED_T_LB,2):"unresolved, <span class=\"f\">"+(w==null?"—":w)+" of "+NEED_W+"</span> windows")+"</span><span>"+(num(r.bets)!=null?r.bets:"—")+" bets</span><span>per window <span class=\"f\">"+(w?sgn(r.mean_window_pnl_cents)+" ± "+usd(r.se_cents):"—")+"</span></span><span>t <span class=\"f\">"+(w?fx(r.t,2):"—")+"</span></span></div>"+
+      arr(r.flags).filter(str).map(function(fl){return'<div class="fl">⚑ '+esc(fl)+"</div>"}).join("")+"</div>"}).join(""):'<p class="empty">No strategies on the board yet.</p>';
+  out+="</div></div>";setHTML(el,out)}
+
+/* ---------- go ---------- */
+chips($("scale"),SCALES,S.scale,"s");chips($("crange"),CRANGES,S.cr,"c");renderDateline();renderRail();renderBox();route();
+</script>
 </body>
 </html>
