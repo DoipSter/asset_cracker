@@ -166,25 +166,43 @@ func (s *Store) AnalysisWindow(ctx context.Context, modelVersions []int64, marke
 	// is journaled or traded after the close.
 	from, to := closes.Add(-20*time.Minute), closes.Add(time.Minute)
 
-	// 1. Every fill, and for a SELL the bid ladder on its side in the latest snapshot of that
-	// market at or before it (in practice the same instant: the engine sold off that snapshot).
+	// 1. Every order that filled anything, and for a SELL the bid ladder on its side in the latest
+	// snapshot of that market at or before it (in practice the same instant: the engine sold off
+	// that snapshot).
+	// The contracts are the order's FILL rows added up, never trade_order.qty, and an order is
+	// read when it has at least one fill, whatever its status says. trade_order.qty is what was
+	// ASKED for. The first two engines always fill the whole order with one fill, so for them the
+	// two are the same number; an order that is partly filled (status 'partial', which the schema
+	// has allowed since 0001_init.sql) holds fewer contracts than it asked for, and its settlement
+	// row covers only those. Read from qty, Reconcile would find more held than settled and hold
+	// the market back for good, and one unready market keeps its whole WINDOW out of the evidence
+	// for every engine. Read with status = 'filled', the partial order would vanish instead and
+	// its settlement would have no fill to account for it: the same ending. An order that filled
+	// nothing (cancelled, rejected) moved no contracts and no money, and is not read at all.
+	// The money is still detail.cost and detail.payout: they are what actually moved for the
+	// contracts that filled (a sale's cost is the basis of the contracts SOLD, which no fill row
+	// carries), so they need no scaling. The lateral sum walks fill (order_id), a handful of rows.
+	// depth_priced is true for an order of the depth-aware paper broker (detail.v = 3; the older
+	// engines write no "v"): see analysis.Trade.DepthPriced.
 	// has_depth is false when that snapshot predates the recording of depth (release 87a2100) or
 	// there is none within five seconds: such a sale is counted and never priced.
 	// money_missing is true when detail has no cost, or a sale's has no payout: the zero that
 	// coalesce puts there is then not a figure, and the market is held back (analysis.MoneyMissing).
 	trades := map[int64][]analysis.Trade{}
 	rows, err := s.pool.Query(ctx, `
-		select o.market_id, o.id, o.bucket_id, o.action = 'sell', o.side, o.qty::float8, extract(epoch from o.placed_at)::float8,
+		select o.market_id, o.id, o.bucket_id, o.action = 'sell', o.side, f.qty, extract(epoch from o.placed_at)::float8,
 		       coalesce((o.detail->>'cost')::float8, 0), coalesce((o.detail->>'payout')::float8, 0),
 		       (o.detail->>'cost') is null or (o.action = 'sell' and (o.detail->>'payout') is null),
-		       coalesce(jsonb_typeof(book.bids) = 'array', false), coalesce((book.bids->0->>1)::float8, 0)
+		       coalesce(jsonb_typeof(book.bids) = 'array', false), coalesce((book.bids->0->>1)::float8, 0),
+		       coalesce(o.detail->>'v' = '3', false)
 		  from trade_order o
+		  join lateral (select sum(x.qty)::float8 as qty from fill x where x.order_id = o.id) f on f.qty > 0
 		  left join lateral (
 			select case o.side when 'yes' then e.quotes->'yes_bids' else e.quotes->'no_bids' end as bids
 			  from evaluation e
 			 where o.action = 'sell' and e.market_id = o.market_id and e.at <= o.placed_at and e.at >= o.placed_at - interval '5 seconds'
 			 order by e.at desc limit 1) book on true
-		 where o.market_id = any($1) and o.placed_at >= $2 and o.placed_at < $3 and o.status = 'filled'
+		 where o.market_id = any($1) and o.placed_at >= $2 and o.placed_at < $3
 		 order by o.id`, ids, from, to)
 	if err != nil {
 		return nil, nil, fmt.Errorf("fills: %w", err)
@@ -193,12 +211,14 @@ func (s *Store) AnalysisWindow(ctx context.Context, modelVersions []int64, marke
 		var market int64
 		var t analysis.Trade
 		var qty, at, cost, payout float64
-		if err := rows.Scan(&market, &t.OrderID, &t.BucketID, &t.Sell, &t.Side, &qty, &at, &cost, &payout, &t.MoneyMissing, &t.HasDepth, &t.Displayed); err != nil {
+		if err := rows.Scan(&market, &t.OrderID, &t.BucketID, &t.Sell, &t.Side, &qty, &at, &cost, &payout, &t.MoneyMissing, &t.HasDepth, &t.Displayed, &t.DepthPriced); err != nil {
 			rows.Close()
 			return nil, nil, err
 		}
 		// cents as the runner books them into the ledger: math.Round(dollars * 100)
-		t.Qty, t.Second, t.CostCents, t.PayoutCents = int(qty), int64(math.Floor(at)), int64(math.Round(cost*100)), int64(math.Round(payout*100))
+		// Fills are whole contracts, so their sum is a whole number and the rounding changes nothing;
+		// it only keeps a float that came out a hair under from losing a contract.
+		t.Qty, t.Second, t.CostCents, t.PayoutCents = int(math.Round(qty)), int64(math.Floor(at)), int64(math.Round(cost*100)), int64(math.Round(payout*100))
 		trades[market] = append(trades[market], t)
 	}
 	rows.Close()
@@ -316,13 +336,19 @@ func (s *Store) AnalysisWindow(ctx context.Context, modelVersions []int64, marke
 // AnalysisUnsettled is what is still in play, by bucket: early sales in rounds with no result
 // yet, and the cost of bets still open (bought, not sold, round not settled). Bounded to orders
 // placed since `since`.
+//
+// An order counts when it has at least one fill, whatever its status says, exactly as in
+// AnalysisWindow: a partly filled sale is a sale, and an order that filled nothing sold nothing
+// and cost nothing. detail.cost is what moved for the contracts that did fill (for a sale, the
+// basis of the contracts sold), so bought less sold is the cost still open under partial fills too.
 func (s *Store) AnalysisUnsettled(ctx context.Context, since time.Time) (sells map[int64]int, openCostCents map[int64]int64, err error) {
 	sells, openCostCents = map[int64]int{}, map[int64]int64{}
 	rows, err := s.pool.Query(ctx, `
 		select o.bucket_id, count(*) filter (where o.action = 'sell'),
 		       coalesce(sum(round(coalesce((o.detail->>'cost')::numeric, 0) * 100) * case o.action when 'buy' then 1 else -1 end), 0)::bigint
 		  from trade_order o join market m on m.id = o.market_id
-		 where o.placed_at >= $1 and o.status = 'filled' and m.result is null
+		 where o.placed_at >= $1 and m.result is null
+		   and exists (select 1 from fill f where f.order_id = o.id)
 		 group by 1`, since)
 	if err != nil {
 		return nil, nil, err

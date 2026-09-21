@@ -258,6 +258,10 @@ func LifeOf(name string) int {
 }
 
 // Buckets lists every simulated bucket, live ones first, each in the order it was created.
+//
+// Its bet count is the buy orders that FILLED something. A buy that was cancelled with no fill
+// bought nothing and is not a bet; one that was partly filled is one bet. The first two engines
+// fill every order whole, so for them this is every buy order, as it always was.
 func (s *Store) Buckets(ctx context.Context) ([]BucketRow, error) {
 	rows, err := s.pool.Query(ctx, `
 		select b.id, b.name, b.status, st.name, v.version, coalesce((v.params->>'anti')::boolean, false),
@@ -266,7 +270,8 @@ func (s *Store) Buckets(ctx context.Context) ([]BucketRow, error) {
 		                  where e.account_id = b.ledger_account_id and t.reason = 'seed'), 0)::bigint,
 		       coalesce((select sum(k.winnings_cents + k.replenish_cents + k.tax_cents + k.fees_cents)
 		                   from bucket_skim k where k.bucket_id = b.id), 0)::bigint,
-		       (select count(*) from trade_order o where o.bucket_id = b.id and o.action = 'buy')
+		       (select count(*) from trade_order o where o.bucket_id = b.id and o.action = 'buy'
+		           and exists (select 1 from fill f where f.order_id = o.id))
 		  from bucket b
 		  join strategy_version v on v.id = b.strategy_version_id
 		  join strategy st on st.id = v.strategy_id
@@ -373,6 +378,11 @@ func (s *Store) RecentBucketEvents(ctx context.Context, limit int) ([]BucketEven
 // bucket and side that held to the end, losers included (payout 0), and a position sold early
 // nets to no contracts and needs none. A round an engine never booked (it was halted) stays out
 // for good, which is honest: its payouts are not in the ledger either.
+//
+// Contracts held are the FILL rows added up (bought less sold), never trade_order.qty, and no
+// order is picked by its status: a partly filled order counts for what it filled, and one that
+// filled nothing has no fill row and counts for nothing. The money is the ledger entries of each
+// fill's own transfer, which is why every fill must have a transfer of its own.
 //
 // The query starts from the few markets settled in the range and reaches their orders through
 // trade_order (market_id), so a short range does not read every fill ever made.

@@ -288,8 +288,9 @@ tick tables by time and set a retention policy.
    ruled asset rail with the chart and stake box to its right (at phone width too), and
    separate Buckets and Evidence panes; the phone widget moved to `/widget`. Run against the
    Pi's dev database through two settlements on 2026-09-21: every statement executed, the
-   earned arithmetic matched the snapshot rows, the ledger summed to zero. NOT yet released to
-   prod as of that night. Not yet: the Flutter client, anything that writes.
+   earned arithmetic matched the snapshot rows, the ledger summed to zero. Released to prod as
+   78f5452 on 2026-09-21 at 08:20 PT, with migrations 0010 and 0011. Not yet: the Flutter
+   client, anything that writes.
 7. MCP, read-only; then proposals.
 8. More sources and instrument types.
 9. Live broker behind the gates in section 11.

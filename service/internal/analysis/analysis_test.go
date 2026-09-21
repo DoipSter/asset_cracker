@@ -234,8 +234,123 @@ func TestReconcile(t *testing.T) {
 	}
 }
 
+// Partly filled and cancelled orders, as the depth-aware broker will write them. Trade.Qty is what
+// FILLED (the reader adds up the fill rows), so the figures below are those sums, with what was
+// asked for in the comments. Bucket 31 asks for 348 yes and gets 168 (partial), asks for 100
+// more and gets none (cancelled: the reader never lists it; it is given here with Qty 0 to show
+// that it would count for nothing anyway), sells 168 and only 43 fill (partial), then sells again
+// and 25 fill: 168 - 43 - 25 = 100 held to the close. Bucket 32 is filled in two parts and sells
+// all of it in two partial sales: nothing held, so it needs no settlement row.
+func partialOrders() []Trade {
+	return []Trade{
+		{OrderID: 1, BucketID: 31, Side: "yes", Qty: 168, CostCents: 1231, DepthPriced: true},                                            // asked 348
+		{OrderID: 2, BucketID: 31, Side: "yes", Qty: 0, DepthPriced: true},                                                               // asked 100, cancelled
+		{OrderID: 3, BucketID: 31, Sell: true, Side: "yes", Qty: 43, CostCents: 315, PayoutCents: 400, DepthPriced: true},                // asked 168
+		{OrderID: 4, BucketID: 31, Sell: true, Side: "yes", Qty: 25, CostCents: 183, PayoutCents: 150, DepthPriced: true},                // asked 125
+		{OrderID: 5, BucketID: 32, Side: "no", Qty: 20, CostCents: 900, DepthPriced: true},                                               // asked 50
+		{OrderID: 6, BucketID: 32, Side: "no", Qty: 13, CostCents: 610, DepthPriced: true},                                               // asked 30
+		{OrderID: 7, BucketID: 32, Sell: true, Side: "no", Qty: 30, CostCents: 1373, PayoutCents: 1500, DepthPriced: true},               // asked 33
+		{OrderID: 8, BucketID: 32, Sell: true, Side: "no", Qty: 3, CostCents: 137, PayoutCents: 120, DepthPriced: true},                  // asked 3
+		{OrderID: 9, BucketID: 32, Sell: true, Side: "no", Qty: 0, MoneyMissing: true, HasDepth: true, Displayed: 50, DepthPriced: true}, // an exit that found no bid
+	}
+}
+
+func TestHeldAtClosePartialAndCancelled(t *testing.T) {
+	held := HeldAtClose(partialOrders())
+	if len(held) != 1 || held[Holding{31, "yes"}] != 100 {
+		t.Fatalf("got %+v, want bucket 31 holding 100 yes and nothing else", held)
+	}
+	// only cancelled orders: not a holding, and not a zero entry either
+	if held := HeldAtClose([]Trade{{OrderID: 1, BucketID: 31, Side: "yes", Qty: 0}, {OrderID: 2, BucketID: 31, Sell: true, Side: "yes", Qty: 0}}); len(held) != 0 {
+		t.Fatalf("got %+v", held)
+	}
+}
+
+// The defect S1 guards against: a settlement row covers the contracts that FILLED. Compared with
+// the 348 that were asked for, the market would be held back for ever, and its whole window with
+// it, for every engine.
+func TestReconcilePartialAndCancelled(t *testing.T) {
+	trades := partialOrders()
+	if bad := Reconcile(trades, map[Holding]Paid{{31, "yes"}: {100, 10000}}); len(bad) != 0 {
+		t.Fatalf("the settlement covers exactly what filled and was not sold: %+v", bad)
+	}
+	if bad := Reconcile(trades, map[Holding]Paid{{31, "yes"}: {100, 0}}); len(bad) != 0 {
+		t.Fatalf("a losing hold's row pays 0 and still covers it: %+v", bad)
+	}
+	// not yet written: held back, and the figure reported is what filled, not what was asked for
+	if bad := Reconcile(trades, nil); len(bad) != 1 || bad[0] != (Mismatch{Holding{31, "yes"}, 100, 0}) {
+		t.Fatalf("got %+v", bad)
+	}
+	// a row for the contracts ASKED for is wrong, and is said to be
+	if bad := Reconcile(trades, map[Holding]Paid{{31, "yes"}: {348, 34800}}); len(bad) != 1 || bad[0] != (Mismatch{Holding{31, "yes"}, 100, 348}) {
+		t.Fatalf("got %+v", bad)
+	}
+	// a market where every order was cancelled has nothing to reconcile and nothing missing
+	none := []Trade{{OrderID: 1, BucketID: 31, Side: "yes", Qty: 0, MoneyMissing: true}}
+	if bad := Reconcile(none, nil); len(bad) != 0 {
+		t.Fatalf("got %+v", bad)
+	}
+	if got := MoneyMissing(trades); len(got) != 0 {
+		t.Fatalf("an order that filled nothing has no money to be missing: %v", got)
+	}
+}
+
+// Bucket 31: -1231 + 400 + 150 + 10000 = 9319, ONE bet (the cancelled buy is none). Bucket 32:
+// -900 - 610 + 1500 + 120 = 110, two bets.
+func TestSettlePartialAndCancelled(t *testing.T) {
+	settled := map[Holding]Paid{{31, "yes"}: {100, 10000}}
+	f := Settle(Market{ID: 7, Coin: "DOGE", Closes: 900, Result: "yes"}, partialOrders(), settled)
+	if len(f.Rounds) != 2 || f.Rounds[31] != (BucketRound{9319, 1}) || f.Rounds[32] != (BucketRound{110, 2}) {
+		t.Fatalf("got %+v", f.Rounds)
+	}
+	// a bucket whose only order was cancelled placed no bet and has no row
+	f = Settle(Market{ID: 8, Result: "no"}, []Trade{{OrderID: 1, BucketID: 40, Side: "yes", Qty: 0}}, nil)
+	if len(f.Rounds) != 0 || len(f.Sales) != 0 {
+		t.Fatalf("got %+v", f)
+	}
+}
+
+// A depth-priced sale is passed through: what filled, as booked, nothing beyond the bid, whether
+// or not the best bid alone would have covered it. The older engines' sales beside it are capped
+// exactly as before, and their shared displayed size is not touched by it.
+func TestPriceSalesDepthPricedPassThrough(t *testing.T) {
+	trades := []Trade{
+		// 43 shown at the best bid; the broker took 43 there and 57 on the second level: 100 honest contracts
+		{OrderID: 1, BucketID: 31, Sell: true, Side: "yes", Qty: 100, Second: 50, CostCents: 733, PayoutCents: 950, HasDepth: true, Displayed: 43, DepthPriced: true},
+		// no ladder joined to it at all: still priced, it was capped when it was made
+		{OrderID: 2, BucketID: 31, Sell: true, Side: "yes", Qty: 5, Second: 51, CostCents: 40, PayoutCents: 30, DepthPriced: true},
+		// an older engine's sale of 100 against the same 43, same bucket and second: capped as ever
+		{OrderID: 3, BucketID: 31, Sell: true, Side: "yes", Qty: 100, Second: 50, CostCents: 1000, PayoutCents: 2000, HasDepth: true, Displayed: 43},
+	}
+	got := PriceSales(trades, "no")
+	if len(got) != 3 {
+		t.Fatalf("got %+v", got)
+	}
+	if got[0] != (PricedSale{BucketID: 31, Qty: 100, PnLCents: 217, CappedCents: 217}) {
+		t.Errorf("depth-priced sale: got %+v", got[0])
+	}
+	if got[1] != (PricedSale{BucketID: 31, Qty: 5, PnLCents: -10, CappedCents: -10}) {
+		t.Errorf("depth-priced sale with no ladder: got %+v", got[1])
+	}
+	// 43 of 100 fill: 2000 x 0.43 - 1000 = -140; the other 57 ride and yes lost
+	if got[2] != (PricedSale{BucketID: 31, Qty: 100, Beyond: 57, PnLCents: 1000, CappedCents: -140}) {
+		t.Errorf("older sale: got %+v", got[2])
+	}
+	// the partial sales of partialOrders come through with their filled quantities; the exit that filled nothing is no sale
+	got = PriceSales(partialOrders(), "yes")
+	if len(got) != 4 || got[0].Qty != 43 || got[1].Qty != 25 || got[2].Qty != 30 || got[3].Qty != 3 {
+		t.Fatalf("got %+v", got)
+	}
+	for _, p := range got {
+		if p.Beyond != 0 || p.WithoutDepth || p.CappedCents != p.PnLCents {
+			t.Errorf("got %+v", p)
+		}
+	}
+}
+
 func TestMoneyMissing(t *testing.T) {
-	got := MoneyMissing([]Trade{{OrderID: 1}, {OrderID: 2, MoneyMissing: true}, {OrderID: 3, Sell: true, MoneyMissing: true}})
+	got := MoneyMissing([]Trade{{OrderID: 1, Qty: 5}, {OrderID: 2, Qty: 5, MoneyMissing: true}, {OrderID: 3, Qty: 5, Sell: true, MoneyMissing: true},
+		{OrderID: 4, Qty: 0, MoneyMissing: true}}) // filled nothing: there is no money to be missing, and it must not hold the market back
 	if len(got) != 2 || got[0] != 2 || got[1] != 3 {
 		t.Fatalf("got %v", got)
 	}

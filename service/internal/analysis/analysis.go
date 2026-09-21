@@ -82,10 +82,15 @@ type BandSum struct {
 	Model, Market float64
 }
 
-// Trade is one simulated fill as the ledger recorded it. Cost and payout are the lot's own
-// figures (trade_order.detail.cost and .payout), both with their fee already inside: cost is
-// contracts x entry price PLUS the buying fee, payout is contracts x sale price LESS the selling
-// fee. A sale's row carries the cost of the lot it closed.
+// Trade is one simulated order that filled something, as the ledger recorded it. Cost and payout
+// are the order's own figures (trade_order.detail.cost and .payout), both with their fee already
+// inside: cost is contracts x entry price PLUS the buying fee, payout is contracts x sale price
+// LESS the selling fee. A sale's row carries the cost of the contracts it sold.
+//
+// Qty is the contracts that FILLED (the order's fill rows added up), never the contracts asked
+// for, and the money is for those contracts alone. The first two engines fill every order whole,
+// so for them the two are equal. An order that filled nothing is not a Trade at all: the reader
+// leaves it out, and a Trade with Qty 0 that reaches this package anyway counts for nothing.
 type Trade struct {
 	OrderID, BucketID int64
 	Sell              bool
@@ -97,6 +102,10 @@ type Trade struct {
 	MoneyMissing      bool    // the order's detail has no cost (or, for a sale, no payout): it cannot be booked
 	HasDepth          bool    // sales only: the market snapshot at that second recorded the bid ladder
 	Displayed         float64 // sales only: size shown at the best bid on that side; 0 if the ladder was empty
+	// DepthPriced is true for an order of the depth-aware paper broker (detail.v = 3). Such a sale
+	// was already limited to the sizes displayed on the recorded bid levels when it was made, so
+	// PriceSales does not cap it a second time.
+	DepthPriced bool
 }
 
 // BucketRound is what one bucket made on one market, and how many bets it placed there.
@@ -144,11 +153,16 @@ type Mismatch struct {
 }
 
 // HeldAtClose is what each bucket still held on each side when the round closed: contracts bought
-// less contracts sold. A sale always closes a whole lot, and both sides of that are lot.Contracts
-// in trade_order.qty, so the subtraction is exact. Holdings of zero are left out.
+// less contracts sold, per (bucket, side). Both are contracts that FILLED, so the subtraction is
+// exact however the position was built: whole lots closed whole (the first two engines), or an
+// average-cost position bought in parts and sold in parts, some orders only partly filled. An
+// order that filled nothing adds nothing. Holdings of zero are left out.
 func HeldAtClose(trades []Trade) map[Holding]int {
 	held := map[Holding]int{}
 	for _, t := range trades {
+		if t.Qty <= 0 { // filled nothing: the reader leaves these out already; a holding must not depend on that
+			continue
+		}
 		k := Holding{t.BucketID, t.Side}
 		if t.Sell {
 			held[k] -= t.Qty
@@ -206,7 +220,7 @@ func Reconcile(trades []Trade, settled map[Holding]Paid) []Mismatch {
 func MoneyMissing(trades []Trade) []int64 {
 	var out []int64
 	for _, t := range trades {
-		if t.MoneyMissing {
+		if t.MoneyMissing && t.Qty > 0 { // an order that filled nothing has no money to be missing
 			out = append(out, t.OrderID)
 		}
 	}
@@ -218,6 +232,9 @@ func MoneyMissing(trades []Trade) []int64 {
 func Settle(m Market, trades []Trade, settled map[Holding]Paid) MarketFacts {
 	f := MarketFacts{Market: m, Rounds: map[int64]BucketRound{}}
 	for _, t := range trades {
+		if t.Qty <= 0 { // filled nothing: no bet, no money, and no empty row for a bucket that only tried
+			continue
+		}
 		r := f.Rounds[t.BucketID]
 		if t.Sell {
 			r.PnLCents += t.PayoutCents
@@ -249,6 +266,12 @@ func Settle(m Market, trades []Trade, settled map[Holding]Paid) MarketFacts {
 // rata, so both fees are inside exactly as booked. The selling fee's round-up to a whole cent is
 // NOT recomputed for the smaller fill, so one sale can be off by under a cent. Displayed sizes
 // can be fractional; only whole contracts fill.
+//
+// A sale of the depth-aware paper broker (Trade.DepthPriced) is passed through as booked, with
+// nothing beyond the bid: it was capped across the recorded bid levels when it was made, and its
+// Qty is already only what filled. Capping it again at the best bid alone would report an honest
+// fill that reached the second level as overselling. It takes nothing from the displayed size
+// the older engines' sales share, because every bucket is its own paper world.
 func PriceSales(trades []Trade, result string) []PricedSale {
 	var sells []Trade
 	for _, t := range trades {
@@ -265,6 +288,11 @@ func PriceSales(trades []Trade, result string) []PricedSale {
 	out := make([]PricedSale, 0, len(sells))
 	for _, t := range sells {
 		p := PricedSale{BucketID: t.BucketID, Qty: t.Qty, PnLCents: t.PayoutCents - t.CostCents}
+		if t.DepthPriced {
+			p.CappedCents = p.PnLCents
+			out = append(out, p)
+			continue
+		}
 		if !t.HasDepth {
 			p.WithoutDepth = true
 			out = append(out, p)

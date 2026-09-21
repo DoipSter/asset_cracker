@@ -175,7 +175,7 @@ was staked again took its earlier life's bets with it.
 Added when built: `simulated: true`; `unmarked_bets` per bucket. `equity_cents` is cash plus open
 bets at the bid, the same marking as api/home (so it is a little above the widget's equity, which
 takes the selling fee off). `high_water_cents` is null for the first engine, which takes no
-sustainment allocation and keeps no mark. `bets` is the buys the database has recorded for that
+sustainment allocation and keeps no mark. `bets` is the buys that filled at least one contract, as the database has recorded them for that
 bucket. A frozen bucket shows the cash the ledger says it holds, which after reaping is 0. `life`
 is read from the bucket's name. `events[].note` is the stored detail put into words; a part the
 stored detail does not have is left out of the note, not shown as $0.00.
@@ -268,6 +268,17 @@ settlement was never written (a halted runner, or a stop between the two writes)
 `complete` false, and so keeps every verdict `unresolved`, until somebody deals with it. A fill
 whose recorded detail has no cost (or a sale's no payout) holds its market back the same way.
 
+**Contracts are what filled, not what was asked for.** Every quantity in this document (`bets`,
+`sells`, `contracts_sold`, what was held at the close) comes from an order's fill rows added up,
+never from the size the order asked for, and an order is counted when it has at least one fill,
+whatever its status says. A partly filled order counts for the contracts it filled: one bet, or
+one sale. An order that filled nothing (cancelled or rejected) is not a bet, not a sale, holds
+nothing and cost nothing. The money is the order's recorded `cost` and `payout`, which are for
+the filled contracts alone. The first two engines fill every order whole with a single fill, so
+for them nothing changes; the rule exists so that a partly filled order of a later engine, whose
+settlement row covers only what filled, can never fail to reconcile and keep its window out of
+the evidence for every engine.
+
 **Verdicts are corrected for the number of rows looked at together.** `scorecard.overall` is one
 hypothesis stated in advance and needs |t| >= `min_abs_t`. The leaderboard compares `trials`
 strategy versions at once, so its rows need |t| >= `leaderboard_min_abs_t`; the `by_band` and
@@ -292,7 +303,10 @@ any sustainment allocation. It is not book or equity less the seed.
 **Fills.** `sells` is every early sale in the windows read plus `unsettled_sells`. The contract
 and P&L figures cover only the `sells_priced` ones: settled rounds where depth was recorded. The
 displayed size is the best bid level alone. The simulator books a sale one cent under the bid and
-the size bid within that cent is not counted, so `contracts_beyond_bid` is an upper bound.
+the size bid within that cent is not counted, so `contracts_beyond_bid` is an upper bound. A sale
+by the depth-aware paper broker (its order detail has `"v": 3`) was already limited to the sizes
+displayed on the recorded bid levels when it was made, so it is passed through as booked:
+`contracts_beyond_bid` 0 for it and capped P&L equal to booked P&L. No such order exists yet.
 
 **Errors.** If a refresh fails, the document before it is served with `"stale": true` and
 `stale_reason`. If nothing has been computed yet the answer is **503, still JSON and still this
