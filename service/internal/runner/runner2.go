@@ -36,6 +36,9 @@ type Runner2 struct {
 	halted string
 	last   map[string]string // account+coin -> the last journaled signal, to thin the journal
 	lastAt map[string]float64
+	hwm    map[string]int64 // account -> its bucket's high-water mark, in cents
+	policy store.SkimPolicy
+	money  store.MoneyBuckets
 }
 
 const engine2 = "kalshi15m2"
@@ -56,7 +59,7 @@ func NewRunner2(ctx context.Context, db *store.Store, coins []Coin2) (*Runner2, 
 	if err != nil {
 		return nil, fmt.Errorf("v2 sim setup: %w", err)
 	}
-	r := &Runner2{db: db, setup: setup, coins: byCoin, last: map[string]string{}, lastAt: map[string]float64{}}
+	r := &Runner2{db: db, setup: setup, coins: byCoin, last: map[string]string{}, lastAt: map[string]float64{}, hwm: map[string]int64{}}
 	r.trader = k2.NewTrader(func() float64 { return unix(time.Now()) }, order, cal)
 	var saved k2.SavedState
 	if found, err := db.LoadEngineState(ctx, engine2, &saved); err != nil {
@@ -75,7 +78,81 @@ func NewRunner2(ctx context.Context, db *store.Store, coins []Coin2) (*Runner2, 
 			break
 		}
 	}
+	for name, b := range setup.Buckets { // a bucket's mark is its last recorded high, or what it was seeded with
+		mark, ok, err := db.HighWaterMark(ctx, b.ID)
+		if err != nil {
+			return nil, fmt.Errorf("v2 high-water marks: %w", err)
+		}
+		if !ok {
+			mark = cents(k2.StartBalance)
+		}
+		r.hwm[name] = mark
+	}
+	r.refreshMoney(ctx)
 	return r, nil
+}
+
+// refreshMoney re-reads the skim policy and where the money sits. A failure leaves the old
+// figures in place: they are for display, and the ledger is unaffected.
+func (r *Runner2) refreshMoney(ctx context.Context) {
+	if p, err := r.db.CurrentSkimPolicy(ctx); err == nil {
+		r.policy = p
+	} else {
+		slog.Warn("could not read the skim policy", "err", err)
+	}
+	if m, err := r.db.MoneyBucketBalances(ctx); err == nil {
+		r.money = m
+	}
+}
+
+// skim takes the policy's share of each bucket's gain above its high-water mark. Book value is
+// cash plus bets still live at cost, so a bucket is not skimmed on money that is merely tied up, and
+// one climbing back from a loss is not charged twice on the same dollars. What is taken really
+// leaves the strategy's balance: it goes on trading with what stays.
+func (r *Runner2) skim(ctx context.Context) error {
+	r.refreshMoney(ctx)
+	for _, a := range r.trader.Accounts {
+		b := r.setup.Buckets[a.Params.Name]
+		if b.Frozen || a.Retired {
+			continue
+		}
+		// The five coins settle a few seconds apart. Until every round that has CLOSED is settled
+		// for this account, some of its "book" is stakes whose fate is already decided but not yet
+		// known, and a skim now could take a gain that is about to be a loss. (Seen on dev: Model
+		// was skimmed on $40.65 after the first coin settled, then lost $13 on the others.)
+		pending := false
+		for _, lot := range a.Log {
+			if lot.Status == "open" && lot.Close <= unix(time.Now()) {
+				pending = true
+				break
+			}
+		}
+		if pending {
+			continue
+		}
+		book := cents(a.Cash + a.Committed())
+		mark := r.hwm[a.Params.Name]
+		if book <= mark {
+			continue
+		}
+		gain, p := book-mark, r.policy
+		k := store.Skim{Bucket: b, Policy: p, BookCents: book, HWMBefore: mark,
+			Winnings: gain * p.Winnings / 10000, Replenish: gain * p.Replenish / 10000, Tax: gain * p.Tax / 10000, Fees: gain * p.Fees / 10000}
+		if taken := k.Taken(); taken > 0 {
+			if float64(taken)/100 > a.Cash { // the gain is tied up in open bets: take it when it is cash
+				continue
+			}
+			r.trader.Withdraw(a.Params.Name, float64(taken)/100)
+		}
+		if err := r.db.RecordSkim(ctx, r.setup, k); err != nil {
+			return r.halt(fmt.Errorf("recording a skim of %s: %w", b.Name, err), k.Taken() > 0)
+		}
+		r.hwm[a.Params.Name] = book - k.Taken()
+		if k.Taken() > 0 {
+			slog.Info("skimmed", "bucket", b.Name, "gain_cents", gain, "winnings", k.Winnings, "replenishment", k.Replenish, "tax", k.Tax, "fees", k.Fees)
+		}
+	}
+	return nil
 }
 
 // Seed primes each coin's volatility and index offset from the exchanges.
@@ -230,7 +307,21 @@ func (r *Runner2) Settled(ctx context.Context, coin string, marketID int64, info
 	if err := r.db.RecordSettlements(ctx, r.setup, marketID, now, rows); err != nil {
 		return r.halt(fmt.Errorf("recording v2 settlements: %w", err), len(rows) > 0)
 	}
-	return r.afterEvents(ctx, events, closed, true)
+	if err := r.afterEvents(ctx, events, closed, true); err != nil {
+		return err
+	}
+	if len(events) == 0 {
+		return nil
+	}
+	// A settlement is when gains become real, so it is when the skim is taken.
+	if err := r.skim(ctx); err != nil {
+		return err
+	}
+	if err := r.db.SaveEngineState(ctx, engine2, r.trader.Export()); err != nil {
+		return r.halt(fmt.Errorf("saving v2 state after a skim: %w", err), true)
+	}
+	r.refreshMoney(ctx)
+	return nil
 }
 
 // afterEvents closes and replaces the buckets of accounts that ran out, then saves the state.
@@ -243,6 +334,7 @@ func (r *Runner2) afterEvents(ctx context.Context, events, closed []k2.Event, sa
 			return r.halt(fmt.Errorf("closing %s: %w", b.Name, err), true)
 		}
 		r.setup.Buckets[e.Strategy] = next
+		r.hwm[e.Strategy] = cents(k2.StartBalance)
 		slog.Warn("v2 account ran out", "strategy", e.Strategy, "left", e.DiedWith, "retired", e.Retired, "now", next.Name)
 		save = true
 	}
@@ -294,13 +386,17 @@ func (r *Runner2) Snapshot() map[string]any {
 		accounts = append(accounts, map[string]any{"name": a.Params.Name, "blurb": a.Params.Blurb, "anti": a.Params.Anti,
 			"equity": eq, "cash": a.Cash, "pnl": eq - k2.StartBalance, "pnl_pct": (eq/k2.StartBalance - 1) * 100,
 			"bets": a.Bets, "wins": a.Wins, "losses": a.Losses, "joined": a.Participated(), "log": log, "log_total": len(a.Log),
-			"views": views, "bankruptcies": a.Bankruptcies, "retired": a.Retired, "at_risk": a.Committed()})
+			"views": views, "bankruptcies": a.Bankruptcies, "retired": a.Retired, "at_risk": a.Committed(),
+			"high_water": float64(r.hwm[a.Params.Name]) / 100})
 	}
 	coins := map[string]any{}
 	for name, c := range r.trader.Coins {
 		offset, samples := c.OffsetStatus()
 		coins[name] = map[string]any{"index_offset": offset, "offset_samples": samples, "rounds_monitored": c.RoundsMonitored}
 	}
-	return map[string]any{"engine": "v2", "halted": r.halted, "start_balance": k2.StartBalance, "total_cap": k2.TotalCap * k2.StartBalance,
+	p := r.policy
+	money := map[string]any{"buckets": r.money, "policy": map[string]any{"id": p.ID, "since": p.EffectiveAt, "note": p.Note,
+		"winnings_bps": p.Winnings, "replenish_bps": p.Replenish, "tax_bps": p.Tax, "fees_bps": p.Fees}}
+	return map[string]any{"engine": "v2", "halted": r.halted, "money": money, "start_balance": k2.StartBalance, "total_cap": k2.TotalCap * k2.StartBalance,
 		"rounds_monitored": r.trader.RoundsMonitored, "accounts": accounts, "coins": coins}
 }

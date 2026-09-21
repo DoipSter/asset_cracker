@@ -29,8 +29,11 @@ type SimSetup struct {
 	ActorID        int64
 	VenueLedgerID  int64
 	FeesLedgerID   int64
-	PoolLedgerID   int64
+	PoolLedgerID   int64 // replenishment (ledger kind common_pool)
 	OwnersLedgerID int64
+	WinningsID     int64 // the skim that is kept (ledger kind profit_pool)
+	TaxReserveID   int64
+	FeeReserveID   int64
 	Buckets        map[string]SimBucket // by strategy name
 	venueAccountID int64
 }
@@ -67,7 +70,13 @@ func (s *Store) EnsureSimSetup(ctx context.Context, prefix, family string, versi
 	if err != nil {
 		return out, err
 	}
-	if _, err = account("profit_pool", "profit pool (sim)"); err != nil {
+	if out.WinningsID, err = account("profit_pool", "profit pool (sim)"); err != nil {
+		return out, err
+	}
+	if out.TaxReserveID, err = account("tax_reserve", "tax reserve (sim)"); err != nil {
+		return out, err
+	}
+	if out.FeeReserveID, err = account("fee_reserve", "fee reserve (sim)"); err != nil {
 		return out, err
 	}
 	if out.VenueLedgerID, err = account("venue", "kalshi paper venue"); err != nil {
@@ -205,10 +214,18 @@ func (s *Store) CloseBucket(ctx context.Context, setup SimSetup, b SimBucket, re
 		                           values ($1, 'sim', $2, $3, $4, '{}', 0) returning id`, next.Name, setup.venueAccountID, next.LedgerAccountID, next.VersionID).Scan(&next.ID); err != nil {
 			return b, err
 		}
-		if err := transfer("deposit", "sim funds for "+next.Name, setup.OwnersLedgerID, setup.PoolLedgerID, seedCents); err != nil {
+		// Restarting a dead bucket is what the replenishment pool is for. Only what it cannot
+		// cover is brought in from outside, and that shortfall is recorded as its own deposit.
+		var inPool int64
+		if err := tx.QueryRow(ctx, `select coalesce(sum(amount_cents), 0) from ledger_entry where account_id = $1`, setup.PoolLedgerID).Scan(&inPool); err != nil {
 			return b, err
 		}
-		if err := transfer("seed", "seed "+next.Name, setup.PoolLedgerID, next.LedgerAccountID, seedCents); err != nil {
+		if short := seedCents - inPool; short > 0 {
+			if err := transfer("deposit", fmt.Sprintf("replenishment short by %d cents for %s", short, next.Name), setup.OwnersLedgerID, setup.PoolLedgerID, short); err != nil {
+				return b, err
+			}
+		}
+		if err := transfer("seed", "seed "+next.Name+" from replenishment", setup.PoolLedgerID, next.LedgerAccountID, seedCents); err != nil {
 			return b, err
 		}
 		if err := event(next.ID, "seeded", fmt.Sprintf("replaces %s", b.Name)); err != nil {
@@ -400,4 +417,135 @@ func (s *Store) LoadEngineState(ctx context.Context, series string, into any) (b
 		return false, err
 	}
 	return true, json.Unmarshal(blob, into)
+}
+
+// SkimPolicy is the split, in basis points of a bucket's gain above its high-water mark.
+type SkimPolicy struct {
+	ID                             int64
+	Winnings, Replenish, Tax, Fees int64
+	EffectiveAt                    time.Time
+	Note                           string
+}
+
+// CurrentSkimPolicy is the newest policy for simulated money.
+func (s *Store) CurrentSkimPolicy(ctx context.Context) (SkimPolicy, error) {
+	var p SkimPolicy
+	err := s.pool.QueryRow(ctx, `select id, winnings_bps, replenish_bps, tax_bps, fees_bps, effective_at, note
+	                               from skim_policy where mode = 'sim' order by id desc limit 1`).
+		Scan(&p.ID, &p.Winnings, &p.Replenish, &p.Tax, &p.Fees, &p.EffectiveAt, &p.Note)
+	return p, err
+}
+
+// HighWaterMark is a bucket's high-water mark after its last recorded high; ok is false if it
+// has never made one, in which case its mark is what it was seeded with.
+func (s *Store) HighWaterMark(ctx context.Context, bucketID int64) (cents int64, ok bool, err error) {
+	err = s.pool.QueryRow(ctx, `select hwm_after_cents from bucket_skim where bucket_id = $1 order by id desc limit 1`, bucketID).Scan(&cents)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	return cents, err == nil, err
+}
+
+// Skim is one bucket reaching a new high, and what was taken from the gain.
+type Skim struct {
+	Bucket                         SimBucket
+	Policy                         SkimPolicy
+	BookCents, HWMBefore           int64
+	Winnings, Replenish, Tax, Fees int64
+}
+
+// Taken is everything the skim removes from the bucket.
+func (k Skim) Taken() int64 { return k.Winnings + k.Replenish + k.Tax + k.Fees }
+
+// RecordSkim books a skim as one transfer out of the bucket into the money buckets, and records
+// the new high-water mark. With every rate at zero it records the mark and moves nothing.
+func (s *Store) RecordSkim(ctx context.Context, setup SimSetup, k Skim) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var transferID *int64
+	if k.Taken() > 0 {
+		var id int64
+		if err := tx.QueryRow(ctx, `insert into ledger_transfer (mode, reason, memo, created_by) values ('sim', 'tax', $1, $2) returning id`,
+			fmt.Sprintf("skim of %s under policy %d", k.Bucket.Name, k.Policy.ID), setup.ActorID).Scan(&id); err != nil {
+			return err
+		}
+		batch := &pgx.Batch{}
+		add := func(account, cents int64) {
+			if cents != 0 {
+				batch.Queue(`insert into ledger_entry (transfer_id, account_id, mode, amount_cents) values ($1, $2, 'sim', $3)`, id, account, cents)
+			}
+		}
+		add(k.Bucket.LedgerAccountID, -k.Taken())
+		add(setup.WinningsID, k.Winnings)
+		add(setup.PoolLedgerID, k.Replenish)
+		add(setup.TaxReserveID, k.Tax)
+		add(setup.FeeReserveID, k.Fees)
+		if err := tx.SendBatch(ctx, batch).Close(); err != nil {
+			return fmt.Errorf("skim entries: %w", err)
+		}
+		transferID = &id
+		if _, err := tx.Exec(ctx, `insert into bucket_event (bucket_id, kind, detail, actor_id)
+		        values ($1, 'taxed', jsonb_build_object('winnings', $2::bigint, 'replenishment', $3::bigint, 'tax', $4::bigint, 'fees', $5::bigint), $6)`,
+			k.Bucket.ID, k.Winnings, k.Replenish, k.Tax, k.Fees, setup.ActorID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `insert into bucket_skim (bucket_id, policy_id, book_cents, hwm_before_cents, gain_cents, winnings_cents,
+	            replenish_cents, tax_cents, fees_cents, hwm_after_cents, transfer_id)
+	        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		k.Bucket.ID, k.Policy.ID, k.BookCents, k.HWMBefore, k.BookCents-k.HWMBefore, k.Winnings, k.Replenish, k.Tax, k.Fees,
+		k.BookCents-k.Taken(), transferID); err != nil {
+		return fmt.Errorf("skim record: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// MoneyBuckets is where the simulated money sits right now, in cents.
+type MoneyBuckets struct {
+	Deployed      int64 `json:"deployed"` // cash in the strategies' buckets that are still trading
+	Winnings      int64 `json:"winnings"`
+	Replenishment int64 `json:"replenishment"`
+	TaxReserve    int64 `json:"tax_reserve"`
+	FeeReserve    int64 `json:"fee_reserve"`
+	FeesPaid      int64 `json:"fees_paid"` // to the venue, on every fill so far
+}
+
+// MoneyBucketBalances reads them from the ledger.
+func (s *Store) MoneyBucketBalances(ctx context.Context) (MoneyBuckets, error) {
+	var m MoneyBuckets
+	rows, err := s.pool.Query(ctx, `
+		select a.kind, coalesce(sum(e.amount_cents), 0)::bigint
+		  from ledger_account a left join ledger_entry e on e.account_id = a.id
+		  left join bucket b on b.ledger_account_id = a.id
+		 where a.mode = 'sim' and (a.kind <> 'bucket' or b.status <> 'frozen')
+		 group by a.kind`)
+	if err != nil {
+		return m, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind string
+		var cents int64
+		if err := rows.Scan(&kind, &cents); err != nil {
+			return m, err
+		}
+		switch kind {
+		case "bucket":
+			m.Deployed = cents
+		case "profit_pool":
+			m.Winnings = cents
+		case "common_pool":
+			m.Replenishment = cents
+		case "tax_reserve":
+			m.TaxReserve = cents
+		case "fee_reserve":
+			m.FeeReserve = cents
+		case "fees":
+			m.FeesPaid = cents
+		}
+	}
+	return m, rows.Err()
 }

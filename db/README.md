@@ -38,6 +38,7 @@ connect as a role that does not own the tables. Not set up yet.
 | Where things trade | `source`, `instrument`, `market` |
 | Strategies and the trials registry | `strategy`, `strategy_version` |
 | Money | `ledger_account`, `ledger_transfer`, `ledger_entry`, view `ledger_balance` |
+| The skim | `skim_policy` (dated rates), `bucket_skim` (every new high, and what was taken) |
 | Capital | `venue_account`, `bucket`, `bucket_event`, view `venue_account_virtual_cash` |
 | Time series, partitioned by month | `price_tick`, `evaluation`, `decision` |
 | Trading | `trade_order`, `fill`, `settlement` |

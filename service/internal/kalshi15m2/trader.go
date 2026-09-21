@@ -496,6 +496,16 @@ func (t *Trader) State() map[string]any {
 		"accounts": accounts, "coins": coins}
 }
 
+// Withdraw takes money out of an account from outside the engine: the platform's skim. The
+// Python has no such thing. It is not used in a parity replay, and it means a live account's
+// balance stops being comparable with the same strategy run in the Python app, by exactly what
+// was skimmed.
+func (t *Trader) Withdraw(name string, dollars float64) {
+	if a := t.Account(name); a != nil {
+		a.Cash -= dollars
+	}
+}
+
 // ---- saving and restoring -------------------------------------------------------------------
 
 // SavedAccount and SavedState are what survives a restart. Prices seen and volatility are not

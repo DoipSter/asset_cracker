@@ -73,11 +73,17 @@
   .strat.on { background:var(--button); }
   .strat span { position:absolute; } .strat .n { left:14px; top:5px; font-size:12px; } .strat .b { left:14px; top:21px; font-size:10px; font-weight:400; color:var(--muted); }
   .strat .e { right:80px; top:5px; font-size:12px; } .strat .p { right:14px; top:5px; font-size:12px; } .strat .r { right:14px; top:21px; font-size:10px; font-weight:400; color:var(--muted); }
+  .money { order:0; flex-basis:100%; display:flex; flex-wrap:wrap; justify-content:center; gap:8px; }
+  .money .tile { background:var(--card); border-radius:14px; padding:8px 14px; min-width:132px; }
+  .money .tile span { display:block; font-size:10px; font-weight:400; color:var(--muted); } .money .tile b { font-size:16px; }
+  .money .tile.dep { background:var(--button); }
+  .money .rule { flex-basis:100%; text-align:center; font-size:11px; font-weight:400; color:var(--muted); }
   .banner { position:fixed; left:0; right:0; bottom:0; padding:6px 12px; font-size:11px; font-weight:400; text-align:center; color:var(--muted); background:#05070c; }
   .banner b { color:var(--down); }
 </style>
 </head>
 <body>
+<div class="money" id="money" hidden></div>
 <div class="panel" id="panelAnti" hidden></div>
 <div class="phone">
   <div class="screen">
@@ -266,7 +272,19 @@ function notify() {
       seen[key] = true; }
     seen[a.name] = true; }
 }
-function render() { renderPhone(); renderPanel("anti"); renderPanel("real"); notify(); }
+// Where the simulated money sits: what the strategies are trading with, and the four buckets a
+// skim feeds. Rates are a dated policy a person sets; with none set, the page says so.
+function renderMoney() {
+  const el = $("money"), e = v2(), m = e && e.money; el.hidden = !m; if (!m) return;
+  const b = m.buckets, p = m.policy, pct = (bps) => (bps / 100).toFixed(bps % 100 ? 2 : 0) + "%", total = p.winnings_bps + p.replenish_bps + p.tax_bps + p.fees_bps;
+  const tile = (name, cents, hint, cls) => '<div class="tile ' + (cls || "") + '" title="' + esc(hint) + '"><span>' + name + "</span><b>" + usd(cents / 100) + "</b></div>";
+  el.innerHTML = tile("Capital in deployment", b.deployed, "Cash in the strategy buckets that are still trading. Open bets are out in the market, so this dips while they are live.", "dep") +
+    tile("Winnings", b.winnings, "The skim off the top that is kept.") + tile("Replenishment", b.replenishment, "Restarts buckets that died, and receives whatever a dead bucket had left.") +
+    tile("Tax reserve", b.tax_reserve, "Set aside from gains so that tax is never a surprise.") + tile("Fee reserve", b.fee_reserve, "Set aside for fees that may come later: withdrawals, venue charges.") +
+    '<div class="rule">' + (total ? "Of each bucket's gain above its own high-water mark: winnings " + pct(p.winnings_bps) + "  ·  replenishment " + pct(p.replenish_bps) + "  ·  tax " + pct(p.tax_bps) + "  ·  fees " + pct(p.fees_bps) + "  ·  " + pct(10000 - total) + " stays and compounds"
+      : "No skim is set: every rate is 0%, so gains stay in their buckets. Set one with tools/skim-policy.sh") + "  ·  venue fees paid so far " + usd(b.fees_paid / 100) + "</div>";
+}
+function render() { renderMoney(); renderPhone(); renderPanel("anti"); renderPanel("real"); notify(); }
 
 async function poll() {
   try { status = await (await fetch("/api/status", { cache: "no-store" })).json(); } catch { status = null; }

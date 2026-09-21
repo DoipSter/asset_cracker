@@ -118,6 +118,33 @@ netting or a conflict rule before real trading. **Open.**
 
 ## 6. Money flows
 
+**Built 2026-09-21** for simulated money, on the version 2 buckets (migration 0008,
+`service/internal/runner/runner2.go`, `tools/skim-policy.sh`). Brad's names for the buckets:
+
+| Bucket | What it is | In the ledger |
+|---|---|---|
+| Capital in deployment | what the strategies trade with | accounts of kind `bucket` |
+| Winnings | a skim off the top, kept | `profit_pool` |
+| Replenishment | restarts buckets that died; receives what dead ones had left | `common_pool` |
+| Tax reserve | a share of gains set aside, so tax is never a surprise | `tax_reserve` |
+| Fee reserve | for fees that may come later: withdrawals, venue charges. Kalshi's per-trade fee is already paid on every fill | `fee_reserve` |
+
+The skim is taken at settlement, from a bucket's gain above its own **high-water mark** (book
+value: cash plus still-live bets at cost), so a bucket climbing back from a loss is not charged
+twice on the same dollars. A bucket is skimmed only once every round that has closed is settled
+for it: the five coins settle seconds apart, and on dev a bucket skimmed after the first coin
+went on to lose the others. What is taken really leaves the strategy's balance. The split is a
+dated row in `skim_policy`, not code; each skim points at the policy that set it, and every new
+high is recorded in `bucket_skim` whether or not anything was taken. **Every rate starts at
+zero**: a tax rate is a fact about its owner, not something to guess. A restart is funded from
+replenishment first; only the shortfall is brought in from outside, as its own recorded deposit.
+
+Still to decide: whether the twins are skimmed like the originals (today they are, so a pair
+stays comparable); the rates themselves.
+
+The earlier sketch of these flows, kept for the parts not built yet:
+
+
 Success tax (bucket to common pool), reap (closed bucket to common pool), seed (common pool to
 new bucket), take (common pool to profit pool), expansion (profit pool funds more buckets or
 higher limits, by approval). Rates and thresholds are configuration and are Brad's and
