@@ -46,6 +46,10 @@ def run(rounds, px, track_worst=False, **overrides):
     underwater each position ever got, as a fraction of what it cost."""
     t = kt.KalshiTrader(tempfile.mkdtemp(prefix="ac_stops_"), {"BTC": {}})
     t.save = t._append_csv = t._log_exits = t._log_round = lambda *a, **k: None
+    # No reviving here. Live, a strategy that runs out is staked again so the
+    # comparison keeps running; in a backtest that would inject fresh capital and
+    # turn a wipe-out into an apparent profit. A dead strategy stays dead.
+    t._check_broke = lambda *a, **k: []
     acct = t.accounts["Scalper"]
     acct.params = dict(acct.params)
     for key, value in overrides.items():

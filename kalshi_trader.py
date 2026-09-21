@@ -122,6 +122,31 @@ STRATEGIES = [
      "tau": (LOTTERY["min_tau"], 900), "band": (0.0, LOTTERY["max_ask"])},
 ]
 
+def _mirrored(params):
+    """The anti-world twin of a strategy: identical in every respect except that it believes
+    the opposite of what the model says.
+
+    Inverting the belief rather than simply flipping the chosen side matters. The side falls
+    out of the belief anyway, but so do the stake, the edge test and the early exits, and a
+    twin that inverted only the side would size itself off a conviction it does not hold.
+    """
+    return dict(params, name=f"Anti {params['name']}", anti=True, invert=True,
+                blurb=f"Takes the other side of {params['name']}")
+
+
+# Twelve accounts, in matched pairs. The pair is the point: both sides pay the spread and the
+# fee on every trade, so if a strategy and its mirror BOTH lose, the losses are costs rather
+# than bad judgement -- and no amount of tuning the model will fix that. If a mirror wins,
+# the original is systematically wrong and worth inverting. Nothing else in this project
+# separates those two explanations.
+ANTI_STRATEGIES = [_mirrored(p) for p in STRATEGIES]
+ALL_STRATEGIES = STRATEGIES + ANTI_STRATEGIES
+
+
+def strategies(anti=False):
+    return ANTI_STRATEGIES if anti else STRATEGIES
+
+
 CSV_FIELDS = ["time", "strategy", "coin", "event", "ticker", "side", "contracts", "price",
               "multiplier", "fee", "cost", "payout", "pnl", "result", "strike",
               "btc_price", "final_value", "balance_after", "model_prob", "edge",
@@ -283,13 +308,24 @@ class Account:
     def step(self, market, price, now, p_model, paused, ctx=None):
         """Look at the open window: maybe sell, maybe bet. Returns a list of events."""
         prm = self.params
+        if prm.get("invert"):
+            # The whole of the anti-world. Everything downstream -- which side looks cheap,
+            # how big the edge is, what an open position is worth on the way out -- is
+            # derived from this number, so inverting it here inverts all of it consistently.
+            p_model = 1 - p_model
         tau = market["close"] - now
         ya, na, yb = market["yes_ask"], market["no_ask"], market["yes_bid"]
         if not price or ya <= 0 or na <= 0:
             self.views[market.get("coin")] = None
             return []
         if prm.get("kind") == "lottery":
-            return self._lottery(market, price, now, p_model, paused, ctx or {})
+            ctx = ctx or {}
+            if prm.get("invert") and ctx.get("p_tail") is not None:
+                # The lottery path reads its probability from ctx, not from p_model, so
+                # inverting p_model above does nothing for it. Copy rather than mutate: one
+                # ctx is shared by every account in this step.
+                ctx = dict(ctx, p_tail=1 - ctx["p_tail"])
+            return self._lottery(market, price, now, p_model, paused, ctx)
 
         mid = (yb + ya) / 2 if yb > 0 else ya
         p_up = mid + prm["shrink"] * (p_model - mid)  # blend with what the market believes
@@ -677,8 +713,10 @@ class KalshiTrader:
                             cfg.get("decimals", 2))
             for name, cfg in coins.items()
         }
-        self.accounts = {p["name"]: Account(p) for p in STRATEGIES}
+        self.accounts = {p["name"]: Account(p) for p in ALL_STRATEGIES}
+        # One tracked strategy per world, because the two are shown in their own panels
         self.selected = STRATEGIES[0]["name"]
+        self.selected_anti = ANTI_STRATEGIES[0]["name"]
         self.selected_coin = next(iter(self.coins))
         self.paused = False
         self.started_at = time.time()
@@ -694,8 +732,8 @@ class KalshiTrader:
     def coin(self, name=None):
         return self.coins[name or self.selected_coin]
 
-    def account(self, name=None):
-        return self.accounts[name or self.selected]
+    def account(self, name=None, anti=False):
+        return self.accounts[name or (self.selected_anti if anti else self.selected)]
 
     def markets(self):
         """Every coin's live quotes, keyed by coin, for valuing open bets."""
@@ -706,9 +744,17 @@ class KalshiTrader:
         return {name: c.rounds_monitored for name, c in self.coins.items()}
 
     def select(self, name):
+        """Track this strategy. Which panel it belongs to follows from the strategy itself,
+        so a caller never has to say."""
         if name in self.accounts:
-            self.selected = name
+            if self.accounts[name].params.get("anti"):
+                self.selected_anti = name
+            else:
+                self.selected = name
             self.save(force=True)
+
+    def tracked(self, anti=False):
+        return self.selected_anti if anti else self.selected
 
     def select_coin(self, name):
         if name in self.coins:
@@ -1033,11 +1079,15 @@ class KalshiTrader:
 
     # ---- reporting --------------------------------------------------------
 
-    def standings(self):
-        """Every strategy, best balance first."""
+    def standings(self, anti=False):
+        """One world's strategies, best balance first. The two are never mixed: a mirror
+        beating its original is the comparison that means something, not its rank among
+        twelve."""
         mk = self.markets()
         rows = []
         for a in self.accounts.values():
+            if bool(a.params.get("anti")) is not anti:
+                continue
             eq = a.equity(mk)
             rows.append({"name": a.name, "blurb": a.params["blurb"], "equity": eq,
                          "pnl_pct": (eq / START_BALANCE - 1) * 100, "bets": a.bets,
@@ -1098,6 +1148,7 @@ class KalshiTrader:
                 if name in self.accounts:
                     self.accounts[name].load(acct)
             self.selected = d.get("selected", self.selected)
+            self.selected_anti = d.get("selected_anti", self.selected_anti)
             self.selected_coin = d.get("selected_coin", self.selected_coin)
             self.paused = bool(d.get("paused", False))
             self.started_at = float(d.get("started_at", self.started_at))
@@ -1122,7 +1173,7 @@ class KalshiTrader:
                     c.offset_obs.append((float(row[0]), float(row[1])))
         except Exception:
             # No file yet, or a format we don't recognise: start every account fresh.
-            self.accounts = {p["name"]: Account(p) for p in STRATEGIES}
+            self.accounts = {p["name"]: Account(p) for p in ALL_STRATEGIES}
 
     def save(self, force=False):
         """Write kalshi_balance.json. Throttled to every few seconds unless forced."""
@@ -1136,6 +1187,7 @@ class KalshiTrader:
             "updated": datetime.now().isoformat(timespec="seconds"),
             "starting_balance_each": START_BALANCE,
             "selected": self.selected,
+            "selected_anti": self.selected_anti,
             "selected_coin": self.selected_coin,
             "leader": standings[0]["name"],
             "paused": self.paused,
@@ -1188,7 +1240,7 @@ class KalshiTrader:
                     os.replace(path, f"{root}_old_{stamp}{ext}")
                 except OSError:
                     pass
-        self.accounts = {p["name"]: Account(p) for p in STRATEGIES}
+        self.accounts = {p["name"]: Account(p) for p in ALL_STRATEGIES}
         self.started_at = time.time()
         self.rounds_monitored = 0
         self._round_close = None

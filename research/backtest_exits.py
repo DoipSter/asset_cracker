@@ -48,6 +48,9 @@ def run(rounds, px, strategy="Scalper", **params):
     t._append_csv = lambda *a, **k: None
     t._log_exits = lambda *a, **k: None
     t._log_round = lambda *a, **k: None
+    # No reviving here: live it keeps the comparison running, but in a backtest it would
+    # inject fresh capital and turn a wipe-out into an apparent profit.
+    t._check_broke = lambda *a, **k: []
     acct = t.accounts[strategy]
     acct.params = copy.deepcopy(acct.params)
     for key, value in params.items():

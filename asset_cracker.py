@@ -34,7 +34,8 @@ from ctypes import wintypes
 from datetime import datetime, timedelta, timezone
 from tkinter import font as tkfont
 
-from kalshi_trader import START_BALANCE, STRATEGIES, KalshiTrader, parse_amount
+from kalshi_trader import (ANTI_STRATEGIES, START_BALANCE, STRATEGIES, KalshiTrader,
+                           parse_amount, strategies)
 
 APP_NAME = "Asset Cracker"
 APP_ID = "AssetCracker.App"  # how Windows knows our notifications belong to us
@@ -594,7 +595,8 @@ class Hub:
         self.root = root
         self.active = active
         self.monitors = {}
-        self.panel = None  # one panel for every coin; it follows whichever page is showing
+        # One panel per world, each following whichever coin page is showing.
+        self.panels = {False: None, True: None}
         # One trader for the whole app: each strategy has a single balance that every coin
         # draws on, so a bet on SOL spends the same money as a bet on BTC.
         self.trader = KalshiTrader(data_dir(), ASSETS)
@@ -615,27 +617,33 @@ class Hub:
         self.active = coin
         self.trader.select_coin(coin)  # the panel follows the page you are looking at
         self.redraw_tabs()
-        if self.panel:
-            self.panel.follow()
-            if self.panel.is_open:
-                self.panel.refresh()
+        for panel in self.panels.values():
+            if panel:
+                panel.follow()
+                if panel.is_open:
+                    panel.refresh()
 
     def follow(self, moved):
         """The phone was dragged: carry the hidden pages and the open panels along."""
         for m in self.monitors.values():
             if m is not moved:
                 m.geometry(f"+{moved.winfo_x()}+{moved.winfo_y()}")
-        if self.panel:
-            self.panel.follow()
+        for panel in self.panels.values():
+            if panel:
+                panel.follow()
 
-    def toggle_panel(self, coin=None):
-        if self.panel is None:
-            self.panel = SidePanel(self)
-        self.panel.toggle()
+    def toggle_panel(self, anti=False):
+        if self.panels[anti] is None:
+            self.panels[anti] = SidePanel(self, anti=anti)
+        self.panels[anti].toggle()
+
+    def open_panels(self):
+        return [p for p in self.panels.values() if p and p.is_open]
         self.redraw_tabs()
 
-    def is_open(self, coin=None):
-        return self.panel is not None and self.panel.is_open
+    def is_open(self, anti=False):
+        p = self.panels[anti]
+        return p is not None and p.is_open
 
     def redraw_tabs(self):
         for m in self.monitors.values():
@@ -849,21 +857,31 @@ class Monitor(Drawing, tk.Toplevel):
         self._button("bell", self.toggle_mute)
 
     def _draw_tab(self):
-        """The side button on the phone's right edge. There is one panel now, and it shows
-        whichever coin's page you are looking at."""
+        """The side buttons. Right opens the strategies, left opens their anti-world twins;
+        both follow whichever coin's page you are looking at. The left one is tinted in the
+        DOWN colour so the two worlds are never confused at a glance."""
         c = self.canvas
         c.delete("tab")
         top, bottom = 196, 296
         mid = (top + bottom) / 2
-        opened = self.hub.is_open()
-        tags = ("btn", "tab")
-        self.rrect(W - 4, top, W + TAB, bottom, 7, fill=UP if opened else BEZEL, tags=tags)
-        x = W + 6
-        d = -1 if opened else 1  # the chevron points away from the phone to open
-        c.create_line(*self.pts([x - 2 * d, mid - 7, x + 2 * d, mid, x - 2 * d, mid + 7]),
-                      fill=BG if opened else TEXT, width=self.px(2), capstyle="round",
-                      joinstyle="round", tags=tags)
-        self._button("tab", self.hub.toggle_panel)
+        for anti in (False, True):
+            opened = self.hub.is_open(anti)
+            name = "tab_anti" if anti else "tab"
+            tags = ("btn", "tab", name)
+            live = DOWN if anti else UP
+            if anti:
+                self.rrect(-TAB, top, 4, bottom, 7, fill=live if opened else BEZEL, tags=tags)
+                x, d = -6, -1  # the chevron points away from the phone to open
+            else:
+                self.rrect(W - 4, top, W + TAB, bottom, 7, fill=live if opened else BEZEL,
+                           tags=tags)
+                x, d = W + 6, 1
+            if opened:
+                d = -d
+            c.create_line(*self.pts([x - 2 * d, mid - 7, x + 2 * d, mid, x - 2 * d, mid + 7]),
+                          fill=BG if opened else TEXT, width=self.px(2), capstyle="round",
+                          joinstyle="round", tags=tags)
+            self._button(name, lambda a=anti: self.hub.toggle_panel(a))
 
     def _draw_range_pills(self):
         self.canvas.delete("pills")
@@ -1302,10 +1320,11 @@ class Monitor(Drawing, tk.Toplevel):
             self._chart_dirty = False
             self._chart_drawn_at = time.monotonic()
             self._draw_chart()
-        if (self.panel and self.panel.is_open
-                and time.monotonic() - self._panel_drawn_at > 0.25):
+        open_panels = self.hub.open_panels()
+        if open_panels and time.monotonic() - self._panel_drawn_at > 0.25:
             self._panel_drawn_at = time.monotonic()
-            self.panel.refresh()
+            for panel in open_panels:
+                panel.refresh()
         self.after(8, self._pump)
 
     def flash_level(self, name):
@@ -1345,15 +1364,18 @@ class Monitor(Drawing, tk.Toplevel):
         """A bet was placed or settled: refresh the panel and (unless muted) notify."""
         if e["kind"] == "bet":
             self.flash[e["strategy"]] = time.monotonic()
-        if self.panel and self.panel.is_open:
-            self.panel.refresh()
+        for panel in self.hub.open_panels():
+            panel.refresh()
         self._chart_dirty = True  # a new marker may belong on the chart
         if e["kind"] == "bankrupt":
             self._on_bankrupt(e)
             return
         # Five strategies trade at once; only the one you're tracking gets notifications,
         # and the bell silences those too.
-        if self.muted or e["strategy"] != self.trader.selected:
+        # Both worlds have a tracked strategy, and both are worth hearing about; the bell
+        # still silences them.
+        tracked = (self.trader.tracked(False), self.trader.tracked(True))
+        if self.muted or e["strategy"] not in tracked:
             return
         who = f"{self.coin} {e['strategy']}"
         if e["kind"] == "bet":
@@ -1458,16 +1480,22 @@ class Monitor(Drawing, tk.Toplevel):
 
 
 class SidePanel(Drawing, tk.Toplevel):
-    """A square window that slides out from the phone's side button. It has three
-    tabs: the tracked strategy's account, a log of its bets, and a leaderboard."""
+    """A square window that slides out from a side button on the phone. It has three tabs:
+    the tracked strategy's account, a log of its bets, and a leaderboard.
+
+    There are two, one per world. The right-hand panel shows the six strategies; the left
+    shows their anti-world twins, which believe the opposite of whatever the model says.
+    Same class, same tabs -- `anti` picks which set of accounts it reads and which edge it
+    grows from."""
 
     STEPS = 9
     ROW_H = 24  # a row in the bet log
     LOG_ROWS = 8
 
-    def __init__(self, hub):
+    def __init__(self, hub, anti=False):
         super().__init__(hub.root)  # its own window, parented to the invisible root
         self.hub = hub
+        self.anti = anti
         self.k = hub.monitor().k
         self.is_open = False
         self.tab = "account"
@@ -1490,7 +1518,7 @@ class SidePanel(Drawing, tk.Toplevel):
         self.rrect(6, 6, SIDE - 6, SIDE - 6, 40, fill=BG)
         for tab in ("account", "log", "strategies"):
             self._button(f"tab_{tab}", lambda t=tab: self._set_tab(t))
-        for i in range(len(STRATEGIES)):
+        for i in range(len(strategies(anti))):
             self._button(f"strat_{i}", lambda i=i: self._pick(i))
         self._button("badge", self._cycle)
         self._button("pause", self._toggle_pause)
@@ -1506,13 +1534,20 @@ class SidePanel(Drawing, tk.Toplevel):
     # ---- placement and sliding --------------------------------------------
 
     def _origin(self, width=None):
-        """Top-left of the panel when it is `width` wide. It's glued to the phone's edge:
-        on the right for Bitcoin, on the left for Ethereum (so it grows leftward)."""
+        """Top-left of the panel when it is `width` wide, glued to the phone's edge.
+
+        The anti panel grows leftward, so its left edge moves as it opens while its right
+        edge stays pinned to the phone -- otherwise it would slide out from under itself.
+        """
         a = self.app  # position against the page that's on screen
-        width = self.px(SIDE) if width is None else width
+        full = self.px(SIDE)
+        width = full if width is None else width
         y = a.winfo_y() + a.px(110)
+        if self.anti:
+            right = a.winfo_x() - a.px(6)
+            return max(0, right - width), y
         x = a.winfo_x() + a.px(W + 2 * TAB) + a.px(6)
-        return min(x, self.winfo_screenwidth() - self.px(SIDE)), y
+        return min(x, self.winfo_screenwidth() - full), y
 
     def follow(self):
         if self.is_open:
@@ -1547,14 +1582,17 @@ class SidePanel(Drawing, tk.Toplevel):
 
     def refresh(self):
         self.canvas.delete("dyn")
-        s = self.hub.trader.snapshot(coin=self.app.coin)
+        s = self.hub.trader.snapshot(name=self.hub.trader.tracked(self.anti),
+                                     coin=self.app.coin)
         self._header(s)
         {"account": self._account, "log": self._log, "strategies": self._strategies}[
             self.tab](s)
 
     def _header(self, s):
         tag = "dyn"
-        self.text(28, 32, f"Kalshi {self.app.coin} 15-min", 14, TEXT, anchor="w", tags=tag)
+        title = (f"Anti-world {self.app.coin}" if self.anti
+                 else f"Kalshi {self.app.coin} 15-min")
+        self.text(28, 32, title, 14, DOWN if self.anti else TEXT, anchor="w", tags=tag)
         chip = f"{s['name']}  ▾"
         w = tkfont.Font(family="Segoe UI Semibold", size=-self.px(11)).measure(chip) / self.k + 24
         self.rrect(SIDE - 28 - w, 20, SIDE - 28, 44, 12, fill=BUTTON, tags=(tag, "btn", "badge"))
@@ -1705,14 +1743,14 @@ class SidePanel(Drawing, tk.Toplevel):
 
     def _strategies(self, s):
         tag = "dyn"
-        standings = self.app.trader.standings()
+        standings = self.app.trader.standings(anti=self.anti)
         self._row_names = [r["name"] for r in standings]
         any_bets = any(r["bets"] for r in standings)
         pitch = min(47, 234 // max(1, len(standings)))  # rows shrink to fit however many there are
         height = pitch - 4
         for i, r in enumerate(standings):
             y = 96 + i * pitch
-            chosen = r["name"] == self.app.trader.selected
+            chosen = r["name"] == self.app.trader.tracked(self.anti)
             tags = (tag, "btn", f"strat_{i}")
             glow = self.app.flash_level(r["name"])  # a soft amber warmth after a new bet
             base = BUTTON if chosen else CARD
@@ -1752,9 +1790,10 @@ class SidePanel(Drawing, tk.Toplevel):
             self.refresh()
 
     def _cycle(self):
-        names = [p["name"] for p in STRATEGIES]
+        names = [p["name"] for p in strategies(self.anti)]
         trader = self.app.trader
-        trader.select(names[(names.index(trader.selected) + 1) % len(names)])
+        here = trader.tracked(self.anti)
+        trader.select(names[(names.index(here) + 1) % len(names)])
         self.app._chart_dirty = True
         self.log_offset = 0
         self.refresh()

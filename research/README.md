@@ -126,6 +126,7 @@ with a few live brackets around spot.
 | `fetch_rounds.py` | Downloads a month of one coin's settled rounds with per-minute quotes |
 | `backtest_exits.py` | Compares exit rules, driving the real engine — produced the `take_capture` numbers |
 | `backtest_stops.py` | Asks whether the Scalper should cut its losses (it should not) |
+| `backtest_antiworld.py` | Runs each strategy against its inverted twin — both sides lose |
 
 The `.json` caches are gitignored — regenerate them with `scrape_week.py` and
 `fetch_rounds.py`.

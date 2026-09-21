@@ -193,6 +193,41 @@ If you want to settle it on live per-second data, set `stop_tau` or `stop_loss` 
 Scalper in `kalshi_trader.py`. `kalshi_exits.csv` grades every sale with `why = stop` against
 what holding would have paid, so a few hundred rounds will answer it properly.
 
+## The anti-world
+
+The left-hand panel holds a mirror of every strategy — `Anti Value`, `Anti Model`,
+`Anti Late`, `Anti Scalper`, `Anti Favorite`, `Anti Lottery` — each with its own $1,000 and
+the same caps. Twelve accounts, six per world, none shared.
+
+A twin is not a new strategy. It is the same rules fed an inverted belief: wherever the model
+says the chance of UP is *p*, its twin is handed *1 − p* and everything follows from there —
+which side looks cheap, how big the stake is, when to take a position off. Inverting the
+belief rather than just flipping the chosen side matters, because a twin that flipped only
+the side would size itself off a conviction it does not hold.
+
+**Why bother.** Every strategy loses money, and there are two explanations that call for
+opposite responses. Either the model is systematically *wrong*, in which case inverting it
+should pay; or the model is roughly right and the losses are *costs* — the spread plus
+Kalshi's fee on every buy and every sell — in which case both sides lose and no amount of
+tuning will help. Running the pair separates the two. Nothing else here can.
+
+Over the same month of recorded BTC rounds (`research/backtest_antiworld.py`):
+
+| | P/L | | twin P/L | pair | fees |
+|---|---|---|---|---|---|
+| Value | −$440 | Anti Value | −$1,000 (bust) | −$1,439 | $1,178 |
+| Model | −$998 | Anti Model | −$1,000 (bust) | −$1,998 | $750 |
+| Late | −$989 | Anti Late | −$1,000 (bust) | −$1,989 | $350 |
+| Scalper | −$742 | Anti Scalper | −$997 | −$1,738 | $405 |
+| Favorite | −$969 | Anti Favorite | −$167 | −$1,136 | $100 |
+| Lottery | −$568 | Anti Lottery | −$845 | −$1,413 | $227 |
+
+**Both sides lost in six pairs out of six.** The `pair` column is the two P/Ls added
+together: if the model carried real information, one side would win more than the other lost
+and the pair would be positive. Every pair is negative. That is the market charging for the
+privilege of holding an opinion, in either direction — and it says the problem is not that
+the model points the wrong way.
+
 ## When a strategy runs out
 
 Each strategy starts with **$1,000** and may have at most **$250** at risk across all open
