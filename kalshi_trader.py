@@ -808,7 +808,7 @@ class KalshiTrader:
         self.folder = folder
         # This run of the app. Every row written from here carries it, which is what makes
         # the logs reviewable one session at a time.
-        self.session = session_id()
+        self.session = self._unused_session()
         self.session_started = time.time()
         # Counted for THIS run. The accounts' own totals persist across restarts, so using
         # them would credit a one-minute session with every bet ever placed.
@@ -1067,12 +1067,58 @@ class KalshiTrader:
                            f"_cols_{datetime.now():%Y%m%d_%H%M%S}.csv")
                 rows = []
             rows.append(row)
-            with open(self.sessions_path, "w", newline="", encoding="utf-8") as f:
+
+            def write(f):
                 w = csv.DictWriter(f, fieldnames=SESSION_FIELDS)
                 w.writeheader()
                 w.writerows(rows)
+
+            self._atomic_write(self.sessions_path, write)
         except OSError:
             pass  # a locked file shouldn't stop the simulation
+
+    def _unused_session(self):
+        """An id this folder has not seen before.
+
+        The id is a timestamp to the second, so two runs starting inside the same second
+        would share one and their rows would merge -- which is not hypothetical on a machine
+        that reboots and relaunches by itself. Checking the index costs one read at startup.
+        """
+        taken = set()
+        try:
+            with open(self.sessions_path, newline="", encoding="utf-8") as f:
+                taken = {row.get("session") for row in csv.DictReader(f)}
+        except (OSError, UnicodeDecodeError, csv.Error):
+            pass  # missing, or left corrupt by a crash; either way nothing is taken
+        candidate = session_id()
+        while candidate in taken:
+            candidate = session_id(candidate)
+        return candidate
+
+    def _atomic_write(self, path, write):
+        """Replace `path` with whatever `write(handle)` produces, all or nothing.
+
+        A plain open(path, "w") truncates first, so an unexpected shutdown between the
+        truncate and the flush leaves nothing -- which is exactly how the session index came
+        back as 826 bytes of NUL after this machine crashed. Writing beside the target and
+        renaming over it means a crash leaves either the old file intact or the new one
+        complete. os.replace is atomic on NTFS and POSIX alike.
+
+        The fsync is the part that matters: without it the rename can reach the disk before
+        the data it is renaming.
+        """
+        tmp = f"{path}.tmp"
+        try:
+            with open(tmp, "w", newline="", encoding="utf-8") as f:
+                write(f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except OSError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass  # nothing more to do; the previous file is still intact
 
     def _append(self, path, fields, row):
         """Append one row, writing the header for a new file. If an older file has a
@@ -1398,11 +1444,10 @@ class KalshiTrader:
             "accounts": {n: a.to_dict(a.equity(mk)) | {"cash": round(a.cash, 2)}
                          for n, a in self.accounts.items()},
         }
-        tmp = self.json_path + ".tmp"
         try:
-            with open(tmp, "w") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, self.json_path)  # swap in one step so it's never half-written
+            # temp-then-rename was already right; the fsync inside _atomic_write is what was
+            # missing, and without it the rename can reach the disk before the data does
+            self._atomic_write(self.json_path, lambda f: json.dump(data, f, indent=2))
         except OSError:
             pass
 
