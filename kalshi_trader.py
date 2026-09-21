@@ -425,6 +425,48 @@ class Account:
             return elapsed % every < prm.get("burst", 30)
         return True
 
+    def _candle_view(self, market, now, tau, move, paused):
+        """What the display shows for a candle strategy.
+
+        Same shape as the model strategies produce, because the panel reads one contract:
+        a view with a "signal" inside it carrying side, conf, edge, need, bet and why. This
+        path used to write a flat dict, which raised KeyError the moment anyone tracked one.
+        """
+        if move is None:
+            return None
+        prm = self.params
+        side = "UP" if move > 0 else "DOWN"
+        here = self.open_lots(market["ticker"])
+        ask = market["yes_ask"] if side == "UP" else market["no_ask"]
+        # "confidence" here is how far the move has gone past the threshold that wakes it,
+        # capped -- it is a momentum reading, not a probability, and saying otherwise would
+        # put a number next to it that means something it does not.
+        sig = {"side": side, "conf": min(99.0, abs(move) / prm["min_move"] * 50),
+               "edge": abs(move) * 100, "need": prm["min_move"] * 100, "bet": False}
+        if paused:
+            sig["why"] = "paused"
+        elif not prm["tau"][0] <= tau <= prm["tau"][1]:
+            sig["why"] = "too late this round"
+        elif not self._candle_open(prm, tau):
+            window = prm.get("window")
+            sig["why"] = ("past its first 2.5 min" if window == "early"
+                          else "between bursts" if window == "interval" else "shut")
+        elif abs(move) < prm["min_move"]:
+            sig["why"] = "waiting for a move"
+        elif len(here) >= prm["max_bets"]:
+            sig["why"] = "max bets this round"
+        elif here and now - max(lot["t"] for lot in here) < prm.get("min_gap", MIN_GAP):
+            sig["why"] = "cooling down"
+        elif {lot["side"] for lot in here} and side not in {l["side"] for l in here}:
+            sig["why"] = "holding the other side"
+        elif ask <= 0 or not prm["band"][0] <= ask <= prm["band"][1]:
+            sig["why"] = f"{ask * 100:.0f}c is outside its band"
+        else:
+            sig["bet"] = True
+            sig["why"] = "riding the move"
+        return {"p_up": None, "p_model": None, "mid": None, "best": None, "tau": tau,
+                "signal": sig}
+
     def _candle(self, market, price, now, paused, ctx):
         """Buy the side the last minute moved toward, then let the exits do the rest.
 
@@ -436,10 +478,7 @@ class Account:
         prm = self.params
         tau = market["close"] - now
         move = ctx.get("candle")
-        self.views[market.get("coin")] = None if move is None else {
-            "side": "UP" if move > 0 else "DOWN", "conf": min(1.0, abs(move) * 400),
-            "why": "candle",
-        }
+        self.views[market.get("coin")] = self._candle_view(market, now, tau, move, paused)
         if paused or move is None or not prm["tau"][0] <= tau <= prm["tau"][1]:
             return []
         if not self._candle_open(prm, tau):

@@ -164,6 +164,74 @@ class ItFollowsTheMove(unittest.TestCase):
         self.assertLessEqual(acct.committed(), kt.TOTAL_CAP * kt.START_BALANCE + 1e-6)
 
 
+class TheViewTheDisplayReads(unittest.TestCase):
+    """Every strategy hands the Account tab the same shape.
+
+    The candle path once wrote a flat {side, conf, why}. Tracking one then raised KeyError
+    inside refresh(), which toggle() calls BEFORE deiconify() -- so the panel stayed hidden
+    while is_open had already flipped, the next click merely closed it, and the right panel
+    could not be opened at all. pythonw discarded the traceback, so nothing said why.
+    """
+
+    SIGNAL_KEYS = {"side", "conf", "edge", "need", "bet", "why"}
+
+    def setUp(self):
+        self.t = h.new_trader()
+        self.t._append_csv = lambda *a, **k: None
+        h.lagging_book_round(self.t)
+
+    def test_every_strategy_that_has_looked_produces_a_readable_view(self):
+        looked = 0
+        for name, acct in self.t.accounts.items():
+            view = acct.views.get("BTC")
+            if view is None:
+                continue
+            looked += 1
+            with self.subTest(strategy=name):
+                self.assertIn("signal", view, "the Account tab reads view['signal']")
+                self.assertLessEqual(self.SIGNAL_KEYS, set(view["signal"]))
+        self.assertGreaterEqual(looked, len(kt.STRATEGIES) - 1,
+                                "too few strategies looked for this to prove anything")
+
+    def test_the_candle_strategies_are_among_them(self):
+        for name in CANDLES:
+            view = self.t.accounts[name].views.get("BTC")
+            with self.subTest(strategy=name):
+                self.assertIsNotNone(view, f"{name} never formed a view")
+                self.assertLessEqual(self.SIGNAL_KEYS, set(view["signal"]))
+
+    def test_it_says_why_it_is_sitting_out(self):
+        """A blank reason is what a stuck panel looks like from the outside."""
+        for name in CANDLES:
+            sig = self.t.accounts[name].views["BTC"]["signal"]
+            with self.subTest(strategy=name):
+                self.assertTrue(sig["why"].strip())
+                self.assertIsInstance(sig["bet"], bool)
+
+    def test_a_shut_window_is_named_rather_than_called_shut(self):
+        t = h.new_trader()
+        t._append_csv = lambda *a, **k: None
+        close = 1_800_000_900.0
+        now = close - kt.ROUND_SECONDS + 400  # past Candle Open's window, between bursts
+        for k in range(90):
+            t.observe("BTC", 80000.0 * (1 + k * 2e-5), now - 90 + k)
+        mkt = h.market("BTC", "KXBTC15M-VIEW", 80000.0, close, 0.49, 0.50)
+        for name in ("Candle Open", "Candle Step"):
+            t.accounts[name].step(mkt, 80000.0, now, 0.5, False,
+                                  {"candle": 0.001, "p_tail": None, "spike": None})
+        self.assertIn("2.5", t.accounts["Candle Open"].views["BTC"]["signal"]["why"])
+        self.assertIn("burst", t.accounts["Candle Step"].views["BTC"]["signal"]["why"])
+
+    def test_confidence_is_a_number_the_panel_can_format(self):
+        """The panel prints it with {:.0f}%, so it has to be a plain number on 0..100."""
+        for name in CANDLES:
+            sig = self.t.accounts[name].views["BTC"]["signal"]
+            with self.subTest(strategy=name):
+                self.assertIsInstance(sig["conf"], float)
+                self.assertGreaterEqual(sig["conf"], 0.0)
+                self.assertLessEqual(sig["conf"], 100.0)
+
+
 class TheSignal(unittest.TestCase):
 
     def test_it_measures_the_last_minute_from_the_per_second_ring(self):
