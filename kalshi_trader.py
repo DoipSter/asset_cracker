@@ -265,6 +265,7 @@ class Account:
         self.next_id = 1
         self.views = {}  # coin -> what the model thinks right now, for the display
         self.bankruptcies = 0  # times this strategy has run out and been staked again
+        self.retired = False  # ran out and was not staked again; it places no more bets
 
     # ---- persistence ------------------------------------------------------
 
@@ -276,6 +277,7 @@ class Account:
         self.losses = int(d.get("losses", 0))
         self.realized_pnl = float(d.get("realized_pnl", 0.0))
         self.bankruptcies = int(d.get("bankruptcies", 0))
+        self.retired = bool(d.get("retired", False))
         self.next_id = 1 + max([lot["id"] for lot in self.log], default=0)
         for lot in self.log:  # bets saved before coins were tracked: infer from the ticker
             lot.setdefault("coin", coin_from_ticker(lot.get("ticker", "")))
@@ -290,20 +292,31 @@ class Account:
             "realized_pnl": round(self.realized_pnl, 2),
             "bets": self.bets, "wins": self.wins, "losses": self.losses,
             "bankruptcies": self.bankruptcies,
+            "retired": self.retired,
             "log": self.log[-LOG_KEPT:],
         }
 
     def broke(self):
         """No money and nothing outstanding, so it cannot place another bet. Open lots are
         excluded deliberately: while a bet is live the strategy still has something that
-        might pay, and calling it dead then would flap every time a round went against it."""
-        return self.cash < BANKRUPT_AT and not self.open_lots()
+        might pay, and calling it dead then would flap every time a round went against it.
+
+        A retired account is already known to be finished. Without that check it would answer
+        yes on every tick forever, and be written up as newly bankrupt each time.
+        """
+        return not self.retired and self.cash < BANKRUPT_AT and not self.open_lots()
+
+    def retire(self):
+        """Stop. The log is kept rather than cleared -- there is no next life to keep it
+        clean for, and the panel should still be able to show what it did."""
+        self.retired = True
 
     def revive(self, stake=START_BALANCE):
         """Stake it again from scratch. The history it just lost is preserved in its
         postmortem, so clearing the log here loses nothing -- and leaving it would make the
         new run's win rate and round count meaningless."""
         self.cash = stake
+        self.retired = False
         self.log = []
         self.bets = self.wins = self.losses = 0
         self.realized_pnl = 0.0
@@ -499,6 +512,8 @@ class Account:
         accounts risking the same amount on the same moment, which is what makes their
         balances comparable, and keeps the cap honest for free.
         """
+        if self.retired:
+            return []  # out of money and not staked again; its original carries on alone
         out = []
         for e in events:
             if e["kind"] == "bet":
@@ -1094,12 +1109,15 @@ class KalshiTrader:
     # ---- when a strategy runs out -----------------------------------------
 
     def _check_broke(self, now):
-        """Write a postmortem for any strategy that has run out, then stake it again.
+        """Write up any account that has run out. A strategy is then staked again; a twin is
+        not.
 
-        Staking it again is deliberate. Six strategies exist to be compared, and a dead one
-        stops producing evidence, so leaving it at zero would quietly shrink the experiment.
-        The run that ended is preserved in its postmortem and `bankruptcies` counts how often
-        it has happened -- a strategy on its third life is saying something a balance is not.
+        The two need opposite treatment. A strategy exists to be compared and stops producing
+        evidence at zero, so leaving it dead would quietly shrink the experiment -- its run is
+        preserved in its postmortem and `bankruptcies` counts the lives. A twin is a
+        measurement of its original rather than a competitor, and handing it a fresh stake
+        every time it fails would say nothing except that it failed again. It retires, and its
+        original goes on trading alone.
         """
         events = []
         for acct in self.accounts.values():
@@ -1107,9 +1125,13 @@ class KalshiTrader:
                 continue
             report = self._write_postmortem(acct, now)
             died_with, lasted = acct.cash, acct.participated()
-            acct.revive()
+            if acct.params.get("anti"):
+                acct.retire()
+            else:
+                acct.revive()
             line = "\t".join([_iso(now), acct.name, f"cash=${died_with:.2f}",
-                               f"rounds={lasted}", f"life={acct.bankruptcies}",
+                               f"rounds={lasted}",
+                               "retired" if acct.retired else f"life={acct.bankruptcies}",
                                os.path.basename(report)])
             try:
                 with open(self.bankrupt_path, "a", encoding="utf-8") as f:
@@ -1118,7 +1140,7 @@ class KalshiTrader:
                 pass  # a locked file should not stop the simulation
             events.append({"kind": "bankrupt", "strategy": acct.name, "cash": died_with,
                            "rounds": lasted, "life": acct.bankruptcies, "report": report,
-                           "coin": None})
+                           "retired": acct.retired, "coin": None})
         return events
 
     def _write_postmortem(self, acct, now):
@@ -1154,8 +1176,11 @@ class KalshiTrader:
                 out.append(f"| {name} | {n} | ${cost:,.2f} | ${pnl:+,.2f} | {pct} |")
             return out
 
+        ending = ("retired; it places no further bets and its original trades on alone"
+                  if acct.params.get("anti")
+                  else f"life {acct.bankruptcies + 1}")
         L = [f"# {acct.name} ran out of money", "",
-             f"**{_iso(now)}** \u2014 life {acct.bankruptcies + 1}, staked "
+             f"**{_iso(now)}** \u2014 {ending}. Staked "
              f"${START_BALANCE:,.2f}, ended with ${acct.cash:.2f}.", "",
              f"> {acct.params['blurb']}", "", "## What happened", "",
              f"- **{acct.bets}** bets over **{acct.participated()}** rounds, of "
@@ -1243,6 +1268,7 @@ class KalshiTrader:
                 continue
             eq = a.equity(mk)
             rows.append({"name": a.name, "blurb": a.params["blurb"], "equity": eq,
+                         "retired": a.retired,
                          "pnl_pct": (eq / START_BALANCE - 1) * 100, "bets": a.bets,
                          "wins": a.wins, "losses": a.losses, "joined": a.participated()})
         return sorted(rows, key=lambda r: -r["equity"])

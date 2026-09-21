@@ -1814,14 +1814,20 @@ class SidePanel(Drawing, tk.Toplevel):
             if glow > 0:
                 self.circle(27, top_line, 3.5, fill=mix_color(row, AMBER, glow), width=0, tags=tags)
             star = "★ " if (i == 0 and any_bets and r["pnl_pct"] > 0) else ""
-            self.text(34, top_line, f"{star}{r['name']}", 12, TEXT, anchor="w", tags=tags)
+            # A retired twin sits at zero and never moves again, which looks like a stuck
+            # row unless it says why.
+            dead = r.get("retired")
+            self.text(34, top_line, f"{star}{r['name']}", 12, MUTED if dead else TEXT,
+                      anchor="w", tags=tags)
             self.text(SIDE - 100, top_line, f"${r['equity']:,.2f}", 12, TEXT, anchor="e", tags=tags)
             good = r["pnl_pct"] >= 0
             self.text(SIDE - 34, top_line, f"{'+' if good else '−'}{abs(r['pnl_pct']):.1f}%", 12,
                       UP if good else DOWN, anchor="e", tags=tags)
-            record = f"{r['bets']} bets · {r['joined']}/{s['rounds_monitored']} rounds"
+            record = ("retired · out of money" if dead else
+                      f"{r['bets']} bets · {r['joined']}/{s['rounds_monitored']} rounds")
             self.text(34, bottom_line, r["blurb"], 10, MUTED, weight="", anchor="w", tags=tags)
-            self.text(SIDE - 34, bottom_line, record, 10, MUTED, weight="", anchor="e", tags=tags)
+            self.text(SIDE - 34, bottom_line, record, 10, DOWN if dead else MUTED,
+                      weight="", anchor="e", tags=tags)
         self.text(SIDE / 2, 338, f"Rounds monitored {s['rounds_monitored']}  ·  tap a "
                   "strategy to track it", 10, MUTED, weight="", tags=tag)
 

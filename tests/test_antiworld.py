@@ -213,16 +213,21 @@ class WhenItCannotFollow(unittest.TestCase):
                     self.assertLessEqual(lot["cost"], stake + 0.01)
         self.assertTrue(checked, "nothing traded, so this proves nothing")
 
-    def test_a_starved_twin_is_restaked_and_resumes(self):
-        """Bankruptcy applies to twins too: one that runs out is written up and staked again.
-        `revive` clears the log, so afterwards its cash reconciles against the new stake."""
+    def test_a_starved_twin_retires_rather_than_being_restaked(self):
+        """A twin that runs out stops for good and its original carries on without it. Not
+        restaked, because a twin measures its original rather than competing with it -- a
+        fresh stake each time it failed would say nothing except that it failed again.
+        Covered in full in test_retirement.py; checked here so this file's picture is whole.
+        """
         t = self._starved(0.01, revive=True)
-        revived = [a for a in t.accounts.values()
-                   if a.params.get("anti") and a.bankruptcies]
-        self.assertTrue(revived, "a twin with a cent left was never declared broke")
-        for acct in revived:
-            with self.subTest(strategy=acct.name):
-                self.assertAlmostEqual(acct.cash, h.cash_balances(acct), places=2)
+        twins = [a for a in t.accounts.values() if a.params.get("anti")]
+        self.assertTrue(any(a.retired for a in twins),
+                        "a twin with a cent left was never declared broke")
+        for acct in twins:
+            if acct.retired:
+                with self.subTest(strategy=acct.name):
+                    self.assertEqual(acct.bankruptcies, 0)
+                    self.assertEqual(acct.log, [])
 
 
 class Separation(unittest.TestCase):

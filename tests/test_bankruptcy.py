@@ -81,7 +81,11 @@ class Reporting(unittest.TestCase):
         for e in broke:
             self.assertIn("report", e)
             self.assertIn("cash", e)
-            self.assertEqual(e["life"], 1)
+            # a strategy is staked again and starts its second life; a twin retires instead
+            if e["retired"]:
+                self.assertEqual(e["life"], 0)
+            else:
+                self.assertEqual(e["life"], 1)
 
     def test_the_bankruptcy_log_is_appended_and_parsable(self):
         path = self.trader.bankrupt_path

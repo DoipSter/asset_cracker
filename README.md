@@ -248,7 +248,16 @@ Three things happen, in order:
    what share of the damage they were, and the exact settings it was running.
 2. **A line is appended** to `kalshi_bankruptcies.log` and the app raises a notification.
    That file is tab-separated and append-only, so it can be watched from outside the app.
-3. **It is staked again** at $1,000 with a clean log, and `bankruptcies` counts the lives.
+3. **A strategy is staked again** at $1,000 with a clean log, and `bankruptcies` counts the
+   lives. **A twin is not.** It retires: no more bets, ever, and its original carries on
+   trading alone.
+
+The two need opposite treatment. A strategy exists to be compared and stops producing
+evidence at zero, so leaving it dead would quietly shrink the experiment. A twin is a
+measurement of its original rather than a competitor, and handing it a fresh stake every time
+it failed would say nothing except that it failed again. Nothing can pay money into a retired
+account, so retirement is permanent; the panel greys the row and labels it, because a balance
+frozen at $0.00 otherwise looks like a bug.
 
 Restaking is deliberate. Six strategies exist to be compared, and one sitting at zero stops
 producing evidence, so leaving it dead would quietly shrink the experiment. The run that
