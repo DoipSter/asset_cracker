@@ -96,6 +96,8 @@ and `select sum(balance_cents) from ledger_balance` (must be 0 per mode).
 
 ## Watching it
 
+`tools/view.sh` opens the status page from the Mac through an SSH tunnel. Or, by hand:
+
 ```
 ssh acdeploy@rpi-v5-1.local curl -s http://127.0.0.1:8377/healthz
 ssh acdeploy@rpi-v5-1.local sudo journalctl -u assetcracker -n 100 --no-pager

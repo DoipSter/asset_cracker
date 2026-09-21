@@ -24,7 +24,9 @@ type Sink interface {
 // Status is what the health endpoint reports about one series.
 type Status struct {
 	Ticker       string    `json:"ticker"`
+	Strike       float64   `json:"strike"`
 	Closes       time.Time `json:"closes"`
+	Quotes       Quotes    `json:"quotes"`
 	LastQuotesAt time.Time `json:"last_quotes_at"`
 	Awaiting     int       `json:"awaiting_results"`
 	LastError    string    `json:"last_error,omitempty"`
@@ -146,6 +148,7 @@ func (p *Poller) step(ctx context.Context, current **round, waiting map[string]*
 		}
 		p.mu.Lock()
 		p.status.Ticker, p.status.Closes, p.status.LastQuotesAt = cur.info.Ticker, cur.closes, now
+		p.status.Quotes, p.status.Strike = q, *cur.info.FloorStrike
 		p.mu.Unlock()
 	}
 

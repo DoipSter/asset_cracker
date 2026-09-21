@@ -11,9 +11,12 @@ import (
 // Report builds the status document. ok=false makes the endpoint answer 503.
 type Report func(ctx context.Context) (doc any, ok bool)
 
-// Serve answers GET /healthz until ctx ends.
-func Serve(ctx context.Context, addr string, report Report) error {
+// Serve answers GET /healthz, plus whatever routes `more` adds, until ctx ends.
+func Serve(ctx context.Context, addr string, report Report, more func(*http.ServeMux)) error {
 	mux := http.NewServeMux()
+	if more != nil {
+		more(mux)
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		rctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()

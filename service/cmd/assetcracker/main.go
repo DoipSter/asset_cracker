@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/doipster/asset_cracker/service/internal/health"
 	"github.com/doipster/asset_cracker/service/internal/kalshi"
 	"github.com/doipster/asset_cracker/service/internal/store"
+	"github.com/doipster/asset_cracker/service/internal/web"
 )
 
 var version = "dev" // set at build time by deploy/pi/deploy.sh
@@ -127,7 +129,8 @@ func run() error {
 	}()
 
 	slog.Info("asset cracker service running", "version", version, "instruments", len(instruments), "health", "http://"+cfg.HTTPAddr+"/healthz")
-	err = health.Serve(ctx, cfg.HTTPAddr, func(hctx context.Context) (any, bool) {
+	// What the running service knows right now. The health check and the status page share it.
+	live := func(hctx context.Context) (map[string]any, bool) {
 		ok := db.Ping(hctx) == nil
 		prices := map[string]any{}
 		for p := range products {
@@ -149,7 +152,12 @@ func run() error {
 			"ok": ok, "version": version, "uptime_seconds": time.Since(started).Seconds(), "mode": "market data only",
 			"ticks_written": ticksWritten.Load(), "prices": prices, "rounds": rounds,
 		}, ok
-	})
+	}
+	err = health.Serve(ctx, cfg.HTTPAddr,
+		func(hctx context.Context) (any, bool) { return live(hctx) },
+		func(mux *http.ServeMux) {
+			web.Routes(mux, db, func() map[string]any { doc, _ := live(context.Background()); return doc })
+		})
 	stop()
 	wg.Wait()
 	return err

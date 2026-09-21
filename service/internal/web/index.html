@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asset Cracker</title>
+<style>
+  :root { --bg:#f7f6f3; --card:#fff; --ink:#15151a; --muted:#6d6c68; --line:#e3e1da; --up:#0f8a5f; --down:#c4412f; --price:#2a78d6; --strike:#8a8983; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#121317; --card:#1b1d23; --ink:#ecebe6; --muted:#9a9993; --line:#2c2e36; --up:#35c28d; --down:#ef6b5a; --price:#5a9dee; --strike:#8a8983; --warn:#e0a040; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; }
+  main { max-width: 1060px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 16px; margin-bottom:18px; }
+  h1 { font-size:20px; margin:0; font-weight:600; }
+  h2 { font-size:13px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin:26px 0 10px; }
+  .muted { color:var(--muted); }
+  .pill { display:inline-block; padding:1px 8px; border-radius:999px; border:1px solid var(--line); font-size:12px; }
+  .ok { color:var(--up); border-color:var(--up); } .bad { color:var(--down); border-color:var(--down); }
+  .grid { display:grid; gap:12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; min-width:0; }
+  .row { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  .big { font-size:24px; font-weight:600; }
+  .kv { display:grid; grid-template-columns: repeat(4, 1fr); gap:6px 10px; margin:10px 0 8px; }
+  .kv div span { display:block; font-size:11px; color:var(--muted); }
+  canvas { width:100%; height:150px; display:block; }
+  canvas.small { height:70px; margin-top:6px; }
+  .legend { font-size:11px; color:var(--muted); display:flex; gap:14px; flex-wrap:wrap; margin-top:4px; }
+  .sw { display:inline-block; width:14px; height:0; border-top:2px solid; vertical-align:middle; margin-right:4px; }
+  .scroll { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th, td { text-align:left; padding:6px 10px 6px 0; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:500; font-size:12px; }
+  .yes { color:var(--up); } .no { color:var(--down); }
+  footer { margin-top:28px; font-size:12px; color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Asset Cracker</h1>
+    <span id="health" class="pill">connecting</span>
+    <span class="muted" id="meta"></span>
+  </header>
+  <div class="muted" id="mode"></div>
+
+  <h2>Prices</h2>
+  <div class="grid" id="prices"></div>
+
+  <h2>Open rounds</h2>
+  <div class="grid" id="rounds"></div>
+
+  <h2>Recent rounds</h2>
+  <div class="card scroll"><table id="recent"><thead><tr><th>Round</th><th>Closes (local)</th><th>Price to beat</th><th>Settled at</th><th>Result</th><th>Snapshots</th></tr></thead><tbody></tbody></table></div>
+
+  <h2>Strategies registered</h2>
+  <div class="card scroll"><table id="strategies"><thead><tr><th>Family</th><th>Strategy</th><th>Version</th><th>Status</th><th>What it does</th></tr></thead><tbody></tbody></table>
+    <div class="muted" id="ledger" style="margin-top:10px;font-size:12px"></div></div>
+
+  <footer>Read-only. Simulation only: this service records public market data and places no orders. Refreshes every 2 seconds.</footer>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const money = (v, d = 2) => v == null ? "—" : "$" + Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+const cents = (v) => v == null || Number(v) === 0 ? "—" : (Number(v) * 100).toFixed(1) + "¢";
+const clock = (s) => { s = Math.max(0, Math.floor(s)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+const series = {};   // ticker -> points
+
+function line(ctx, pts, x, y, color, dash) {
+  ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash(dash || []);
+  let open = false;
+  for (const p of pts) { if (p.v == null) { open = false; continue; } open ? ctx.lineTo(x(p.t), y(p.v)) : ctx.moveTo(x(p.t), y(p.v)); open = true; }
+  ctx.stroke(); ctx.setLineDash([]);
+}
+
+function draw(canvas, lines, t0, t1, lo, hi, fmt) {
+  const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext("2d"); ctx.scale(dpr, dpr); ctx.clearRect(0, 0, w, h);
+  const padL = 58, padR = 6, padT = 10, padB = 10;
+  if (!(hi > lo)) { hi = lo + 1; }
+  const x = (t) => padL + (t - t0) / (t1 - t0) * (w - padL - padR);
+  const y = (v) => padT + (hi - v) / (hi - lo) * (h - padT - padB);
+  ctx.font = "11px system-ui, sans-serif"; ctx.fillStyle = css("--muted"); ctx.strokeStyle = css("--line"); ctx.lineWidth = 1; ctx.textBaseline = "middle";
+  for (let i = 0; i <= 2; i++) { const v = lo + (hi - lo) * i / 2; ctx.beginPath(); ctx.moveTo(padL, y(v)); ctx.lineTo(w - padR, y(v)); ctx.stroke(); ctx.fillText(fmt(v), 0, y(v)); }
+  for (const l of lines) line(ctx, l.pts, x, y, css(l.color), l.dash);
+}
+
+function renderRound(card, st, now) {
+  const pts = series[st.ticker] || [];
+  const closes = Date.parse(st.closes) / 1000, opens = closes - 900;
+  const prices = pts.map(p => ({ t: Date.parse(p.at) / 1000, v: p.price }));
+  const mids = pts.map(p => ({ t: Date.parse(p.at) / 1000, v: p.yes_bid != null && p.yes_ask != null ? (p.yes_bid + p.yes_ask) / 2 : null }));
+  const vals = prices.map(p => p.v).filter(v => v != null).concat([st.strike]);
+  const lo = Math.min(...vals), hi = Math.max(...vals), pad = Math.max((hi - lo) * 0.12, st.strike * 0.00005);
+  draw(card.querySelector("canvas.main"), [
+    { pts: [{ t: opens, v: st.strike }, { t: closes, v: st.strike }], color: "--strike", dash: [6, 4] },
+    { pts: prices, color: "--price" }], opens, closes, lo - pad, hi + pad, (v) => "$" + Math.round(v).toLocaleString());
+  draw(card.querySelector("canvas.small"), [{ pts: mids, color: "--up" }], opens, closes, 0, 1, (v) => Math.round(v * 100) + "¢");
+}
+
+function roundCard(series_, st) {
+  const card = el("div", "card"); card.dataset.series = series_;
+  card.innerHTML = '<div class="row"><div><strong class="t"></strong> <span class="muted s"></span></div><div class="big left"></div></div>' +
+    '<div class="kv"><div><span>Price to beat</span><b class="strike"></b></div><div><span>Yes bid / ask</span><b class="yesq"></b></div>' +
+    '<div><span>No bid / ask</span><b class="noq"></b></div><div><span>Book depth</span><b class="depth"></b></div></div>' +
+    '<canvas class="main"></canvas><canvas class="small"></canvas>' +
+    '<div class="legend"><span><i class="sw" style="color:var(--price)"></i>underlying price (Coinbase)</span><span><i class="sw" style="color:var(--strike);border-top-style:dashed"></i>price to beat (Kalshi index)</span><span><i class="sw" style="color:var(--up)"></i>market price for Yes</span></div>';
+  return card;
+}
+
+async function refresh() {
+  let d;
+  try { d = await (await fetch("/api/status", { cache: "no-store" })).json(); }
+  catch { $("health").textContent = "unreachable"; $("health").className = "pill bad"; return; }
+  const now = Date.now() / 1000;
+  $("health").textContent = d.ok ? "healthy" : "degraded"; $("health").className = "pill " + (d.ok ? "ok" : "bad");
+  $("meta").textContent = "release " + d.version + " · up " + clock(d.uptime_seconds) + " · " + Number(d.ticks_written).toLocaleString() + " ticks written since start";
+  $("mode").textContent = "Mode: " + d.mode + ".";
+
+  const prices = $("prices"); prices.replaceChildren();
+  for (const [product, p] of Object.entries(d.prices || {}).sort()) {
+    const c = el("div", "card"); const r = el("div", "row");
+    r.append(el("strong", null, product), el("span", "big", money(p.price)));
+    c.append(r, el("div", "muted", "last trade " + p.age_seconds.toFixed(1) + " s ago")); prices.append(c);
+  }
+
+  const rounds = $("rounds");
+  for (const [name, st] of Object.entries(d.rounds || {}).sort()) {
+    let card = rounds.querySelector('[data-series="' + name + '"]');
+    if (!card) { card = roundCard(name, st); rounds.append(card); }
+    const q = st.quotes || {}, left = Date.parse(st.closes) / 1000 - now;
+    card.querySelector(".t").textContent = name; card.querySelector(".s").textContent = st.ticker;
+    card.querySelector(".left").textContent = left > 0 ? clock(left) : "closed";
+    card.querySelector(".strike").textContent = money(st.strike);
+    card.querySelector(".yesq").textContent = cents(q.yes_bid) + " / " + cents(q.yes_ask);
+    card.querySelector(".noq").textContent = cents(q.no_bid) + " / " + cents(q.no_ask);
+    card.querySelector(".depth").textContent = (q.yes_levels ?? "—") + " / " + (q.no_levels ?? "—") + " levels";
+    card.dataset.ticker = st.ticker; card._st = st; renderRound(card, st, now);
+  }
+
+  const body = $("recent").querySelector("tbody"); body.replaceChildren();
+  for (const r of d.recent_rounds || []) {
+    const tr = el("tr");
+    const over = r.closes_at && Date.parse(r.closes_at) / 1000 < now;
+    const res = el("td", r.result === "yes" ? "yes" : r.result === "no" ? "no" : "muted",
+      r.result ? (r.result === "yes" ? "UP (yes)" : "DOWN (no)") : over ? "result not recorded" : "open");
+    tr.append(el("td", null, r.ticker), el("td", null, r.closes_at ? new Date(r.closes_at).toLocaleTimeString() : "—"),
+      el("td", null, money(r.strike)), el("td", null, money(r.settlement_value)), res, el("td", null, Number(r.snapshots).toLocaleString()));
+    body.append(tr);
+  }
+  const sb = $("strategies").querySelector("tbody"); sb.replaceChildren();
+  for (const s of d.strategies || []) { const tr = el("tr"); tr.append(el("td", null, s.family), el("td", null, s.name), el("td", null, "v" + s.version), el("td", null, s.status), el("td", "muted", s.blurb)); sb.append(tr); }
+  $("ledger").textContent = "Ledger entries: " + (d.ledger_entries ?? "—") + ". Strategies are registered but not running yet, so nothing has been bet, even in simulation.";
+}
+
+async function refreshSeries() {
+  for (const card of document.querySelectorAll("#rounds .card")) {
+    const t = card.dataset.ticker; if (!t) continue;
+    try { series[t] = await (await fetch("/api/round?ticker=" + encodeURIComponent(t), { cache: "no-store" })).json() || []; } catch {}
+    for (const k of Object.keys(series)) if (k !== t && ![...document.querySelectorAll("#rounds .card")].some(c => c.dataset.ticker === k)) delete series[k];
+  }
+}
+
+refresh().then(refreshSeries).then(refresh);
+setInterval(refresh, 2000); setInterval(refreshSeries, 5000);
+window.addEventListener("resize", refresh);
+</script>
+</body>
+</html>

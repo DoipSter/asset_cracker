@@ -175,3 +175,105 @@ func (s *Store) InsertEvaluation(ctx context.Context, at time.Time, marketID int
 		values ($1, $2, nullif($3, '')::numeric, $4)`, at, marketID, underlyingPrice, q)
 	return err
 }
+
+// RoundSummary is one round as the status page lists it.
+type RoundSummary struct {
+	Series          string     `json:"series"`
+	Ticker          string     `json:"ticker"`
+	Strike          *float64   `json:"strike"`
+	ClosesAt        *time.Time `json:"closes_at"`
+	Result          *string    `json:"result"`
+	SettlementValue *float64   `json:"settlement_value"`
+	Snapshots       int64      `json:"snapshots"`
+}
+
+// RecentRounds lists the newest rounds across every series, newest first.
+func (s *Store) RecentRounds(ctx context.Context, limit int) ([]RoundSummary, error) {
+	rows, err := s.pool.Query(ctx, `
+		select i.symbol, m.ticker, m.strike::float8, m.closes_at, m.result, m.settlement_value::float8,
+		       (select count(*) from evaluation e where e.market_id = m.id and e.at >= m.closes_at - interval '1 hour')
+		  from market m join instrument i on i.id = m.instrument_id
+		 order by m.closes_at desc nulls last, m.ticker limit $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RoundSummary
+	for rows.Next() {
+		var r RoundSummary
+		if err := rows.Scan(&r.Series, &r.Ticker, &r.Strike, &r.ClosesAt, &r.Result, &r.SettlementValue, &r.Snapshots); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// SeriesPoint is one moment of a round: the underlying price and the market's quotes.
+type SeriesPoint struct {
+	At     time.Time `json:"at"`
+	Price  *float64  `json:"price"`
+	YesBid *float64  `json:"yes_bid"`
+	YesAsk *float64  `json:"yes_ask"`
+}
+
+// RoundSeries returns a round's recorded history, thinned to one point per `every`.
+func (s *Store) RoundSeries(ctx context.Context, ticker string, every time.Duration) ([]SeriesPoint, error) {
+	rows, err := s.pool.Query(ctx, `
+		select date_bin($2::interval, e.at, 'epoch'::timestamptz) as t,
+		       avg(e.underlying_price)::float8,
+		       avg(nullif((e.quotes->>'yes_bid')::numeric, 0))::float8,
+		       avg(nullif((e.quotes->>'yes_ask')::numeric, 0))::float8
+		  from evaluation e join market m on m.id = e.market_id
+		 where m.ticker = $1 and e.at >= m.closes_at - interval '1 hour'
+		 group by 1 order by 1`, ticker, every)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SeriesPoint
+	for rows.Next() {
+		var p SeriesPoint
+		if err := rows.Scan(&p.At, &p.Price, &p.YesBid, &p.YesAsk); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// StrategyRow is one entry of the trials registry.
+type StrategyRow struct {
+	Family  string `json:"family"`
+	Name    string `json:"name"`
+	Version int    `json:"version"`
+	Status  string `json:"status"`
+	Blurb   string `json:"blurb"`
+}
+
+// StrategyVersions lists the trials registry.
+func (s *Store) StrategyVersions(ctx context.Context) ([]StrategyRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		select st.family, st.name, v.version, v.status, st.description
+		  from strategy_version v join strategy st on st.id = v.strategy_id order by v.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StrategyRow
+	for rows.Next() {
+		var r StrategyRow
+		if err := rows.Scan(&r.Family, &r.Name, &r.Version, &r.Status, &r.Blurb); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// LedgerEntryCount says how many ledger entries exist: zero until something trades.
+func (s *Store) LedgerEntryCount(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.pool.QueryRow(ctx, `select count(*) from ledger_entry`).Scan(&n)
+	return n, err
+}

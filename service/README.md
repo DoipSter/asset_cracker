@@ -15,10 +15,20 @@ code, no credentials. Every request it makes is an unauthenticated public read.
 | `internal/kalshi15m` | The first strategy family: doipster's six, ported from `kalshi_trader.py`. Pure decisions (`Params.Decide`) separate from bookkeeping (`Account`) |
 | `internal/pyfloat` | CPython's float rounding, repr and floor division, where Go differs |
 | `cmd/replay` | The parity gate: replays a recording through the Go port and compares with the Python |
+| `internal/web` | The read-only status page: one embedded HTML file and the JSON it polls. No route changes anything |
 | `internal/health` | `GET /healthz` on localhost: prices, rounds, counts; 503 if anything is stale |
 
 What it watches comes from the `instrument` table (`db/migrations/0002_seed_sources.sql`), so
 adding a coin is a row, not a code change.
+
+## Seeing it
+
+    tools/view.sh          # from the Mac: opens an SSH tunnel to the Pi and the page in a browser
+    tools/view.sh stop
+
+Live prices, each open round with its quotes and a price-against-strike chart, recent
+settlements, the strategy registry. The service still listens on the Pi's localhost only; the
+tunnel is the way in, so nothing is opened on the network.
 
 ## Settings
 

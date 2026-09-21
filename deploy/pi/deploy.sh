@@ -2,7 +2,7 @@
 # Build the service for the Pi and release it. Needs no sudo beyond the deploy user's
 # allowlist: /opt/assetcracker belongs to that user.
 #
-#   deploy/pi/deploy.sh          # dev:  copy the binary only. Run it by hand against assetcracker_dev.
+#   deploy/pi/deploy.sh          # dev:  copy the binary to /opt/assetcracker/dev only. Run it by hand against assetcracker_dev.
 #   deploy/pi/deploy.sh prod     # prod: migrate, switch the release, restart, check health, roll back if unhealthy
 #   deploy/pi/deploy.sh rollback # prod: switch back to the previous release and restart
 #
@@ -34,6 +34,9 @@ if [ "${MODE}" = "rollback" ]; then
 fi
 
 sha="$(git -C "${here}" rev-parse --short HEAD)"
+# A dev build of uncommitted work is not the commit it sits on: mark it, so it can never be
+# mistaken for, or written over, a real release of that sha.
+[ -z "$(git -C "${here}" status --porcelain)" ] || [ "${MODE}" = "prod" ] || sha="${sha}-dirty"
 if [ "${MODE}" = "prod" ]; then
   [ -z "$(git -C "${here}" status --porcelain)" ] || { echo "refusing: uncommitted changes. A prod release must be exactly a commit."; exit 1; }
   branch="$(git -C "${here}" rev-parse --abbrev-ref HEAD)"
@@ -44,15 +47,20 @@ fi
 out="$(mktemp -d)/assetcracker"
 ( cd "${here}/service" && go vet ./... && go test ./... >/dev/null \
   && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version=${sha}" -o "${out}" ./cmd/assetcracker )
-remote "mkdir -p /opt/assetcracker/releases/${sha}"
-scp -q -o BatchMode=yes "${out}" "${HOST}:/opt/assetcracker/releases/${sha}/assetcracker"
-echo "copied release ${sha}"
-
 if [ "${MODE}" != "prod" ]; then
-  echo "dev: run it by hand on the Pi:"
-  echo "  AC_DATABASE_URL='postgres:///assetcracker_dev?host=/var/run/postgresql' /opt/assetcracker/releases/${sha}/assetcracker"
+  # Dev builds live apart from releases and never touch what systemd is running.
+  remote "mkdir -p /opt/assetcracker/dev"
+  scp -q -o BatchMode=yes "${out}" "${HOST}:/opt/assetcracker/dev/assetcracker.new"
+  remote "mv /opt/assetcracker/dev/assetcracker.new /opt/assetcracker/dev/assetcracker"
+  echo "copied dev build ${sha}. Run it by hand on the Pi, on its own port:"
+  echo "  AC_HTTP_ADDR=127.0.0.1:8378 AC_DATABASE_URL='postgres:///assetcracker_dev?host=/var/run/postgresql' /opt/assetcracker/dev/assetcracker"
   exit 0
 fi
+
+remote "mkdir -p /opt/assetcracker/releases/${sha}"
+scp -q -o BatchMode=yes "${out}" "${HOST}:/opt/assetcracker/releases/${sha}/assetcracker.new"
+remote "mv /opt/assetcracker/releases/${sha}/assetcracker.new /opt/assetcracker/releases/${sha}/assetcracker"
+echo "copied release ${sha}"
 
 "${here}/db/migrate.sh" prod
 prev="$(remote 'readlink /opt/assetcracker/current 2>/dev/null | sed "s|releases/||"' || true)"
