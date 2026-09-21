@@ -115,7 +115,14 @@ DEPTH_T, DEPTH_B = 500, 566
 # How far either side of the touch the book panel looks. Wide enough to hold the walls that
 # actually matter and narrow enough that they are not a smear against the axis.
 DEPTH_SPAN_PCT = 0.004
-SIDE = 360  # the side panel is a square this big
+SIDE = 360  # the side panel is this wide
+# ...and this tall. It was square until nine strategies a world had to fit: the leaderboard
+# shares its height between the rows, so 234px over nine gave each 26 and the rows became
+# unreadable. At 480 each row gets 39px again, which is what six rows had.
+SIDE_H = 480
+# Where the leaderboard's rows live inside it. Derived once rather than written into the
+# drawing code, so making the panel taller gives the rows the room rather than the footer.
+LEDGER_T, LEDGER_B = 96, SIDE_H - 30
 
 
 def _quad(p0, p1, p2, steps=12):
@@ -1777,7 +1784,9 @@ class SidePanel(Drawing, tk.Toplevel):
 
     STEPS = 9
     ROW_H = 24  # a row in the bet log
-    LOG_ROWS = 8
+    # As many rows as fit between the header and the footer. It was a fixed 8, which was
+    # right when the panel was 360 tall and left a third of it blank once it grew.
+    LOG_ROWS = (SIDE_H - 30 - 14 - 118) // 24
 
     def __init__(self, hub, anti=False):
         super().__init__(hub.root)  # its own window, parented to the invisible root
@@ -1796,13 +1805,13 @@ class SidePanel(Drawing, tk.Toplevel):
         self.overrideredirect(True)
         self.configure(bg=TRANSPARENT)
         self.attributes("-transparentcolor", TRANSPARENT)
-        s = self.px(SIDE)
-        self.canvas = tk.Canvas(self, width=s, height=s, bg=TRANSPARENT, highlightthickness=0)
+        self.canvas = tk.Canvas(self, width=self.px(SIDE), height=self.px(SIDE_H),
+                                bg=TRANSPARENT, highlightthickness=0)
         # Anchor toward the phone so the panel appears to slide out from it.
         self.canvas.pack(anchor="nw")
         self.canvas.bind("<MouseWheel>", lambda e: self._scroll(-1 if e.delta > 0 else 1))
-        self.rrect(0, 0, SIDE, SIDE, 46, fill=BEZEL)
-        self.rrect(6, 6, SIDE - 6, SIDE - 6, 40, fill=BG)
+        self.rrect(0, 0, SIDE, SIDE_H, 46, fill=BEZEL)
+        self.rrect(6, 6, SIDE - 6, SIDE_H - 6, 40, fill=BG)
         for tab in ("account", "log", "strategies"):
             self._button(f"tab_{tab}", lambda t=tab: self._set_tab(t))
         for i in range(len(strategies(anti))):
@@ -1865,7 +1874,7 @@ class SidePanel(Drawing, tk.Toplevel):
         t = step / self.STEPS
         width = max(1, int(self.px(SIDE) * (1 - (1 - t) ** 3)))  # ease-out
         x, y = self._origin(width)
-        self.geometry(f"{width}x{self.px(SIDE)}+{x}+{y}")
+        self.geometry(f"{width}x{self.px(SIDE_H)}+{x}+{y}")
         nxt = step + direction
         if 0 <= nxt <= self.STEPS:
             self.after(14, self._slide, token, nxt, direction)
@@ -1977,8 +1986,9 @@ class SidePanel(Drawing, tk.Toplevel):
              "Tap again to reset" if self._reset_armed else f"Reset all ${START_BALANCE:,.0f}",
              DOWN if self._reset_armed else TEXT),
         ):
-            self.rrect(x1, 318, x2, 346, 14, fill=fill, tags=(tag, "btn", name))
-            self.text((x1 + x2) / 2, 332, txt, 12, fg, tags=(tag, "btn", name))
+            self.rrect(x1, SIDE_H - 48, x2, SIDE_H - 20, 14, fill=fill,
+                       tags=(tag, "btn", name))
+            self.text((x1 + x2) / 2, SIDE_H - 34, txt, 12, fg, tags=(tag, "btn", name))
 
     def _log(self, s):
         c, tag = self.canvas, "dyn"
@@ -2028,24 +2038,27 @@ class SidePanel(Drawing, tk.Toplevel):
             self.text(SIDE - 34, y, res, 10, rcol, anchor="e", tags=tag)
         last = min(len(lots), self.log_offset + self.LOG_ROWS)
         net = sum(lot.get("pnl", 0) for lot in lots)
-        self.text(34, 338, f"{self.log_offset + 1}–{last} of {len(lots)}  ·  net "
+        foot = SIDE_H - 34
+        self.text(34, foot, f"{self.log_offset + 1}–{last} of {len(lots)}  ·  net "
                   f"{'+' if net >= 0 else '−'}${abs(net):.2f}", 10, MUTED, weight="",
                   anchor="w", tags=tag)
-        self.rrect(176, 333, 188, 343, 3, fill=HILITE, tags=tag)  # legend for the band
-        self.text(194, 338, "live round", 10, MUTED, weight="", anchor="w", tags=tag)
+        self.rrect(176, foot - 5, 188, foot + 5, 3, fill=HILITE, tags=tag)  # band legend
+        self.text(194, foot, "live round", 10, MUTED, weight="", anchor="w", tags=tag)
         for name, cx, glyph in (("log_up", SIDE - 62, "▲"), ("log_down", SIDE - 34, "▼")):
-            self.circle(cx, 338, 11, fill=BUTTON, width=0, tags=(tag, "btn", name))
-            self.text(cx, 338, glyph, 8, TEXT, weight="", tags=(tag, "btn", name))
+            self.circle(cx, foot, 11, fill=BUTTON, width=0, tags=(tag, "btn", name))
+            self.text(cx, foot, glyph, 8, TEXT, weight="", tags=(tag, "btn", name))
 
     def _strategies(self, s):
         tag = "dyn"
         standings = self.app.trader.standings(anti=self.anti)
         self._row_names = [r["name"] for r in standings]
         any_bets = any(r["bets"] for r in standings)
-        pitch = min(47, 234 // max(1, len(standings)))  # rows shrink to fit however many there are
+        # Rows share whatever height the panel has, up to a sensible maximum -- without the
+        # cap, three strategies would each get a 120px slab.
+        pitch = min(47, (LEDGER_B - LEDGER_T) // max(1, len(standings)))
         height = pitch - 4
         for i, r in enumerate(standings):
-            y = 96 + i * pitch
+            y = LEDGER_T + i * pitch
             chosen = r["name"] == self.app.trader.tracked(self.anti)
             tags = (tag, "btn", f"strat_{i}")
             glow = self.app.flash_level(r["name"])  # a soft amber warmth after a new bet
@@ -2070,8 +2083,8 @@ class SidePanel(Drawing, tk.Toplevel):
             self.text(34, bottom_line, r["blurb"], 10, MUTED, weight="", anchor="w", tags=tags)
             self.text(SIDE - 34, bottom_line, record, 10, DOWN if dead else MUTED,
                       weight="", anchor="e", tags=tags)
-        self.text(SIDE / 2, 338, f"Rounds monitored {s['rounds_monitored']}  ·  tap a "
-                  "strategy to track it", 10, MUTED, weight="", tags=tag)
+        self.text(SIDE / 2, LEDGER_B + 14, f"Rounds monitored {s['rounds_monitored']}"
+                  "  \u00b7  tap a strategy to track it", 10, MUTED, weight="", tags=tag)
 
     # ---- actions ----------------------------------------------------------
 
