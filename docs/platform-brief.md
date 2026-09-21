@@ -229,6 +229,8 @@ tick tables by time and set a retention policy.
    the duplicate-settlement scenario. Measured on the Pi: quotes at 1 Hz per series, trade
    prints about 47 ms behind the exchange's timestamp.
 3. Strategy interface; port Doipster's six as the first family; check with the replay harness.
+   **Done 2026-09-20** (`service/internal/kalshi15m`, `cmd/replay`): parity gate passes on the
+   Mac and on the Pi; the six are in `strategy_version` as the first trials.
 4. Paper broker, journal, bucket lifecycle, supervisor and breakers.
 5. Metrics and the promotion gate; trials registry.
 6. API and the Flutter client.
