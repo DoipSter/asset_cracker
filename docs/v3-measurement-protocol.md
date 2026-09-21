@@ -10,6 +10,8 @@ with a later start, and the rounds used so far could no longer confirm anything.
 
 Two facts. "Add nothing" is an accepted result, not a failure. And the only data that can confirm anything is
 15-minute rounds that close AFTER this file's commit; every earlier round can only be used to set the numbers.
+A mechanical slip (a wrong column name, a command that cannot run) is corrected in a separate errata file without
+restarting the clock, under the narrow rule of 0.1; anything else is a new protocol.
 
 Step S0 of `docs/honest-fills-v3.md` (6.1 to 6.5, 7.1; decisions D1, D2, D3, D13, D15), committed BEFORE any
 measurement is run. Simulated money only. Every query below is unexecuted, and no figure here measures prod.
@@ -18,7 +20,7 @@ Labels: **[READ]** read in the code, migrations or row samples on 2026-09-21. **
 read. **[NOT VERIFIED]** could not be checked from here. **[CONVENTION]** a chosen number, not a measurement.
 
 ## 0. The three choices this commit fixes, and what stays open
-D2, D15 and D3 are fixed by the commit that first adds this file: the owner's yes to this text, which D1 requires
+D2, D15 and D3 are fixed by `T_c`'s commit (section 1): the owner's yes to this text, which D1 requires
 before the S0 commit, is his choice on all three (a preferred alternative goes in BEFORE that commit). Any later
 change to them, like any other change to this file, is a new protocol with a new `T_c`. Before TRAIN's last close that
 costs no TEST window, as TEST starts only after the embargo AND `T_c`; after that, section 8 ("No way out") applies.
@@ -39,10 +41,46 @@ leak of section 6 with its price (`measure3 test` is run whatever the live page 
 - Likewise open: D9 (fee rounding per order or per fill) and D10 (quarter Kelly, the window cap, the seed). They set
   no number in this protocol and are listed only because they enter `frozen-params.json` beside the measured values.
 
+### 0.1 Errata: mechanical corrections that are not a new protocol
+Added by the one amendment to this file, made on 2026-09-21 with the owner's yes, before any `measure3` code existed,
+before any measurement was run and before TRAIN's last close (so it cost no TEST window); `T_c` is that amendment's
+commit. No query here has ever been executed, so a slip is likely, and the owner judged "any correction restarts the
+clock" too limiting. The rule is narrow on purpose. Where "may only" and "may never" conflict, NEVER wins.
+- **What is protocol.** Every predicate, join condition, bin expression, sort key and tie-break in a printed query is
+  protocol whether or not the prose restates it, and so is every name written inside a prose sentence. The prose
+  governs the printed queries' NAMES and SYNTAX only.
+- **An erratum may only** correct a name or syntax in a printed query or command so that it runs and does what the
+  text already says, or replace an instruction that cannot be executed as written with one that can. It is justified
+  from `db/migrations` and source text ONLY, never from query output, row counts or samples. If two executable
+  replacements could return different rows or values, it is not an erratum.
+- **An erratum may never** add, remove or loosen a predicate, join, bin, sort key or tie-break; nor touch a number, a
+  population, an estimator, a threshold, degrees of freedom, a split size, the embargo, the block rule, the three
+  choices, what counts as a look, the trials table or the outcomes; nor settle a point on which this file is ambiguous
+  or wrong about which rows are read or how a statistic is computed. Each of those is a new protocol with a new `T_c`.
+  After TRAIN's last close a point that is not an erratum is section 8's abandonment: there is no third route.
+- **The tool is covered too.** The queries this file gives only in words are written in `cmd/measure3`. Any change to
+  `cmd/measure3` after its first run against prod that alters a query, a filter or an arithmetic step is an erratum and
+  is entered as one, naming the commit; each result file records the tool's git sha at its first prod run and at this run.
+- **Once a figure has been seen.** `measure3` appends every run, complete or not, to the committed
+  `research/v3/runs.jsonl`. Once any run has printed a section-3 figure, an erratum may change only an instruction
+  that FAILED with an error, and the entry quotes the error text. After `frozen-params.json` exists, `measure3 train`
+  rerun under the errata then in force must reproduce its digits and row counts exactly, or `measure3 test` refuses.
+  After `test-attempt.json` exists, an erratum may change only the instruction whose error that attempt list quotes.
+- **Where, and what is checked.** Errata are appended to `docs/v3-measurement-protocol-errata.md`, never written into
+  this file, so `T_c` does not move. An entry gives the text replaced and its replacement, the text that governs, why
+  no decision can change, and the owner's yes; its date is its commit's committer time. `measure3` embeds the sha-256
+  of this file AND of the errata file in every result file, in `frozen-params.json` and in each `test-attempt.json`
+  attempt; lists the entries in force and those added since train; and refuses to run if the errata file has
+  uncommitted changes, if any commit to it deletes a line other than "No errata yet.", or if
+  `git branch -r --contains <its last commit>` prints nothing (a second party, the remote, must hold it before the run).
+- **What this costs [said plainly].** Whether a fix is "names and syntax only" is still a judgement, and its one
+  approver, the owner, may by then have seen figures. The guards are the checks above and that every entry is dated by
+  git and held by the remote before the run; the evidence-page write-up (section 8) lists every erratum.
+
 ## 1. Times, units and the split
 - **`T_c`** is the committer time, in UTC, of the LAST commit that changed this file, with that commit's hash, as
-  printed by `git log -1 --format='%H %cI' -- docs/v3-measurement-protocol.md`: that is the commit that first adds the
-  file, as any later commit to it is a new protocol (section 0) with its own `T_c`. It is the committing machine's
+  printed by `git log -1 --format='%H %cI' -- docs/v3-measurement-protocol.md`: that is the 0.1 amendment's
+  commit, as any later commit to this file is a new protocol (section 0) with its own `T_c`. It is the committing machine's
   clock **[CONVENTION: git's committer time is taken as true]**; pushing the same day, so that a second party holds
   the timestamp, is the owner's action. `measure3 train` refuses to run if that command prints nothing (the file is in
   no commit) or if `git status --porcelain` on the file prints anything (changed since its commit). It writes the hash
@@ -322,5 +360,6 @@ only of windows closing after that new `T_c`. Every window used here, TEST inclu
    live scorecard's view of TEST windows is accepted and not blinded.
 5. The M1 query in 3.1, the existence query of section 1, and the populations of 3.2, 3.3 and 3.5 (described in words,
    to be written as queries in `cmd/measure3`) have never been run against any database.
-6. **[READ]** This file and `docs/reviews/` are in this checkout's `.git/info/exclude`: while untracked they are
-   hidden from `git status`, and committing needs `git add -f`. Hence `git log`, not `git status`, in section 1.
+6. **[READ, at the amendment]** This file is tracked; `docs/reviews/` is still in this checkout's `.git/info/exclude`,
+   so the dated notes section 8 requires need `git add -f` or that line removed. `measure3 train`'s refusal for an
+   uncommitted protocol rests on both `git log` and `git status --porcelain` for this file.
