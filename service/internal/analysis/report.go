@@ -336,7 +336,10 @@ func buildFills(facts []MarketFacts, buckets []Bucket, unsettled map[int64]int) 
 		}
 	}
 	for bucket, n := range unsettled {
-		if r := row(bucket); r != nil && n > 0 {
+		if n <= 0 { // the unsettled map lists every bucket with a bet open; one that sold nothing must not gain a row
+			continue
+		}
+		if r := row(bucket); r != nil {
 			r.Sells += n
 			r.UnsettledSells += n
 		}

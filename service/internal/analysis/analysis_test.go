@@ -599,6 +599,19 @@ func TestFillsByStrategy(t *testing.T) {
 	}
 }
 
+// The unsettled map lists every bucket with a bet open in a round with no result, with how many
+// of its orders are sales, often 0. A strategy that has only bought must not gain a row: before
+// this was fixed, rows came and went with the bets (seen on production on 2026-09-21, when five
+// all-zero rows appeared between 14:15 and 14:19 as Model and Value bet on the next round).
+func TestABetOpenIsNotASale(t *testing.T) {
+	buckets := []Bucket{{ID: 1, VersionID: 10, Strategy: "Scalper", Engine: "v2", World: "real"},
+		{ID: 2, VersionID: 11, Strategy: "Model", Engine: "v2", World: "real"}}
+	rows := Build(Inputs{Buckets: buckets, UnsettledSells: map[int64]int{1: 2, 2: 0}}).Fills.ByStrategy
+	if len(rows) != 1 || rows[0].Strategy != "Scalper" || rows[0].Sells != 2 || rows[0].UnsettledSells != 2 {
+		t.Errorf("got %+v", rows)
+	}
+}
+
 // With nothing at all, and with one window, the document must still be plain JSON: every list
 // an array, no null, and nothing json.Marshal refuses (it refuses NaN and Inf).
 func TestDocumentIsAlwaysCleanJSON(t *testing.T) {
