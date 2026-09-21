@@ -62,10 +62,17 @@ func (s *Store) AnalysisTrials(ctx context.Context) (int, error) {
 	return n, err
 }
 
-// AnalysisOpenWindows is the closes_at (unix seconds) of every round that has closed and has no
-// result yet. The five coins settle a few seconds apart, and a window is only scored whole.
+// AnalysisOpenWindows is the closes_at (unix seconds) of every round that has closed and can
+// still get a result. The five coins settle a few seconds apart, and a window is only scored
+// whole. "Can still get a result" is UnsettledMarkets' own rule, so the two cannot disagree: a
+// round nobody bet on is asked about for an hour and then never again, and after that hour it
+// no longer keeps the rest of its window out. It is simply missing from the scorecard.
 func (s *Store) AnalysisOpenWindows(ctx context.Context, now time.Time) (map[int64]bool, error) {
-	rows, err := s.pool.Query(ctx, `select distinct extract(epoch from closes_at)::bigint from market where result is null and closes_at < $1`, now)
+	rows, err := s.pool.Query(ctx, `
+		select distinct extract(epoch from m.closes_at)::bigint from market m
+		 where m.result is null and m.closes_at < $1
+		   and (m.closes_at > $1 - interval '1 hour'
+		        or exists (select 1 from trade_order o where o.market_id = m.id))`, now)
 	if err != nil {
 		return nil, err
 	}

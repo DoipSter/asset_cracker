@@ -433,6 +433,10 @@ func (r *Runner2) halt(err error, moneyMoved bool) error {
 	r.capitalGen++ // the ledger may have moved without the re-read that normally follows: a read begun before this is not to be trusted
 	if moneyMoved {
 		r.halted = err.Error()
+		// Part of a batch may have committed (one bucket closed and restaked, the next failed), so
+		// what was read before is no longer the ledger. Marked stale, it is read again, off the
+		// engine lock, by the snapshot ticker; a halted engine moves nothing further.
+		r.capitalFresh = false
 		slog.Error("v2 halted: simulated money moved but was not recorded", "err", err)
 	}
 	return err

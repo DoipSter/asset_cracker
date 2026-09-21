@@ -330,13 +330,15 @@ function assets(){var l=objs((S.home||{}).assets).filter(function(a){return str(
 function coins(){return assets().map(function(a){return a.coin})}
 function assetOf(c){var a=assets();for(var i=0;i<a.length;i++)if(a[i].coin===c)return a[i];return null}
 /* ASSUMPTION (the contract does not define it): an engine belongs to a coin when its name contains the ticker, e.g. KXETH15M. */
+var STALE_S=30; /* the engines stop using a price this old (main.go sink.price). 5 s flickered: DOGE was measured 4.9 s between trades on a quiet night */
 function haltedNames(){return arr((S.home||{}).halted).filter(function(n){return str(n)})}
-function haltedFor(c){return haltedNames().filter(function(n){return n.toUpperCase().indexOf(String(c).toUpperCase())>=0})}
+/* the server names a halted engine "v1 KXBTC15M: why" or "v2: why"; only the head before the colon is matched; an engine whose name carries no coin (v2) trades every coin */
+function haltedFor(c){var t=String(c).toUpperCase(),all=coins().map(function(x){return String(x).toUpperCase()});return haltedNames().filter(function(n){var head=n.split(":")[0].toUpperCase(),named=all.some(function(x){return head.indexOf(x)>=0});return named?head.indexOf(t)>=0:true})}
 function priceAge(a){var s=num(a&&a.price_age_s);if(s==null)return null;return s+(S.okAt?Math.max(0,(Date.now()-S.okAt)/1000):0)}
 
 /* ---------- fetching and the poll clock ---------- */
-function get(u){var ac=window.AbortController?new AbortController():null,to=setTimeout(function(){if(ac)ac.abort()},8000),o={cache:"no-store"};if(ac)o.signal=ac.signal;
-  return fetch(u,o).then(function(r){if(!r.ok)throw new Error(r.status);return r.json()}).then(function(j){clearTimeout(to);return j},function(e){clearTimeout(to);throw e})}
+function get(u,also){var ac=window.AbortController?new AbortController():null,to=setTimeout(function(){if(ac)ac.abort()},8000),o={cache:"no-store"};if(ac)o.signal=ac.signal;
+  return fetch(u,o).then(function(r){if(!r.ok&&r.status!==also)throw new Error(r.status);return r.json()}).then(function(j){clearTimeout(to);return j},function(e){clearTimeout(to);throw e})}
 var due={home:0,asset:0,buckets:0,analysis:0,sparks:0},busy={};
 function loadHome(){var sc=S.scale;if(busy.home===sc)return;busy.home=sc;due.home=Date.now()+5000;
   get("api/home?range="+encodeURIComponent(sc)).then(function(j){if(busy.home===sc)busy.home=null;if(sc!==S.scale)return;S.home=j&&typeof j==="object"?j:{};S.fail.home=0;S.okAt=Date.now();
@@ -352,7 +354,7 @@ function loadSparks(){if(!S.home)return;due.sparks=Date.now()+300000;var r={"1H"
     if(c===S.coin&&S.cr===r&&S.asset&&cleanPts(S.asset.points).length>1){S.sparks[c]=S.asset.points;renderRail();return next()}
     get("api/asset?coin="+encodeURIComponent(c)+"&range="+r).then(function(j){if(S.sparkKey===r){S.sparks[c]=arr(j&&j.points);renderRail()}},function(){}).then(next)})()}
 function loadBuckets(){if(busy.buckets)return;busy.buckets=1;due.buckets=Date.now()+15000;get("api/buckets").then(function(j){busy.buckets=0;S.buckets=j&&typeof j==="object"?j:{};S.fail.buckets=0;renderBuckets()}).catch(function(){busy.buckets=0;S.fail.buckets=1;due.buckets=Date.now()+2000;renderBuckets()})}
-function loadAnalysis(){if(busy.analysis)return;busy.analysis=1;due.analysis=Date.now()+60000;get("api/analysis").then(function(j){busy.analysis=0;S.analysis=j&&typeof j==="object"?j:{};S.fail.analysis=0;renderEvidence()}).catch(function(){busy.analysis=0;S.fail.analysis=1;due.analysis=Date.now()+5000;renderEvidence()})}
+function loadAnalysis(){if(busy.analysis)return;busy.analysis=1;due.analysis=Date.now()+60000;get("api/analysis",503).then(function(j){busy.analysis=0;S.analysis=j&&typeof j==="object"?j:{};S.fail.analysis=0;renderEvidence()}).catch(function(){busy.analysis=0;S.fail.analysis=1;due.analysis=Date.now()+5000;renderEvidence()})}
 function tick(){
   if(document.hidden&&S.home)return;var n=Date.now(); /* a tab opened in the background still gets its first figures */
   if(n>=due.home)loadHome();
@@ -392,6 +394,7 @@ function renderDateline(){var h=S.home||{},n=new Date();
 function renderAlerts(){var h=S.home||{},out="",raw=arr(h.halted),hn=haltedNames();
   if(raw.length)out+='<div class="alert" role="alert"><b>HALTED</b> · '+(hn.length?hn.map(esc).join(", ")+" · "+(hn.length>1?"these engines are":"this engine is"):"an engine the service did not name is")+" placing no new bets</div>";
   if(S.home&&h.healthy===false)out+='<div class="alert" role="alert"><b>UNHEALTHY</b> · the service reports it is not healthy</div>';
+  [h.capital_error,h.history_error].forEach(function(m){if(str(m))out+='<div class="alert soft" role="status">'+esc(m)+"</div>"});
   if(S.fail.home>=2)out+='<div class="alert soft" role="status">No answer from the service'+(S.okAt?" since "+clock(S.okAt/1000,1)+". Figures below are the last received.":".")+"</div>";
   if(S.home&&h.simulated!==true)out+='<div class="alert soft">The service did not confirm simulated: true.</div>';
   setHTML($("alerts"),out)}
@@ -405,7 +408,7 @@ function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.to
     when="since "+sinceText(t.since)+(nohist?(just?" · recording began just now":" · no history on record yet"):"");
     if(nohist&&!e)p=null}   /* nothing to compare with yet: a dash, not an invented 0.00% */
   else when=SCALE_WORDS[rg]||rg;
-  setHTML($("earn"),'<span class="f '+c+'">'+sgn(e)+'</span><span class="f '+c+'">'+pct(p)+"</span><em>earned "+esc(when)+"</em>");
+  setHTML($("earn"),'<span class="f '+c+'">'+sgn(e)+'</span><span class="f '+c+'">'+pct(p)+"</span><em>earned "+esc(when)+"</em>"+(num(t.unmarked_bets)>0?"<em> · "+t.unmarked_bets+" open bet"+(t.unmarked_bets>1?"s have":" has")+" no bid right now, counted at $0, so the total reads low until "+(t.unmarked_bets>1?"they settle":"it settles")+"</em>":""));
   chips($("scale"),SCALES,S.scale,"s");
   var sp=sparkPath(h.series,300,34);
   setHTML($("spark"),sp?'<svg class="spark" viewBox="0 0 300 34" preserveAspectRatio="none" role="img" aria-label="Total value over the period"><line x1="0" x2="300" y1="'+sp.y0.toFixed(1)+'" y2="'+sp.y0.toFixed(1)+'" stroke="var(--rule)" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/><path d="'+sp.d+'" fill="none" stroke="var(--ink)" stroke-opacity=".55" stroke-width="1.25" vector-effect="non-scaling-stroke"/></svg>':"");
@@ -420,7 +423,7 @@ var railSig=null;
 function renderRail(){var list=assets(),sig=list.map(function(a){return a.coin}).join("|"),el=$("rail");
   if(sig!==railSig){el.innerHTML='<span class="k">Assets</span>'+list.map(function(){return'<button type="button"><span class="l1"></span><span class="px f"></span><span class="sp"></span><span class="st"></span></button>'}).join("");railSig=sig}
   var bs=el.querySelectorAll("button"),asOf=num((S.home||{}).as_of);
-  list.forEach(function(a,i){var b=bs[i];if(!b)return;var c=a.coin,ch=num(a.change_pct),pa=num(a.price_age_s),stale=pa!=null&&pa>5,halt=haltedFor(c).length>0,ob=num(a.open_bets);
+  list.forEach(function(a,i){var b=bs[i];if(!b)return;var c=a.coin,ch=num(a.change_pct),pa=num(a.price_age_s),stale=pa!=null&&pa>STALE_S,halt=haltedFor(c).length>0,ob=num(a.open_bets);
     b.setAttribute("data-v",c);b.setAttribute("aria-pressed",String(c===S.coin));b.setAttribute("aria-label",(str(a.name)||c)+(halt?", engine halted":"")+(stale?", price is stale":""));
     var pts=cleanPts(S.sparks[c]);if(pts.length&&asOf!=null&&num(a.price)!=null&&!stale&&asOf>pts[pts.length-1][0])pts=pts.concat([[asOf,a.price]]);var sp=sparkPath(pts,100,15);
     setHTML(b.children[0],'<span class="sg" style="color:'+legible(a.colour)+'">'+esc(str(a.sign))+'</span><span class="tk">'+esc(c)+'</span><span class="ch f '+cls(ch)+'">'+pct(ch)+"</span>");
@@ -431,7 +434,7 @@ function renderRail(){var list=assets(),sig=list.map(function(a){return a.coin})
 /* ---------- the box ---------- */
 function initials(names){var m={},by={};names.forEach(function(n){var k=(n||"?")[0];(by[k]=by[k]||[]).push(n)});
   Object.keys(by).forEach(function(k){by[k].forEach(function(n){m[n]=by[k].length>1?(n||"?").slice(0,2):k})});return m}
-function renderBoxHead(){var a=assetOf(S.coin)||{},d=S.asset||{},dec=num(d.decimals)!=null?d.decimals:a.decimals,pa=priceAge(a),stale=num(a.price_age_s)!=null&&a.price_age_s>5,hl=haltedFor(S.coin);
+function renderBoxHead(){var a=assetOf(S.coin)||{},d=S.asset||{},dec=num(d.decimals)!=null?d.decimals:a.decimals,pa=priceAge(a),stale=num(a.price_age_s)!=null&&a.price_age_s>STALE_S,hl=haltedFor(S.coin);
   /* the change shown here is measured on the chart's own points, so it always matches the range chips under it */
   var pts=cleanPts(d.points),chg=null,lab="";
   if(pts.length>1&&pts[0][1]){chg=(pts[pts.length-1][1]-pts[0][1])/pts[0][1]*100;
@@ -555,13 +558,13 @@ function pc(bps){return(bps/100).toFixed(bps%100?2:0)+"%"}
 function renderBuckets(){var el=$("p-buckets"),d=S.buckets;
   if(!d){setHTML(el,'<p class="empty" style="margin-top:14px">'+(S.fail.buckets?"No answer from api/buckets yet. Trying again shortly.":"Reading the buckets…")+"</p>");return}
   var bs=objs(d.buckets),G=[["strategies","Strategies","",[]],["anti","Anti-world twins","a measurement, not a competitor",[]],["v1","First engine","v1",[]]],D=.1;
-  bs.forEach(function(b){G[b.engine==="v1"?2:b.world==="anti"?1:0][3].push(b);var s=num(b.seed_cents);if(s){[b.equity_cents,b.high_water_cents].forEach(function(v){if(num(v)!=null)D=Math.max(D,Math.abs(v/s-1))})}});
+  bs.forEach(function(b){G[b.engine==="v1"?2:b.world==="anti"?1:0][3].push(b);var s=num(b.seed_cents);if(s&&b.status!=="frozen"){[b.equity_cents,b.high_water_cents].forEach(function(v){if(num(v)!=null)D=Math.max(D,Math.abs(v/s-1))})}});
   var cut=D*1.05>.5;D=Math.min(.5,Math.ceil(D*1.05*20)/20);
-  var out='<div class="lede"><span class="k">The money story</span><h2 style="font-size:26px;margin-top:3px">Buckets</h2><p class="what">Bar: equity against seed. The centre tick <b style="font-style:normal">|</b> is the seed, the fill runs from it to equity, and the bracket <b style="font-style:normal">]</b> marks high water. Every bar spans ±'+Math.round(D*100)+"% of seed"+(cut?"; a bar that reaches the edge is cut off there":"")+". “Allocated” is the sustainment allocation taken to date.</p>"+
+  var out='<div class="lede"><span class="k">The money story</span><h2 style="font-size:26px;margin-top:3px">Buckets</h2><p class="what">Bar: equity against seed. The centre tick <b style="font-style:normal">|</b> is the seed, the fill runs from it to equity, and the bracket <b style="font-style:normal">]</b> marks high water. Every bar spans ±'+Math.round(D*100)+"% of seed"+(cut?"; a bar that reaches the edge is cut off there":"")+". “Allocated” is the sustainment allocation taken to date.</p>"+[d.buckets_error,d.capital_error].filter(str).map(function(m){return'<p class="what"><b>Not current.</b> '+esc(m)+"</p>"}).join("")+
     '<div class="jump" role="group" aria-label="Jump to">'+[["g0","Strategies"],["g1","Anti-world"],["g2","First engine"],["rule","Allocation rule"],["money","Set aside"],["ev","Notices"]].map(function(j){return'<button type="button" data-k="j'+j[0]+'" data-j="j-'+j[0]+'">'+j[1]+"</button>"}).join("")+'</div></div><div class="cols">';
-  G.forEach(function(g,gi){var eq=0,seed=0,al=0;g[3].forEach(function(b){eq+=num(b.equity_cents)||0;seed+=num(b.seed_cents)||0;al+=num(b.allocated_cents)||0});
+  G.forEach(function(g,gi){var eq=0,seed=0,al=0,live=0,fz=0;g[3].forEach(function(b){al+=num(b.allocated_cents)||0;if(b.status==="frozen"){fz++;return}live++;eq+=num(b.equity_cents)||0;seed+=num(b.seed_cents)||0});
     out+='<details class="grp sec" id="j-g'+gi+'" data-g="'+g[0]+'"'+(S.fold[g[0]]?"":" open")+'><summary data-k="sum'+gi+'"><h2>'+g[1]+(g[2]?" <small>"+g[2]+"</small>":"")+'</h2><span class="f">'+(g[3].length?usd(eq):"—")+"</span></summary>"+
-      (g[3].length?g[3].map(function(b){return bucketRow(b,D)}).join("")+'<div class="gsum"><span>'+g[3].length+" buckets<small>seeded "+usd(seed)+" · allocated to date "+usd(al)+'</small></span><span class="f">'+usd(eq)+"</span></div>":'<p class="empty">None deployed.</p>')+"</details>"});
+      (g[3].length?g[3].map(function(b){return bucketRow(b,D)}).join("")+'<div class="gsum"><span>'+live+" live bucket"+(live===1?"":"s")+(fz?" · "+fz+" closed":"")+"<small>live seed "+usd(seed)+" · allocated to date "+usd(al)+'</small></span><span class="f">'+usd(eq)+"</span></div>":'<p class="empty">None deployed.</p>')+"</details>"});
   out+="</div>";
   /* the rule in force */
   var p=d.policy&&typeof d.policy==="object"?d.policy:{},rates=[["Winnings",p.winnings_bps,""],["Replenishment",p.replenish_bps,""],["Tax reserve",p.tax_bps,"government tax"],["Fee reserve",p.fees_bps,""]];
@@ -597,10 +600,12 @@ function rules(d){var c=d&&d.conventions&&typeof d.conventions==="object"?d.conv
   NEED_W=num(c.min_windows)||30;NEED_T=num(c.min_abs_t)||2;NEED_T_LB=num(c.leaderboard_min_abs_t)||NEED_T;NEED_T_CUT=num(c.scorecard_cut_min_abs_t)||NEED_T}
 function resolved(v){return str(v)&&v!=="unresolved"}
 function sdiff(v){v=num(v);if(v==null)return"—";return v<0?"("+fx(-v,4)+")":(v>0?"+":"")+fx(v,4)+IP}
+var PARTIAL=false;
 function vcell(r,need){need=need||NEED_T;var v=r.verdict,n=num(r.n_windows!=null?r.n_windows:r.windows);
   if(resolved(v)){var good=v==="model better"||v==="ahead";return'<span class="vd '+(good?"up":"dn")+'">'+esc(v.replace("model ",""))+"</span>"}
   if(n==null)return'<span class="prog">—</span>';
   if(n<NEED_W)return'<span class="prog" title="unresolved: '+n+" of "+NEED_W+' windows">'+n+" of "+NEED_W+'<i><b style="width:'+Math.max(0,Math.min(100,n/NEED_W*100))+'%"></b></i></span>';
+  if(PARTIAL||Math.abs(num(r.t)||0)>=need)return'<span class="prog" title="unresolved">'+(PARTIAL?"history loading":"no verdict given")+"</span>";
   return'<span class="prog" title="unresolved: |t| below '+fx(need,2)+'">|t| '+fx(Math.abs(num(r.t)||0),2)+" &lt; "+fx(need,2)+"</span>"}
 function scoreTable(title,rows,key){rows=objs(rows);if(!rows.length)return"";
   return'<div class="scroll"><table><thead><tr><th>'+title+"</th><th>Model</th><th>Market</th><th>Diff</th><th>Verdict</th></tr></thead><tbody>"+rows.map(function(r){var z=!num(r.n_windows),res=resolved(r.verdict);
@@ -608,7 +613,7 @@ function scoreTable(title,rows,key){rows=objs(rows);if(!rows.length)return"";
 function sname(r){return esc(str(r.strategy)||"—")+(r.world==="anti"?" anti":"")+" "+esc(str(r.engine))}
 function renderEvidence(){var el=$("p-evidence"),d=S.analysis;
   if(!d){setHTML(el,'<p class="empty" style="margin-top:14px">'+(S.fail.analysis?"No answer from api/analysis yet. Trying again shortly.":"Reading the evidence…")+"</p>");return}
-  rules(d);var cov=d.coverage&&typeof d.coverage==="object"?d.coverage:{};
+  rules(d);PARTIAL=!!(d.coverage&&d.coverage.complete===false);var cov=d.coverage&&typeof d.coverage==="object"?d.coverage:{};
   var sc=d.scorecard&&typeof d.scorecard==="object"?d.scorecard:{},o=sc.overall&&typeof sc.overall==="object"?sc.overall:{},n=num(o.n_windows)||0,t=num(o.t),res=resolved(o.verdict);
   var out='<div class="lede"><span class="k">The evidence · computed '+clock(d.computed_at)+" · "+(num(d.windows_recorded)!=null?d.windows_recorded:"—")+' windows recorded</span></div>'+
     (d.stale?'<p class="what"><b>Not current.</b> The last refresh failed'+(str(d.stale_reason)?": "+esc(d.stale_reason):"")+". These are the figures from "+clock(d.computed_at)+".</p>":"")+
@@ -638,7 +643,7 @@ function renderEvidence(){var el=$("p-evidence"),d=S.analysis;
   out+=lr.length?lr.map(function(r,i){var w=num(r.windows),res=resolved(r.verdict);
     return'<div class="lb"><div class="t"><span class="r">'+(i+1)+"</span><b>"+esc(str(r.strategy)||"—")+"</b>"+(r.world==="anti"?'<span class="tag">anti</span>':"")+'<span class="tag">'+esc(str(r.engine)||"—")+"</span>"+(num(r.lives)>1?'<span class="tag">'+r.lives+" lives</span>":"")+
       '<span class="f">'+fig(r.book_cents!=null?r.book_cents:r.equity_cents)+'</span><span class="f '+cls(r.lifetime_pnl_cents)+'" style="margin-left:0;min-width:78px;text-align:right">'+fig(r.lifetime_pnl_cents,0,1)+"</span></div>"+
-      '<div class="m"><span>'+(res?vcell(r,NEED_T_LB):w!=null&&w>=NEED_W?"unresolved, |t| below "+fx(NEED_T_LB,2):"unresolved, <span class=\"f\">"+(w==null?"—":w)+" of "+NEED_W+"</span> windows")+"</span><span>"+(num(r.bets)!=null?r.bets:"—")+" bets</span><span>per window <span class=\"f\">"+(w?sgn(r.mean_window_pnl_cents)+" ± "+usd(r.se_cents):"—")+"</span></span><span>t <span class=\"f\">"+(w?fx(r.t,2):"—")+"</span></span></div>"+
+      '<div class="m"><span>'+(res?vcell(r,NEED_T_LB):PARTIAL?"unresolved, history still loading":w!=null&&w>=NEED_W?(Math.abs(num(r.t)||0)>=NEED_T_LB?"unresolved, no verdict given":"unresolved, |t| below "+fx(NEED_T_LB,2)):"unresolved, <span class=\"f\">"+(w==null?"—":w)+" of "+NEED_W+"</span> windows")+"</span><span>"+(num(r.bets)!=null?r.bets:"—")+" bets</span><span>per window <span class=\"f\">"+(w?sgn(r.mean_window_pnl_cents)+" ± "+usd(r.se_cents):"—")+"</span></span><span>t <span class=\"f\">"+(w?fx(r.t,2):"—")+"</span></span></div>"+
       arr(r.flags).filter(str).map(function(fl){return'<div class="fl">⚑ '+esc(fl)+"</div>"}).join("")+"</div>"}).join(""):'<p class="empty">No strategies on the board yet.</p>';
   out+="</div></div>";setHTML(el,out)}
 

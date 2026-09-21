@@ -341,7 +341,7 @@ func run() error {
 				}
 				return doc
 			}, src)
-			web.AnalysisRoutes(mux, db)
+			web.AnalysisRoutes(ctx, mux, db)
 		})
 	stop()
 	wg.Wait()

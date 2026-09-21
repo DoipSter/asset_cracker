@@ -52,22 +52,25 @@ type analysisCache struct {
 	// Settled markets read and held back: their settlement rows do not (yet) match what was held
 	// at the close, with the reason. Never cached as facts; read again on later refreshes.
 	unreconciled map[int64]string
+	ctx          context.Context // the service's: a refresh in flight stops when the service does, so a restart is not held up by it
 	listed       bool            // the whole market table has been listed once
 	base         map[int64]int64 // ledger account -> balance up to checkpoint
 	checkpoint   int64
 }
 
 func newAnalysisCache() *analysisCache {
-	return &analysisCache{markets: map[int64]analysis.Market{}, facts: map[int64]analysis.MarketFacts{}, unreconciled: map[int64]string{}, base: map[int64]int64{}}
+	return &analysisCache{markets: map[int64]analysis.Market{}, facts: map[int64]analysis.MarketFacts{}, unreconciled: map[int64]string{}, base: map[int64]int64{}, ctx: context.Background()}
 }
 
 // AnalysisRoutes mounts GET /api/analysis and starts the loop that keeps its document warm. It
-// reads and nothing else.
-func AnalysisRoutes(mux *http.ServeMux, db *store.Store) {
+// reads and nothing else. ctx is the service's own context: the loop, and any refresh in
+// flight, end with it.
+func AnalysisRoutes(ctx context.Context, mux *http.ServeMux, db *store.Store) {
 	c := newAnalysisCache()
+	c.ctx = ctx
 	mux.HandleFunc("GET /api/analysis", c.handle(db))
 	if db != nil {
-		go warm(context.Background(), analysisEvery, func() { c.refreshNow(db) })
+		go warm(ctx, analysisEvery, func() { c.refreshNow(db) })
 	}
 }
 
@@ -174,7 +177,7 @@ func (c *analysisCache) reason() string {
 // recompute runs one refresh and stores what came of it. The caller holds c.refresh.
 func (c *analysisCache) recompute(db *store.Store) *analysis.Document {
 	// Not a request's context: a refresh should finish even if the browser that asked goes away.
-	ctx, cancel := context.WithTimeout(context.Background(), analysisTimeout)
+	ctx, cancel := context.WithTimeout(c.ctx, analysisTimeout)
 	defer cancel()
 	next, err := c.compute(ctx, db)
 	c.mu.Lock()
