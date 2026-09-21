@@ -45,6 +45,7 @@ connect as a role that does not own the tables. Not set up yet.
 | People's input | `commentary`, `human_weight`, view `current_human_weight` |
 | Agents propose, people approve | `proposal` |
 | Scores and gate decisions | `metric_snapshot` |
+| What everything was marked at, minute by minute | `value_snapshot` (append-only; not money, the ledger is) |
 
 The decision journal is two tables. `evaluation` holds what was known about a market at one
 moment, once. `decision` holds what each strategy made of it, whether or not it acted, with the

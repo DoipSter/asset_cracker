@@ -272,7 +272,12 @@ tick tables by time and set a retention policy.
    weights applied, breakers, reaping and replacement, a broker interface a live
    broker could share.
 5. Metrics and the promotion gate; trials registry.
-6. API and the Flutter client.
+6. API and the Flutter client. **Started 2026-09-21**: the home page's read-only API
+   (`docs/api-home.md`: `api/home`, `api/asset`, `api/buckets`) and the once-a-minute
+   `value_snapshot` history behind its "earned over a range" (migration 0010). Built and unit
+   tested on the Mac; its SQL has NOT yet been run against a database. The phone widget moved to
+   `/widget`; `/` is a placeholder until the designed home page is dropped in. Not yet:
+   the page itself, anything that writes.
 7. MCP, read-only; then proposals.
 8. More sources and instrument types.
 9. Live broker behind the gates in section 11.

@@ -39,6 +39,9 @@ type Runner2 struct {
 	hwm    map[string]int64 // account -> its bucket's high-water mark, in cents
 	policy store.SkimPolicy
 	money  store.MoneyBuckets
+
+	capital      store.Capital // the ledger's side of the balance sheet, for the value snapshots
+	capitalFresh bool          // false when the last attempt to read it failed
 }
 
 const engine2 = "kalshi15m2"
@@ -100,9 +103,12 @@ func (r *Runner2) refreshMoney(ctx context.Context) {
 	} else {
 		slog.Warn("could not read the skim policy", "err", err)
 	}
-	if m, err := r.db.MoneyBucketBalances(ctx); err == nil {
-		r.money = m
+	c, err := r.db.ReadCapital(ctx)
+	if r.capitalFresh = err == nil; err != nil {
+		slog.Warn("could not read the capital behind the value snapshots", "err", err)
+		return
 	}
+	r.capital, r.money = c, c.Money
 }
 
 // skim takes the sustainment allocation: the policy's share of each bucket's gain above its high-water mark. Book value is
@@ -365,6 +371,9 @@ func (r *Runner2) afterEvents(ctx context.Context, events, closed []k2.Event, sa
 		r.hwm[e.Strategy] = cents(k2.StartBalance)
 		slog.Warn("v2 account ran out", "strategy", e.Strategy, "left", e.DiedWith, "retired", e.Retired, "now", next.Name)
 		save = true
+	}
+	if len(closed) > 0 { // a bucket was reaped, and perhaps another seeded: the capital behind the snapshots moved
+		r.refreshMoney(ctx)
 	}
 	if save && len(events) > 0 {
 		if err := r.db.SaveEngineState(ctx, engine2, r.trader.Export()); err != nil {

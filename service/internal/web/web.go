@@ -1,4 +1,4 @@
-// Package web serves the read-only status page: one embedded HTML file and the JSON it polls.
+// Package web serves the read-only pages: the home page, the phone widget, and the JSON they poll.
 //
 // Everything here reads. There is no route that changes anything, and the server it is mounted
 // on listens on localhost only; it is viewed from another machine through an SSH tunnel.
@@ -22,6 +22,7 @@ var ranges = map[string][2]int{"1H": {60, 60}, "24H": {300, 288}, "7D": {3600, 1
 
 type history struct {
 	Closes    []float64 `json:"closes"`
+	Times     []float64 // when each close was struck: the candle's start plus its length, unix seconds
 	High, Low float64
 	fetched   time.Time
 }
@@ -52,6 +53,7 @@ func priceHistory(ctx context.Context, userAgent, product, key string) (history,
 	h := history{fetched: time.Now()}
 	for i, c := range candles {
 		h.Closes = append(h.Closes, c.Close)
+		h.Times = append(h.Times, float64(c.Start.Unix()+int64(spec[0])))
 		if i == 0 || c.High > h.High {
 			h.High = c.High
 		}
@@ -63,19 +65,28 @@ func priceHistory(ctx context.Context, userAgent, product, key string) (history,
 	return h, nil
 }
 
+//go:embed home.html
+var homePage []byte
+
 //go:embed index.html
-var page []byte
+var widgetPage []byte // the phone widget, which was the whole site before there was a home page
 
 // Live is what the running service knows without asking the database.
 type Live func() map[string]any
 
-// Routes mounts the page and its API on mux.
-func Routes(mux *http.ServeMux, db *store.Store, userAgent string, live Live) {
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write(page)
-	})
+// Routes mounts the pages and their API on mux: the home page at /, the phone widget at /widget.
+// The widget asks for /api/... by absolute path, so it works from either address.
+func Routes(mux *http.ServeMux, db *store.Store, userAgent string, live Live, src Sources) {
+	serve := func(path string, body []byte) {
+		mux.HandleFunc("GET "+path, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write(body)
+		})
+	}
+	serve("/{$}", homePage)
+	serve("/widget", widgetPage)
+	homeRoutes(mux, db, userAgent, src)
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
 		defer cancel()

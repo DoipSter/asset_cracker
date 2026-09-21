@@ -513,6 +513,9 @@ type MoneyBuckets struct {
 	TaxReserve    int64 `json:"tax_reserve"`
 	FeeReserve    int64 `json:"fee_reserve"`
 	FeesPaid      int64 `json:"fees_paid"` // to the venue, on every fill so far
+	// External is everything the owners have put in from outside, to date. It is not a bucket, so
+	// it is left out of the status document; the value snapshots use it to tell earning from funding.
+	External int64 `json:"-"`
 }
 
 // MoneyBucketBalances reads them from the ledger.
@@ -547,6 +550,8 @@ func (s *Store) MoneyBucketBalances(ctx context.Context) (MoneyBuckets, error) {
 			m.FeeReserve = cents
 		case "fees":
 			m.FeesPaid = cents
+		case "external":
+			m.External = -cents // the outside world's balance goes down as money comes in
 		}
 	}
 	return m, rows.Err()

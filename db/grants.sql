@@ -21,3 +21,10 @@ grant update (status, decided_by, decided_at, decision_note) on proposal to asse
 
 -- engine_state is a cache the service rewrites; it is not part of the append-only record.
 grant update (saved_at, state) on engine_state to assetcracker;
+
+-- value_snapshot is appended to once a minute by the service and charted by the home page. The
+-- blanket grant above already covers the service; both are spelled out because this is the
+-- table the read-only role is expected to chart from. assetcracker_ro exists only in the real
+-- database (deploy/pi/setup-prod-db.sh), which is the only place this file is applied.
+grant select, insert on value_snapshot to assetcracker;
+grant select on value_snapshot to assetcracker_ro;

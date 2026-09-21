@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -219,6 +220,82 @@ func run() error {
 			"ticks_written": ticksWritten.Load(), "prices": prices, "rounds": rounds,
 		}, ok
 	}
+	// What the home page and the value snapshots read: the engines' books, typed, from memory.
+	src := web.Sources{Release: version}
+	src.Books = func() []runner.Book {
+		var books []runner.Book
+		for _, in := range instruments { // in instrument order, so the list does not shuffle between calls
+			if r := runners[in.Symbol]; r != nil {
+				books = append(books, r.Book())
+			}
+		}
+		if run2 != nil {
+			books = append(books, run2.Book())
+		}
+		return books
+	}
+	src.Markers = func(coin string, since float64) []runner.Marker {
+		var out []runner.Marker
+		for _, r := range runners {
+			out = append(out, r.Markers(coin, since)...)
+		}
+		if run2 != nil {
+			out = append(out, run2.Markers(coin, since)...)
+		}
+		return out
+	}
+	src.Capital = ledgerCapital(db, run2)
+	for _, in := range instruments {
+		if in.Source != "kalshi" || in.Kind != "binary_contract" {
+			continue
+		}
+		priceFrom, _ := in.Spec["price_from"].(string)
+		seconds, ok := in.Spec["round_seconds"].(float64)
+		if !ok || seconds <= 0 {
+			seconds = 900 // the same default the poller is given above
+		}
+		src.Feeds = append(src.Feeds, web.Feed{Coin: in.Underlying, Product: strings.TrimPrefix(priceFrom, "coinbase:"), Series: in.Symbol, RoundSeconds: seconds})
+	}
+	src.Price = func(product string) (float64, float64, bool) {
+		t, seen := latest.Get(product)
+		p, err := strconv.ParseFloat(t.Price, 64)
+		return p, time.Since(t.ReceivedAt).Seconds(), seen && err == nil
+	}
+	src.Round = func(series string) (kalshi.Status, bool) {
+		p, ok := pollers[series]
+		if !ok {
+			return kalshi.Status{}, false
+		}
+		return p.Status(), true
+	}
+
+	src.Healthy = func() bool {
+		hctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, ok := live(hctx)
+		return ok
+	}
+
+	// Once a minute, write down what everything is worth: the history behind "earned over 24H".
+	// It waits a minute before the first one, so that every round has quotes to mark bets by. A
+	// snapshot that cannot be written is logged and skipped. It never touches the engines.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-t.C:
+				if err := snapshotValues(ctx, db, src, run2, now); err != nil {
+					slog.Error("value snapshot not written", "err", err)
+				}
+			}
+		}
+	}()
+
 	err = health.Serve(ctx, cfg.HTTPAddr,
 		func(hctx context.Context) (any, bool) { return live(hctx) },
 		func(mux *http.ServeMux) {
@@ -233,11 +310,60 @@ func run() error {
 					doc["v2"] = run2.Snapshot()
 				}
 				return doc
-			})
+			}, src)
 		})
 	stop()
 	wg.Wait()
 	return err
+}
+
+// ledgerCapital is where the snapshots and the home page get the ledger's side of the balance
+// sheet. The second engine keeps it cached and re-reads it whenever it changes. Without that
+// engine nothing is seeded, reaped or allocated while the service runs, so it is read from the
+// database at most once a minute.
+func ledgerCapital(db *store.Store, run2 *runner.Runner2) func() (store.Capital, bool) {
+	if run2 != nil {
+		return run2.Capital
+	}
+	var (
+		mu   sync.Mutex
+		last store.Capital
+		at   time.Time
+		good bool
+	)
+	return func() (store.Capital, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		if time.Since(at) > time.Minute {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			c, err := db.ReadCapital(ctx)
+			if at, good = time.Now(), err == nil; good {
+				last = c
+			} else {
+				slog.Warn("could not read the capital behind the value snapshots", "err", err)
+			}
+		}
+		return last, good
+	}
+}
+
+// snapshotValues appends one minute's value snapshots: the total and the four groups every
+// minute, every bucket and coin on each fifth minute of the hour. It refuses to write a row
+// whose contributed figure might be stale, because a wrong row is there for good: the table is
+// append-only, and a gap in the chart is honest where a false step is not.
+func snapshotValues(ctx context.Context, db *store.Store, src web.Sources, run2 *runner.Runner2, now time.Time) error {
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if _, fresh := src.Capital(); !fresh && run2 != nil {
+		run2.RefreshCapital(wctx)
+	}
+	v, _, fresh := src.Valuation()
+	if !fresh {
+		return fmt.Errorf("the ledger's side of the balance sheet could not be read")
+	}
+	at := now.Truncate(time.Second) // one timestamp for the whole batch, exact in Postgres's microseconds
+	return db.InsertSnapshots(wctx, v.Snapshots(at, at.Minute()%5 == 0))
 }
 
 // writeTicks batches trade prints into the database: every second, or sooner when busy.

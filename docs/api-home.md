@@ -51,6 +51,42 @@ The balance sheet. Cheap: served from memory and the once-a-minute value snapsho
 
 `assets` is always the five coins in the order BTC, ETH, SOL, XRP, DOGE. A coin with no stake still appears.
 
+How the figures are made (added when the API was built, 2026-09-21; all additive):
+
+- **Value is marked at the bid, with no selling fee taken off.** An open bet with no bid (a round
+  that has closed and not yet settled, or an empty book) is worth 0 and is counted:
+  `total.unmarked_bets`, and `unmarked_bets` on each asset. A value chart can therefore dip for
+  the few seconds between a round's close and its settlement; that is a bet nobody could price,
+  not a loss. `stake_value_cents` is null only when a coin has bets open and none has a bid.
+- **Earned never counts money put in.** `earned = (value now - contributed now) - (value then -
+  contributed then)`. `total.contributed_cents` is what has come in from outside to date, and
+  `total.lifetime_earned_cents` is value minus that: exact, and older than the snapshots, which
+  only began when this release was deployed. `ALL` means since the FIRST SNAPSHOT, so it is not
+  lifetime; `lifetime_earned_cents` is.
+- **range** defaults to `24H`; anything else unknown is a 400. Before any snapshot exists:
+  `earned_cents` 0, `since` = now, `window_complete` false, and `series` holds only the value
+  right now. `series` always ends with the value right now.
+- `since` is the snapshot really compared with: the newest one at or before the start of the
+  range. If the service was down then, it can be older than the range asked for.
+- `composition[].earned_cents` add up to `total.earned_cents`. A group's figure is null if its
+  snapshot for that moment is missing (it is written in the same batch as the total, so this
+  should not happen). The money buckets earn nothing by construction: what is in them was moved
+  there, not made there.
+- `assets[].earned_cents` is what was realised on ROUNDS OF THAT COIN THAT SETTLED since `since`:
+  everything those rounds paid the buckets (settlements and early sales) less what the buckets
+  paid for them, fees included, from the ledger. It is null if that could not be read.
+- `assets[].change_pct` is the live price against the first Coinbase candle of the range. It is
+  null for `ALL`, and null for the first poll or two after a start, until the candles arrive:
+  the API never waits for Coinbase. `price` and `price_age_s` are null when no trade has been seen.
+- `money.deployed_cents` is the cash in the live buckets right now. `venue_fees_paid_cents` and
+  the four money buckets are as of the last settlement, bucket closure or service start, which
+  is the only time the four can change; fees paid lags by up to a round.
+- `healthy` is the health check's answer and also false when the ledger's side could not be
+  read. `history_error` and `capital_error` (strings) appear only when a lookup failed, and say
+  that the earned figures may be out of date; the last good figures are still served.
+- Snapshots are looked up at most once a minute per range, so `earned_cents` moves with the live
+  value every poll but its starting point moves once a minute.
+
 ## GET api/asset?coin=BTC&range=15M|1H|24H|7D
 
 The chart box for one asset and the stake held in it.
@@ -70,6 +106,18 @@ The chart box for one asset and the stake held in it.
 ```
 
 `world` is `real` for a strategy and `anti` for its anti-world twin. `engine` is `v1` or `v2`.
+`strategy` is the name the pair shares: the twin of Scalper is `"strategy": "Scalper", "world": "anti"`,
+not "Anti Scalper". (A bucket's `name` in api/buckets keeps the engine's own name.)
+
+Added when built: `simulated: true`; `unmarked_bets`; a position's `value_cents` is null when
+there is no bid; each marker has `engine`, and `kind` is `bet` or `sold`; `markers_truncated` is
+true when there were more than 500 in the span and only the newest 500 are given. `range` defaults
+to `15M`; an unknown coin or range is a 400. `15M` points are the open round's recorded
+evaluations, one per five seconds; the others are Coinbase candle closes (1H: one a minute, 24H:
+five minutes, 7D: hourly), each timed at its candle's end. `round.opens` is `closes` minus the
+series' configured round length, not Kalshi's own open time. Outside a round, `15M` gives
+`"points": [], "round": null`. Markers come from the engines' memory: a strategy that ran out and
+was staked again took its earlier life's bets with it.
 
 ## GET api/buckets
 
@@ -88,6 +136,14 @@ The chart box for one asset and the stake held in it.
 
 `allocated_cents` is the sustainment allocation taken from that bucket to date. `status` is
 `active`, `tripped`, `winding_down` or `frozen`; frozen buckets are listed after live ones.
+
+Added when built: `simulated: true`; `unmarked_bets` per bucket. `equity_cents` is cash plus open
+bets at the bid, the same marking as api/home (so it is a little above the widget's equity, which
+takes the selling fee off). `high_water_cents` is null for the first engine, which takes no
+sustainment allocation and keeps no mark. `bets` is the buys the database has recorded for that
+bucket. A frozen bucket shows the cash the ledger says it holds, which after reaping is 0. `life`
+is read from the bucket's name. `events[].note` is the stored detail put into words. The database
+part of this document is kept for ten seconds.
 
 ## GET api/analysis
 
