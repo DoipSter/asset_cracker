@@ -365,10 +365,15 @@ runner. A held bucket that is not in `setup.Buckets` (its version is retired, or
 not passed) carries its own id and ledger account from `HeldBuckets`; nothing v3 writes looks a bucket up in
 `setup.Buckets`.
 
-A Go error is sorted into two kinds by one function, `definitelyRolledBack(err)`: true only when the chain holds a
-`*pgconn.PgError`, that is, the SERVER answered with an error, so the transaction did not commit. A context
-deadline, a cancelled context or any connection error is "outcome unknown": the client gave up, and the server may
-still commit a moment later.
+A Go error is sorted into two kinds by one function, `DefinitelyRolledBack(err)` (exported: the runner is another
+package). It is true in exactly three cases, each certain: the chain holds a `*pgconn.PgError` of severity ERROR (the
+SERVER answered with an error, so the transaction did not commit; FATAL and PANIC are left as unknown **[INFERRED]**);
+`ErrInvalidStep` (the step was refused in Go before any transaction was opened); `ErrRefused` (refused inside the
+transaction on a path that returns before COMMIT is ever sent). A context deadline, a cancelled context, any
+connection error, and any such error answering COMMIT itself is "outcome unknown": the client gave up, and the server
+may still commit a moment later. An order the broker REJECTED or cancelled with no fill is not an error at all: it
+is journaled as a `trade_order` row with no fill and no transfer, the reason in `detail` (a limit that is not a
+storable price goes in as NULL with the text under `detail.limit_not_stored`).
 
 One transaction, in order: `decision` rows (same insert as `RecordStep`; `size_alone` = requested contracts); per
 order one `trade_order` (`broker 'paper'`, `qty` = requested, `limit_price` = the limit, the true `status`,
@@ -410,6 +415,17 @@ turns them back with `math.Round(x*100)` **[READ analysis.go:201]**, exact for t
 ---
 
 ## 4. The engine: `service/internal/kalshi15m3`
+
+**As built (S4, 2026-09-21).** Where the code departs from this section, `service/internal/kalshi15m3/doc.go` lists
+each departure and why; the code is the reference for the runner (section 5). The ones the runner must know:
+`Apply(intents, reports)` (a report does not carry the Kelly fraction or the window's frozen cash); one call to
+`AfterDecide(ticker, decisions)` after every `Decide`; `Account.MayOrder` set BEFORE `NewEngine` (an account that
+was not validated can never order; a settle-only account is held whatever its stored params); `now` passed as
+`UnixSeconds(evaluation time)` so an order's time equals its recorded `placed_at`; each order's detail built with
+`engine.Detail` before `Apply` (it carries the broker's per-level `seen` evidence and `held_cents`). Quarter-Kelly
+ceilings are CUMULATIVE per position, so a re-entry cannot spend a best-ask stake at worse prices. Entry and exit
+tests charge the fee the broker will really book (rounded up per order), asks and bids are the first level showing
+a whole contract, the buy limit never passes the version's band, and no sale is sent that would book nothing.
 
 Ours, not a port: no parity requirement, its own tests. `int64` cents everywhere; the clock is passed in; no
 goroutines, database or logging. It does not import `kalshi15m2` except `k2.ProbYes` (exported, called, not copied).

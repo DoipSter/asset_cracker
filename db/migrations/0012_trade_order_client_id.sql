@@ -1,0 +1,80 @@
+-- The third engine's orders go through a broker that fills only what the recorded book displayed
+-- (service/internal/broker), so an order can be partly filled or not at all, and a write whose answer
+-- was lost must be recognisable afterwards. v1 and v2 never name the column and leave it null.
+--
+-- Safe FOR WHAT THE COLUMNS MEAN, with no third engine running and with the release before it:
+-- nothing that exists names the new column, and an insert that leaves it out stores null, which
+-- the index ignores.
+--
+-- NOT safe to apply at any moment. "alter table trade_order" needs ACCESS EXCLUSIVE on a table the
+-- first two engines write to whenever they trade. Holding that lock is short (see below). WAITING
+-- for it is the danger: while the ALTER queues behind any session that holds any lock on
+-- trade_order, every later insert into trade_order, every insert into fill (its foreign key locks
+-- trade_order) and every read of trade_order queues behind the ALTER, for as long as it waits.
+-- The service would WAIT and carry on when the lock is granted, because nothing on its
+-- order-writing path sets a deadline (no WithTimeout in internal/runner, internal/store or the
+-- poller); while it waits, v1 and v2 record no trades and value snapshots can miss minutes.
+-- [All of this paragraph is INFERRED from Postgres's lock queue and from reading the service.
+-- None of it was observed.]
+--
+--   * So the FIRST statement is "set local lock_timeout = '3s'". db/migrate.sh pipes "set role"
+--     (prod only), this file and the schema_migration insert through ONE
+--     "psql --single-transaction -v ON_ERROR_STOP=1" (READ in migrate.sh, lines 40-41), so
+--     "set local" lasts for exactly this migration and changes nothing for the service or for any
+--     other session. 3 s is a CONVENTION, not a measurement: long enough to get past the service's
+--     own sub-second transactions, short enough that a stall of the engines is bounded by it.
+--     The timeout bounds each lock wait in this file, not only the ALTER's.
+--   * ON A TIMEOUT ("canceling statement due to lock timeout") the WHOLE migration rolls back:
+--     no column, no index, no instrument change, no row in schema_migration. migrate.sh exits
+--     non-zero, and deploy/pi/deploy.sh (set -e, migrates BEFORE it switches the release) stops
+--     with the old release still running. NOTHING WAS APPLIED: find what holds trade_order, wait
+--     for it to finish, and run it again. Running it again is always safe.
+--   * DO NOT APPLY IT DURING THE NIGHTLY BACKUP. assetcracker-backup.timer starts pg_dump of the
+--     whole prod database at 03:30 (deploy/pi/install-service.sh; the timer names no time zone,
+--     so that is 03:30 on the Pi's own clock). pg_dump holds ACCESS SHARE on every table for the
+--     whole dump, and how long the dump takes on the Pi is NOT MEASURED. With the timeout the
+--     cost of getting this wrong is a failed migration and a stall of about 3 s, not a stall for
+--     the rest of the dump. The backup dumps prod only; on dev the same applies to any long
+--     transaction that has touched trade_order (an analysis read, an open psql session).
+--   * How long the lock is HELD, in principle (READ, not measured): from the moment the ALTER is
+--     granted until the COMMIT after the schema_migration insert. The ALTER adds a nullable
+--     column with no default, which rewrites nothing. "create unique index" is not "concurrently"
+--     (that cannot run inside a transaction, and migrate.sh runs every file in one); it reads
+--     trade_order once, and as every existing row has a null client_order_id the partial index
+--     it builds is EMPTY. trade_order was 554 rows on 2026-09-21 (0011's header), a few pages.
+--     Then two comments, five instrument rows and one insert. That is milliseconds of work plus
+--     one commit; the service's inserts wait that long and then succeed.
+--
+-- What was checked before writing this, by READING 0001..0011 and grants.sql (no database here):
+--   * trade_order.status is a check constraint, not an enum, and already allows 'partial',
+--     'cancelled' and 'rejected' (0001, the trade_order table). Nothing is added for them.
+--   * trade_order has no append-only trigger (fill and settlement do), and instrument has no
+--     trigger at all, so nothing here is refused by forbid_change(). (Checked again for the
+--     lock review: every "create trigger" in 0001..0011 is on ledger_transfer, ledger_entry,
+--     bucket, bucket_event, fill, settlement, commentary, human_weight, skim_policy, bucket_skim
+--     or value_snapshot. There is no rule and no event trigger.)
+--   * The update of instrument changes only spec, which is in no key, so it takes the row lock
+--     FOR NO KEY UPDATE. The service's inserts into market and price_tick lock the instrument row
+--     they point at FOR KEY SHARE, which does not conflict, in either direction: the update does
+--     not wait for them and they do not wait for it. Nothing in service/ updates instrument.
+--   * instrument.spec is a jsonb OBJECT on every row (0002 and 0006 build it with
+--     jsonb_build_object), so "spec || {...}" adds a key, exactly as 0007 did for "v2".
+--     "trade": false on SOL, XRP and DOGE keeps the FIRST engine off them and is not touched.
+--   * The service role may insert into every table and update only (status, venue_order_id) on
+--     trade_order. It never updates client_order_id, so grants.sql does not change. The update
+--     of instrument below runs as the migration's role (the owner), not as the service.
+--
+-- NOT YET RUN ANYWHERE: written on a machine with no database; that includes the "set local"
+-- line. Before applying to prod, note "select max(placed_at) from trade_order". After applying it,
+-- check that \d trade_order shows the column and the partial unique index, that max(placed_at)
+-- moves on the next time an engine trades (v1 and v2 orders keep inserting; an order is written
+-- only when an engine trades, so this can take minutes), and run db/test.sh
+-- (tests/0003_client_order_id.sql proves the index's rules).
+set local lock_timeout = '3s';
+alter table trade_order add column client_order_id text;
+create unique index trade_order_client_order_id on trade_order (client_order_id) where client_order_id is not null;
+comment on column trade_order.client_order_id is 'Made by the engine, unique for ever. Null for the first two engines.';
+comment on column trade_order.qty is 'Contracts REQUESTED. What filled is the sum of fill.qty. The first two engines always fill in full.';
+-- Which coins the third engine looks at. Nothing trades until a version is approved and AC_V3 is on.
+update instrument set spec = spec || '{"v3": true}'::jsonb
+ where symbol in ('KXBTC15M','KXETH15M','KXSOL15M','KXXRP15M','KXDOGE15M');

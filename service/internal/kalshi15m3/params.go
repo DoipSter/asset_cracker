@@ -1,0 +1,317 @@
+package kalshi15m3
+
+import (
+	"errors"
+	"fmt"
+	"math"
+	"reflect"
+	"sort"
+	"strings"
+)
+
+// The kinds of number a version may carry (plan section 6.1). Every numeric field of Params must
+// say which it is, so that a guess can never travel as a measurement.
+const (
+	KindMeasured   = "measured"   // from the recorded history, by the written protocol
+	KindConvention = "convention" // a chosen number; a risk preference or a comparability choice
+	KindInherited  = "inherited"  // taken unchanged from the parent version; UNMEASURED
+	KindLimit      = "limit"      // the owner's limit
+	KindFact       = "fact"       // a property of the venue or of what is recorded
+
+	// KindPlaceholder is NOT a kind a version may be registered with. It marks a number that
+	// stands in for a measurement that has not been made: test fixtures, and the dev-database
+	// plumbing versions of step S5. Validate refuses it; only ValidatePlumbing lets it through,
+	// and an engine built that way stamps "plumbing": true on every order it forms.
+	KindPlaceholder = "placeholder"
+)
+
+// Provenance says where one number came from. Value repeats the number so that the params JSON
+// stored with the version cannot say one thing in the field and another in its provenance.
+type Provenance struct {
+	Kind  string  `json:"kind"`
+	Value float64 `json:"value"`
+	Note  string  `json:"note"`
+}
+
+// Params is one version's settings, frozen with where each came from. The JSON keys are the ones
+// stored in strategy_version.params, and the keys of Provenance are those same JSON keys.
+//
+// There is no zero value that works and no default for the four numbers that must be measured
+// (Lambda, StaleCost, StaleCostSell, DriftTol): see Scalper and Value.
+type Params struct {
+	Name  string `json:"name"`
+	Blurb string `json:"blurb"`
+
+	// Lambda is the weight on the model in p = mid + Lambda * (p_model - mid). One number for
+	// every version, because it is a property of the model, not of a strategy. [MEASURED, M1]
+	Lambda float64 `json:"lambda"`
+	// StaleCost is what a second-old ask costs a buyer, in dollars per contract, charged in the
+	// entry test and in the Kelly fraction, never in the ledger. [MEASURED on v2's buys: a proxy]
+	StaleCost float64 `json:"stale_cost"`
+	// StaleCostSell is the same for a seller, charged in both exit tests. Zero, with no
+	// provenance, for a version that never sells early. [MEASURED on v2's sells: a proxy]
+	StaleCostSell float64 `json:"stale_cost_sell"`
+	// DriftTol is how far this package's p_model may be from the second engine's before entries
+	// stop (plan 4.3). It is handed to NewModel. [MEASURED on dev in S5]
+	DriftTol float64 `json:"drift_tol"`
+
+	Kappa          float64 `json:"kappa"`           // the Kelly fraction staked [CONVENTION: a quarter]
+	WindowCapBps   int64   `json:"window_cap_bps"`  // most of min(E_w, seed) one window may use [LIMIT]
+	SeedCents      int64   `json:"seed_cents"`      // the bucket's starting balance [CONVENTION]
+	ExhaustedCents int64   `json:"exhausted_cents"` // under this with nothing open, the account has run out [INHERITED]
+
+	TauMin  float64 `json:"tau_min"` // seconds to the close between which it may enter [INHERITED]
+	TauMax  float64 `json:"tau_max"`
+	BandMin float64 `json:"band_min"` // the ask must lie in this band to be bought [INHERITED]
+	BandMax float64 `json:"band_max"`
+	MaxBets int     `json:"max_bets"` // buy orders WITH A FILL per market [INHERITED]
+	MinGap  float64 `json:"min_gap"`  // seconds between filled buys in one market [INHERITED]
+	MinHold float64 `json:"min_hold"` // seconds after the last buy before it may sell [INHERITED]
+	MinTau  float64 `json:"min_tau"`  // under this many seconds to the close it sends nothing [INHERITED]
+
+	Exit        string  `json:"exit"`         // "hold": never sells early. "ev": the value and capture rules
+	TakeCapture float64 `json:"take_capture"` // sell once the bid covers this share of the way to a dollar [INHERITED]
+
+	Levels     int  `json:"levels"`       // recorded levels an order may walk [FACT: five are recorded]
+	FeePerFill bool `json:"fee_per_fill"` // the pessimistic fee rounding; copied into the Paper by whoever builds it
+
+	Provenance  map[string]Provenance `json:"provenance"`
+	ProtocolSHA string                `json:"protocol_sha"` // sha-256 of docs/v3-measurement-protocol.md
+	ResultSHA   string                `json:"result_sha"`   // sha-256 of research/v3/frozen-params.json
+}
+
+// Measured is the four numbers this package refuses to invent, each with where it came from, and
+// the two hashes that tie them to the protocol and to its result. cmd/measure3 produces it.
+type Measured struct {
+	Lambda, StaleCost, StaleCostSell, DriftTol Provenance
+	ProtocolSHA, ResultSHA                     string
+}
+
+// fields that must be "measured" in a version that may be registered.
+var measuredFields = []string{"lambda", "stale_cost", "stale_cost_sell", "drift_tol"}
+
+// fields a version that never sells early leaves at zero, with no provenance.
+var exitOnlyFields = map[string]bool{"stale_cost_sell": true, "min_hold": true, "take_capture": true}
+
+func inherited(v float64, note string) Provenance {
+	return Provenance{Kind: KindInherited, Value: v, Note: note}
+}
+
+// common is everything the two versions share (plan section 6.4). Every number here that is not
+// handed in through Measured is a convention, a limit, a fact or inherited, and says so.
+func common(m Measured) Params {
+	const parent = "unmeasured; taken unchanged from the parent v2 so that parent and child differ only in fills, sizing and belief"
+	p := Params{
+		Lambda: m.Lambda.Value, StaleCost: m.StaleCost.Value, DriftTol: m.DriftTol.Value,
+		Kappa: 0.25, WindowCapBps: 2500, SeedCents: 100000, ExhaustedCents: 100,
+		TauMax: 900, BandMin: 0.05, BandMax: 0.95, MinTau: 8, Levels: 5,
+		ProtocolSHA: m.ProtocolSHA, ResultSHA: m.ResultSHA,
+	}
+	p.Provenance = map[string]Provenance{
+		"lambda": m.Lambda, "stale_cost": m.StaleCost, "drift_tol": m.DriftTol,
+		"kappa":           {KindConvention, 0.25, "quarter Kelly: a risk preference, not measurable"},
+		"window_cap_bps":  {KindLimit, 2500, "the owner's limit; v2's TotalCap, on min(E_w, seed)"},
+		"seed_cents":      {KindConvention, 100000, "the same $1,000 as v2, so the lines compare"},
+		"exhausted_cents": inherited(100, "v2's BankruptAt"),
+		"tau_max":         inherited(900, parent),
+		"band_min":        inherited(0.05, parent),
+		"band_max":        inherited(0.95, parent),
+		"min_tau":         inherited(8, parent),
+		"levels":          {KindFact, 5, "a snapshot records five bid levels per side"},
+	}
+	return p
+}
+
+func scalper(m Measured) Params {
+	const parent = "unmeasured; taken unchanged from Scalper v2"
+	p := common(m)
+	p.Name, p.Blurb, p.Exit = "Scalper", "Trades often, banks small gains; fills only what the book displayed", "ev"
+	p.StaleCostSell = m.StaleCostSell.Value
+	p.TauMin, p.MaxBets, p.MinGap, p.MinHold, p.TakeCapture = 25, 25, 8, 5, 0.80
+	p.Provenance["stale_cost_sell"] = m.StaleCostSell
+	p.Provenance["tau_min"] = inherited(25, parent)
+	p.Provenance["max_bets"] = inherited(25, parent+"; counts buy orders with a fill")
+	p.Provenance["min_gap"] = inherited(8, parent)
+	p.Provenance["min_hold"] = inherited(5, parent)
+	p.Provenance["take_capture"] = inherited(0.80, parent+"; the review found its effect unresolved")
+	return p
+}
+
+func value(m Measured) Params {
+	const parent = "unmeasured; taken unchanged from Value v2"
+	p := common(m)
+	p.Name, p.Blurb, p.Exit = "Value", "Model and market blended at the measured weight; holds to settlement", "hold"
+	p.TauMin, p.MaxBets, p.MinGap = 8, 1, 20
+	p.Provenance["tau_min"] = inherited(8, parent)
+	p.Provenance["max_bets"] = inherited(1, parent+"; counts buy orders with a fill")
+	p.Provenance["min_gap"] = inherited(20, parent)
+	return p
+}
+
+// Scalper is Scalper v3. It cannot be had without the measured numbers: a Measured whose lambda,
+// staleness costs or drift tolerance is not of kind "measured" is refused.
+func Scalper(m Measured) (Params, error) { p := scalper(m); return p, p.Validate() }
+
+// Value is Value v3, under the same rule.
+func Value(m Measured) (Params, error) { p := value(m); return p, p.Validate() }
+
+// PlumbingScalper and PlumbingValue are the same two versions with placeholder numbers let
+// through. They exist for tests and for the dev database's plumbing versions (step S5), whose
+// results mean nothing and are labelled so. They must never be registered on prod.
+func PlumbingScalper(m Measured) (Params, error) { p := scalper(m); return p, p.ValidatePlumbing() }
+func PlumbingValue(m Measured) (Params, error)   { p := value(m); return p, p.ValidatePlumbing() }
+
+// Validate refuses a version that may not be registered: a numeric field without provenance, a
+// provenance that disagrees with its field, a placeholder anywhere, or one of the four measured
+// numbers not marked measured and tied to a protocol and a result.
+func (p Params) Validate() error { return p.validate(false) }
+
+// ValidatePlumbing is Validate with placeholders allowed. See KindPlaceholder.
+func (p Params) ValidatePlumbing() error { return p.validate(true) }
+
+// Placeholders lists the fields that stand in for a measurement, sorted. Empty for a real version.
+func (p Params) Placeholders() []string {
+	var out []string
+	for key, pr := range p.Provenance {
+		if pr.Kind == KindPlaceholder {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// numericFields is every numeric field of Params by its JSON key. Reflection, so that a field
+// added later cannot escape the provenance rule by being forgotten here.
+func (p Params) numericFields() map[string]float64 {
+	out := map[string]float64{}
+	v, t := reflect.ValueOf(p), reflect.TypeOf(p)
+	for i := 0; i < t.NumField(); i++ {
+		key := strings.Split(t.Field(i).Tag.Get("json"), ",")[0]
+		switch f := v.Field(i); f.Kind() {
+		case reflect.Float64, reflect.Float32:
+			out[key] = f.Float()
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			out[key] = float64(f.Int())
+		}
+	}
+	return out
+}
+
+func (p Params) validate(plumbing bool) error {
+	var bad []string
+	fail := func(format string, a ...any) { bad = append(bad, fmt.Sprintf(format, a...)) }
+
+	if p.Name == "" {
+		fail("the version has no name")
+	}
+	if p.Exit != "hold" && p.Exit != "ev" {
+		fail("exit is %q, not hold or ev", p.Exit)
+	}
+	kinds := map[string]bool{KindMeasured: true, KindConvention: true, KindInherited: true, KindLimit: true, KindFact: true}
+	fields := p.numericFields()
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	usesMeasured := false
+	for _, key := range keys {
+		val := fields[key]
+		if math.IsNaN(val) || math.IsInf(val, 0) {
+			fail("%s is not a number", key)
+			continue
+		}
+		pr, has := p.Provenance[key]
+		if p.Exit == "hold" && exitOnlyFields[key] {
+			if val != 0 || has {
+				fail("%s is set, but a version that never sells early has no use for it", key)
+			}
+			continue
+		}
+		switch {
+		case !has:
+			fail("%s has no provenance", key)
+			continue
+		case pr.Value != val:
+			fail("%s is %v but its provenance says %v", key, val, pr.Value)
+		case pr.Note == "":
+			fail("%s: the provenance has no note", key)
+		case pr.Kind == KindPlaceholder && !plumbing:
+			fail("%s is a placeholder, not a measurement: this version may not be constructed", key)
+		case pr.Kind != KindPlaceholder && !kinds[pr.Kind]:
+			fail("%s: %q is not a kind of provenance", key, pr.Kind)
+		}
+		usesMeasured = usesMeasured || pr.Kind == KindMeasured
+	}
+	for key := range p.Provenance {
+		if _, ok := fields[key]; !ok {
+			fail("provenance for %s, which is not a numeric field", key)
+		}
+	}
+	for _, key := range measuredFields {
+		pr, has := p.Provenance[key]
+		if has && pr.Kind != KindMeasured && pr.Kind != KindPlaceholder {
+			fail("%s must be measured; it is labelled %q", key, pr.Kind)
+		}
+	}
+	if usesMeasured && (p.ProtocolSHA == "" || p.ResultSHA == "") {
+		fail("measured numbers need the protocol's and the result's sha")
+	}
+
+	// Ranges. Written as !(ok) so that a NaN fails.
+	if !(p.Lambda >= 0 && p.Lambda <= 1) {
+		fail("lambda %v is outside 0..1", p.Lambda)
+	}
+	if p.Lambda == 0 && !plumbing {
+		fail("lambda is 0: the protocol's rule R1 says no version is registered")
+	}
+	for key, v := range map[string]float64{"stale_cost": p.StaleCost, "stale_cost_sell": p.StaleCostSell} {
+		if _, ok := priceUnits(v); !ok || !(v >= 0 && v < 1) {
+			fail("%s %v is not a whole number of ten-thousandths of a dollar in 0..1", key, v)
+		}
+	}
+	if !(p.DriftTol >= 0 && p.DriftTol <= 1) {
+		fail("drift_tol %v is outside 0..1", p.DriftTol)
+	}
+	if !(p.Kappa > 0 && p.Kappa <= 1) {
+		fail("kappa %v is outside 0..1", p.Kappa)
+	}
+	if p.WindowCapBps < 0 || p.WindowCapBps > 10000 {
+		fail("window_cap_bps %d is outside 0..10000", p.WindowCapBps)
+	}
+	if p.SeedCents <= 0 || p.ExhaustedCents < 0 {
+		fail("seed_cents must be positive and exhausted_cents not negative")
+	}
+	if !(p.MinTau >= 0 && p.TauMin >= 0 && p.TauMin <= p.TauMax) {
+		fail("the time gates are out of order: min_tau %v, tau_min %v, tau_max %v", p.MinTau, p.TauMin, p.TauMax)
+	}
+	if !(p.BandMin >= 0 && p.BandMin <= p.BandMax && p.BandMax <= 1) {
+		fail("the price band %v..%v is out of order", p.BandMin, p.BandMax)
+	}
+	if p.MaxBets < 1 || !(p.MinGap >= 0) || !(p.MinHold >= 0) {
+		fail("max_bets must be at least 1, min_gap and min_hold not negative")
+	}
+	if !(p.TakeCapture >= 0 && p.TakeCapture < 1) {
+		fail("take_capture %v is outside 0..1", p.TakeCapture)
+	}
+	if p.Levels < 1 || p.Levels > 5 {
+		fail("levels %d is outside 1..5, and only five are recorded", p.Levels)
+	}
+	if len(bad) > 0 {
+		return errors.New("kalshi15m3 params " + p.Name + ": " + strings.Join(bad, "; "))
+	}
+	return nil
+}
+
+// priceUnits turns a dollar figure that is a whole number of ten-thousandths (the staleness costs
+// are frozen rounded to 0.0001) into the broker's price units. ok is false for anything finer,
+// so that the integer arithmetic of prob.go never quietly rounds a parameter.
+func priceUnits(dollars float64) (int64, bool) {
+	scaled := dollars * 10000
+	n := math.Round(scaled)
+	if math.IsNaN(scaled) || math.Abs(scaled-n) > 1e-6 || math.Abs(n) > 10000 {
+		return 0, false
+	}
+	return int64(n), true
+}
