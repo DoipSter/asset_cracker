@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -16,23 +17,28 @@ import (
 // SimBucket is one strategy's bucket, as the runner needs it.
 type SimBucket struct {
 	ID              int64
+	Name            string
 	LedgerAccountID int64
 	VersionID       int64
 	CashCents       int64
+	Frozen          bool
 }
 
 // SimSetup is the simulated world for one series.
 type SimSetup struct {
-	ActorID       int64
-	VenueLedgerID int64
-	FeesLedgerID  int64
-	Buckets       map[string]SimBucket // by strategy name
+	ActorID        int64
+	VenueLedgerID  int64
+	FeesLedgerID   int64
+	PoolLedgerID   int64
+	OwnersLedgerID int64
+	Buckets        map[string]SimBucket // by strategy name
+	venueAccountID int64
 }
 
 // EnsureSimSetup creates, once, the sim ledger accounts, the paper venue account, and one
 // bucket per strategy seeded with seedCents from the common pool. It is safe to call on every
 // start: what exists is left alone. A bucket is never topped up here.
-func (s *Store) EnsureSimSetup(ctx context.Context, series, family string, strategies []string, seedCents int64) (SimSetup, error) {
+func (s *Store) EnsureSimSetup(ctx context.Context, prefix, family string, version int, strategies []string, seedCents int64) (SimSetup, error) {
 	out := SimSetup{Buckets: map[string]SimBucket{}}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -95,14 +101,17 @@ func (s *Store) EnsureSimSetup(ctx context.Context, series, family string, strat
 	}
 
 	for _, name := range strategies {
-		bucketName := series + " " + name + " v1"
+		bucketName := fmt.Sprintf("%s %s v%d", prefix, name, version)
 		var b SimBucket
-		err := tx.QueryRow(ctx, `select id, ledger_account_id, strategy_version_id from bucket where name = $1`, bucketName).
-			Scan(&b.ID, &b.LedgerAccountID, &b.VersionID)
+		// The newest bucket of that name: a strategy that ran out is frozen and replaced by
+		// "<name> life N", and the replacement is the one that trades.
+		err := tx.QueryRow(ctx, `select id, ledger_account_id, strategy_version_id, status = 'frozen' from bucket
+		                          where name = $1 or name like $1 || ' life %' order by id desc limit 1`, bucketName).
+			Scan(&b.ID, &b.LedgerAccountID, &b.VersionID, &b.Frozen)
 		if errors.Is(err, pgx.ErrNoRows) {
 			if err = tx.QueryRow(ctx, `select v.id from strategy_version v join strategy st on st.id = v.strategy_id
-			                            where st.family = $1 and st.name = $2 and v.version = 1`, family, name).Scan(&b.VersionID); err != nil {
-				return out, fmt.Errorf("strategy %s/%s v1 is not registered: %w", family, name, err)
+			                            where st.family = $1 and st.name = $2 and v.version = $3`, family, name, version).Scan(&b.VersionID); err != nil {
+				return out, fmt.Errorf("strategy %s/%s v%d is not registered: %w", family, name, version, err)
 			}
 			if b.LedgerAccountID, err = account("bucket", bucketName+" cash"); err != nil {
 				return out, err
@@ -128,9 +137,88 @@ func (s *Store) EnsureSimSetup(ctx context.Context, series, family string, strat
 		if err = tx.QueryRow(ctx, `select coalesce(sum(amount_cents), 0) from ledger_entry where account_id = $1`, b.LedgerAccountID).Scan(&b.CashCents); err != nil {
 			return out, err
 		}
+		b.Name = bucketName
 		out.Buckets[name] = b
 	}
+	out.PoolLedgerID, out.OwnersLedgerID, out.venueAccountID = pool, owners, venueAccount
 	return out, tx.Commit(ctx)
+}
+
+// CloseBucket is what happens when a strategy runs out: whatever cash is left is reaped into the
+// common pool and the bucket is frozen, never topped up. If restake is set, a NEW bucket for the
+// same strategy version takes its place with a fresh seed, named "<name> life N"; the frozen one
+// keeps its whole record. Returns the bucket now in that slot.
+func (s *Store) CloseBucket(ctx context.Context, setup SimSetup, b SimBucket, reason string, restake bool, life int, seedCents int64) (SimBucket, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return b, err
+	}
+	defer tx.Rollback(ctx)
+	transfer := func(reason, memo string, from, to, cents int64) error {
+		var id int64
+		if err := tx.QueryRow(ctx, `insert into ledger_transfer (mode, reason, memo, created_by) values ('sim', $1, $2, $3) returning id`,
+			reason, memo, setup.ActorID).Scan(&id); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `insert into ledger_entry (transfer_id, account_id, mode, amount_cents) values ($1, $2, 'sim', $3), ($1, $4, 'sim', $5)`,
+			id, from, -cents, to, cents)
+		return err
+	}
+	event := func(bucket int64, kind, detail string) error {
+		_, err := tx.Exec(ctx, `insert into bucket_event (bucket_id, kind, detail, actor_id) values ($1, $2, jsonb_build_object('note', $3::text), $4)`,
+			bucket, kind, detail, setup.ActorID)
+		return err
+	}
+	var left int64
+	if err := tx.QueryRow(ctx, `select coalesce(sum(amount_cents), 0) from ledger_entry where account_id = $1`, b.LedgerAccountID).Scan(&left); err != nil {
+		return b, err
+	}
+	if err := event(b.ID, "tripped", reason); err != nil {
+		return b, err
+	}
+	if left > 0 {
+		if err := transfer("reap", "reap "+b.Name, b.LedgerAccountID, setup.PoolLedgerID, left); err != nil {
+			return b, err
+		}
+		if err := event(b.ID, "reaped", fmt.Sprintf("%d cents to the common pool", left)); err != nil {
+			return b, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `update bucket set status = 'frozen', tripped_at = now(), frozen_at = now(), trip_reason = $2 where id = $1`, b.ID, reason); err != nil {
+		return b, err
+	}
+	if err := event(b.ID, "frozen", reason); err != nil {
+		return b, err
+	}
+	next := b
+	next.Frozen, next.CashCents = true, 0
+	if restake {
+		base := b.Name
+		if i := strings.Index(base, " life "); i >= 0 {
+			base = base[:i]
+		}
+		next = SimBucket{Name: fmt.Sprintf("%s life %d", base, life), VersionID: b.VersionID, CashCents: seedCents}
+		if err := tx.QueryRow(ctx, `insert into ledger_account (kind, mode, name) values ('bucket', 'sim', $1) returning id`, next.Name+" cash").Scan(&next.LedgerAccountID); err != nil {
+			return b, err
+		}
+		if err := tx.QueryRow(ctx, `insert into bucket (name, mode, venue_account_id, ledger_account_id, strategy_version_id, limits, tax_rate_bps)
+		                           values ($1, 'sim', $2, $3, $4, '{}', 0) returning id`, next.Name, setup.venueAccountID, next.LedgerAccountID, next.VersionID).Scan(&next.ID); err != nil {
+			return b, err
+		}
+		if err := transfer("deposit", "sim funds for "+next.Name, setup.OwnersLedgerID, setup.PoolLedgerID, seedCents); err != nil {
+			return b, err
+		}
+		if err := transfer("seed", "seed "+next.Name, setup.PoolLedgerID, next.LedgerAccountID, seedCents); err != nil {
+			return b, err
+		}
+		if err := event(next.ID, "seeded", fmt.Sprintf("replaces %s", b.Name)); err != nil {
+			return b, err
+		}
+		if _, err := tx.Exec(ctx, `update bucket set replaced_by_bucket_id = $2 where id = $1`, b.ID, next.ID); err != nil {
+			return b, err
+		}
+	}
+	return next, tx.Commit(ctx)
 }
 
 // DecisionRow is one strategy's conclusion from one look at the market.
@@ -157,6 +245,7 @@ type TradeRow struct {
 
 // StepRecord is everything one look at one market produced.
 type StepRecord struct {
+	EvaluationID    int64 // if set, decisions hang off this existing row and none is inserted
 	At              time.Time
 	MarketID        int64
 	UnderlyingPrice string
@@ -181,11 +270,13 @@ func (s *Store) RecordStep(ctx context.Context, setup SimSetup, r StepRecord) er
 	}
 	defer tx.Rollback(ctx)
 
-	var evalID int64
-	if err := tx.QueryRow(ctx, `insert into evaluation (at, market_id, underlying_price, quotes, model)
-	                            values ($1, $2, nullif($3, '')::numeric, $4, $5) returning id`,
-		r.At, r.MarketID, r.UnderlyingPrice, quotes, model).Scan(&evalID); err != nil {
-		return fmt.Errorf("evaluation: %w", err)
+	evalID := r.EvaluationID
+	if evalID == 0 {
+		if err := tx.QueryRow(ctx, `insert into evaluation (at, market_id, underlying_price, quotes, model)
+		                            values ($1, $2, nullif($3, '')::numeric, $4, $5) returning id`,
+			r.At, r.MarketID, r.UnderlyingPrice, quotes, model).Scan(&evalID); err != nil {
+			return fmt.Errorf("evaluation: %w", err)
+		}
 	}
 	decisionIDs := make([]int64, len(r.Decisions))
 	for i, d := range r.Decisions {

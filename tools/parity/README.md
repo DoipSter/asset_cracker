@@ -1,5 +1,11 @@
 # Parity harness
 
+**Two engine versions, two harnesses.** `record.py` and `replay.py` here are for the second
+version (kalshi_trader.py on main at dc10fd4: one trader, five coins, shared balances, twins);
+the Go side is `service/cmd/replay2`. The first version's harness is in `v1/` and needs
+kalshi_trader.py at ed05fc2; its fixture is `fixtures/2026-09-20_40min`, and its Go side is
+`service/cmd/replay`. What follows was written for the first version; the method is the same.
+
 Phase 1 of `docs/flutter-port-scope.md`. It answers one question: given the same inputs, does
 an engine make the same trades? First for the Python against itself, later for the Dart port
 against the Python.

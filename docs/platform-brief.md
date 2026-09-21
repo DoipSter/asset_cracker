@@ -231,6 +231,9 @@ tick tables by time and set a retention policy.
 3. Strategy interface; port Doipster's six as the first family; check with the replay harness.
    **Done 2026-09-20** (`service/internal/kalshi15m`, `cmd/replay`): parity gate passes on the
    Mac and on the Pi; the six are in `strategy_version` as the first trials.
+   **Version 2 ported 2026-09-21** (`service/internal/kalshi15m2`, `cmd/replay2`): shared balances
+   across five coins, the anti-world twins, running out handled as freeze-reap-replace in the
+   ledger. Twelve more rows in the trials registry.
 4. Paper broker, journal, bucket lifecycle, supervisor and breakers. **Partly done 2026-09-20**
    (`service/internal/runner`): the six strategies run live in sim in twelve buckets; every
    decision is journaled with the rule that blocked it; fills, fees and payouts are ledger

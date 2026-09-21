@@ -15,6 +15,7 @@ public read, and every ledger account is `sim`.
 | `internal/coinbase` | Trade prints from Coinbase's WebSocket `matches` channel, to `price_tick` |
 | `internal/kalshi` | Once a second per series: the open round, its order-book quotes, to `evaluation`; and how each round settled, to `market` |
 | `internal/kalshi15m` | The first strategy family: doipster's six, ported from `kalshi_trader.py`. Pure decisions (`Params.Decide`) separate from bookkeeping (`Account`) |
+| `internal/kalshi15m2` | The second version (main at dc10fd4): one balance per strategy shared across five coins, a $1,000 bank with $250 at risk, the busy Scalper with take_capture, running out and being staked again, and the anti-world twins. Checked by `cmd/replay2` |
 | `internal/pyfloat` | CPython's float rounding, repr and floor division, where Go differs |
 | `cmd/replay` | The parity gate: replays a recording through the Go port and compares with the Python |
 | `internal/runner` | Runs a strategy family live for one series: feeds the engine, journals every decision, books every simulated fill and payout in the ledger, saves and restores state. Halts the series if money moved but could not be recorded |
@@ -38,10 +39,11 @@ second, with its tick count; 15M, 1H, 24H and 7D; the strategies panel on the ri
 the coin you are looking at, with Account, Log and Strategies. The bell turns on browser
 notifications for the tracked strategy.
 
-What it cannot show, because the engine behind it is his first version: the anti-world (the
-left panel says so, and the world toggle is disabled), strategies on SOL, XRP and DOGE (their
-pages show price, round and charts; the panel says they are record-only), the shared \$1,000
-bank and the bankruptcy report. Not carried over by choice: Pause all and Reset all (the page is
+The panels show the second engine version: the right one the six strategies, the left one their
+anti-world twins, each with Account, Log (every coin, with its sign) and Strategies; the world
+toggle switches whose bets the chart marks. The first version keeps running on BTC and ETH and
+is recorded, but is not on the page. Not ported: the bankruptcy post-mortem file (the ledger and
+journal hold the same facts) and the per-round CSV (rounds are rows in `market`). Not carried over by choice: Pause all and Reset all (the page is
 read-only), the amber glow after a bet, and dragging a frameless window.
 
 ## Settings

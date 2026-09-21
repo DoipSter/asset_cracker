@@ -26,6 +26,7 @@
   .round { position:absolute; top:10px; width:40px; height:40px; border-radius:50%; background:var(--card); display:flex; align-items:center; justify-content:center; }
   .round.bell { left:16px; color:var(--bell); } .round.bell.muted { color:var(--muted); }
   .round.world { left:58px; color:var(--text); } .round.world:disabled { color:#4a5268; }
+  .round.world::after { content:attr(data-mark); position:absolute; right:-2px; top:-4px; font-size:9px; color:var(--down); }
   .round.close { right:25px; top:15px; width:30px; height:30px; background:var(--button); color:var(--muted); }
   .round svg { width:26px; height:26px; fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; } .round.bell svg { fill:currentColor; stroke:none; }
   .pills { position:absolute; top:65px; left:20px; right:20px; display:flex; gap:3px; }
@@ -82,7 +83,7 @@
   <div class="screen">
     <div class="island"></div>
     <button class="round bell" id="bell" data-bell="1" title="Notify me when the tracked strategy bets, sells or settles"><svg viewBox="-14 -14 28 28"><path d="M0-11c-5 0-8 4-8 9v5l-3 4h22l-3-4v-5c0-5-3-9-8-9z"/><circle cx="0" cy="10" r="2.6"/></svg></button>
-    <button class="round world" id="world" disabled title="Switches the chart between the strategies' bets and their anti-world twins'. The anti-world is not running on this service yet."><svg viewBox="-14 -14 28 28"><circle r="11"/><path d="M-11 0h22"/><ellipse rx="4.6" ry="11"/><ellipse rx="9.3" ry="11"/></svg></button>
+    <button class="round world" id="world" data-world="1" title="Switch the chart's bet markers between the strategies and their anti-world twins. The panels stay where they are."><svg viewBox="-14 -14 28 28"><circle r="11"/><path d="M-11 0h22"/><ellipse rx="4.6" ry="11"/><ellipse rx="9.3" ry="11"/></svg></button>
     <button class="round close" data-closeall="1" title="Close both panels"><svg viewBox="-14 -14 28 28" style="stroke-width:2.4"><path d="M-5-5l10 10M-5 5l10-10"/></svg></button>
     <div class="pills" id="pills"></div>
     <div class="caption" id="caption"><i id="capsign"></i><span id="capname"></span><span class="dot"></span><span class="livetext">connecting</span></div>
@@ -112,8 +113,9 @@ const COINS = {
 const RANGES = ["1M", "15M", "1H", "24H", "7D"];
 const store = (k, v) => v === undefined ? localStorage.getItem("ac." + k) : localStorage.setItem("ac." + k, v);
 const ui = { coin: COINS[store("coin")] ? store("coin") : "BTC", range: RANGES.includes(store("range")) ? store("range") : "15M",
-             open: { real: store("openreal") === "1", anti: store("openanti") === "1" }, tab: "account", pick: {}, logAt: 0 };
-for (const c of Object.keys(COINS)) ui.pick[c] = store("pick" + c) || "Value";
+             open: { real: store("openreal") === "1", anti: store("openanti") === "1" }, tab: { real: "account", anti: "account" },
+             pick: { real: store("pickreal") || "Value", anti: store("pickanti") || "Anti Value" }, logAt: { real: 0, anti: 0 },
+             world: store("world") === "anti" ? "anti" : "real" };   // whose bets the chart marks
 let status = null, minute = []; const rounds = {}, histories = {};
 const $ = (id) => document.getElementById(id);
 const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
@@ -121,13 +123,15 @@ const usd = (v, d = 2) => "$" + Number(v).toLocaleString(undefined, { minimumFra
 const hm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const mix = (a, b, t) => "#" + [1, 3, 5].map(i => Math.round(parseInt(a.slice(i, i + 2), 16) * (1 - t) + parseInt(b.slice(i, i + 2), 16) * t).toString(16).padStart(2, "0")).join("");
-const engine = (coin) => status && status.engines ? status.engines[COINS[coin].series] : null;
-const account = (coin) => { const e = engine(coin); if (!e) return null; const a = e.accounts.find(a => a.name === ui.pick[coin]) || e.accounts[0]; a.log = a.log || []; a.open = a.open || []; return a; };
+const v2 = () => status && status.v2 ? status.v2 : null;
+const offsetOf = (coin) => { const e = v2(); return e && e.coins[coin] ? e.coins[coin] : { index_offset: 0, offset_samples: 3 }; };
+const world = (w) => { const e = v2(); return e ? e.accounts.filter(a => !!a.anti === (w === "anti")) : []; };
+const account = (w) => { const rows = world(w); if (!rows.length) return null; const a = rows.find(a => a.name === ui.pick[w]) || rows[0]; a.log = a.log || []; return a; };
 
 function drawChart() {
   const cv = $("chart"), c = cv.getContext("2d"); c.setTransform(2, 0, 0, 2, 0, 0); c.clearRect(0, 0, 324, 288);
-  const left = 22, right = 302, top = 28, bottom = 224, coin = ui.coin, cfg = COINS[coin], dec = cfg.decimals, eng = engine(coin), st = status && status.rounds[cfg.series];
-  const lift = 1 + (eng ? eng.index_offset : 0);
+  const left = 22, right = 302, top = 28, bottom = 224, coin = ui.coin, cfg = COINS[coin], dec = cfg.decimals, st = status && status.rounds[cfg.series];
+  const lift = 1 + offsetOf(coin).index_offset;
   const say = (msg) => { c.fillStyle = css("--muted"); c.font = "400 14px Segoe UI, system-ui"; c.textAlign = "center"; c.fillText(msg, 162, 130); };
   const grid = () => { c.strokeStyle = css("--grid"); c.lineWidth = 1; for (let i = 0; i < 4; i++) { const y = top + (bottom - top) * i / 3; c.beginPath(); c.moveTo(left, y); c.lineTo(right, y); c.stroke(); } };
   const lowhigh = (lo, hi, mid) => { c.fillStyle = css("--muted"); c.font = "600 11px Segoe UI, system-ui"; c.textAlign = "left"; c.fillText("Low  " + usd(lo, dec), left, 264); c.textAlign = "right"; c.fillText("High  " + usd(hi, dec), right, 264);
@@ -161,7 +165,7 @@ function drawChart() {
   const pts = (rounds[st.ticker] || []).filter(p => p.price != null).map(p => [Date.parse(p.at) / 1000, p.price]).filter(([t]) => t >= openT && t <= closeT);
   const live = status.prices[cfg.product]; if (live && Date.now() / 1000 <= closeT) pts.push([Date.now() / 1000, Number(live.price)]);
   if (!pts.length) return say("Window just opened…");
-  const acct = account(coin), bets = acct ? acct.log.filter(l => l.close === closeT) : [];
+  const acct = account(ui.world), bets = acct ? acct.log.filter(l => l.coin === coin && l.close === closeT) : [];
   let levels = pts.map(([, p]) => p * lift).concat([st.strike]); bets.forEach(l => { levels.push(l.btc_price * lift); if (l.exit_btc) levels.push(l.exit_btc * lift); });
   let lo = Math.min(...levels), hi = Math.max(...levels); const pad = Math.max((hi - lo) * 0.14, st.strike * cfg.pad); lo -= pad; hi += pad;
   const X = (t) => left + (right - left) * (t - openT) / 900, Yi = (p) => bottom - (bottom - top) * (p - lo) / (hi - lo), Y = (p) => Yi(p * lift);
@@ -185,13 +189,13 @@ function drawChart() {
 }
 
 function renderPhone() {
-  const coin = ui.coin, cfg = COINS[coin], dec = cfg.decimals, eng = engine(coin), st = status && status.rounds[cfg.series], live = status && status.prices[cfg.product];
+  const coin = ui.coin, cfg = COINS[coin], dec = cfg.decimals, eng = offsetOf(coin), st = status && status.rounds[cfg.series], live = status && status.prices[cfg.product];
   // an active pill is filled with TEXT, so its bright sign is dimmed half-way to the background to stay readable
   $("pills").innerHTML = Object.entries(COINS).map(([c, k]) => '<button data-coin="' + c + '" class="' + (c === coin ? "on" : "") + '"><i style="color:' + (c === coin ? mix(k.colour, "#0B0F1A", 0.5) : k.colour) + '">' + k.sign + "</i>" + c + "</button>").join("");
   for (const b of document.querySelectorAll(".edge")) { const on = ui.open[b.dataset.panel]; b.classList.toggle("on", on); b.textContent = (b.dataset.panel === "real") === on ? "‹" : "›"; }
   $("capsign").textContent = cfg.sign; $("capsign").style.color = cfg.colour; $("capname").textContent = coin + " index";
   const online = live && live.age_seconds < 60; $("caption").classList.toggle("live", !!online); $("caption").querySelector(".livetext").textContent = !status ? "connecting" : online ? "live" : live ? "quiet" : "offline";
-  const lift = 1 + (eng ? eng.index_offset : 0), price = live ? Number(live.price) : null;
+  const lift = 1 + eng.index_offset, price = live ? Number(live.price) : null;
   $("price").textContent = price == null ? "$ ———" : usd(price * lift, dec); $("price").classList.toggle("muted", price == null);
   $("price").style.fontSize = dec > 4 ? "38px" : "44px";
   const h = histories[cfg.product + ui.range]; let first = h && h.closes && h.closes[0];
@@ -202,49 +206,47 @@ function renderPhone() {
   if (st && st.ticker) {
     const est = price == null ? null : price * lift, state = est == null ? "--muted" : est >= st.strike ? "--up" : "--down", left = Math.floor(Date.parse(st.closes) / 1000 - Date.now() / 1000);
     $("ptbdot").style.background = css(state); $("ptbv").textContent = usd(st.strike, dec); $("clock").textContent = left > 0 ? Math.floor(left / 60) + ":" + String(left % 60).padStart(2, "0") : "settling";
-    if (est != null) { const diff = est - st.strike; $("ptbsub").style.color = css(state); $("ptbsub").textContent = (diff >= 0 ? "above" : "below") + " target by " + usd(Math.abs(diff), dec) + (!eng ? "" : eng.offset_samples < 3 ? "  ·  index gap still estimated" : ""); }
+    if (est != null) { const diff = est - st.strike; $("ptbsub").style.color = css(state); $("ptbsub").textContent = (diff >= 0 ? "above" : "below") + " target by " + usd(Math.abs(diff), dec) + (eng.offset_samples < 3 ? "  ·  index gap still estimated" : ""); }
   } else { $("ptbv").textContent = "—"; $("clock").textContent = ""; $("ptbsub").textContent = ""; }
   $("ranges").innerHTML = RANGES.map(r => '<button data-range="' + r + '" class="' + (r === ui.range ? "on" : "") + '">' + r + "</button>").join("");
   $("lasttrade").textContent = "Last trade " + (live ? new Date(Date.now() - live.age_seconds * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3 }) : "—");
   $("mode").textContent = status ? "release " + status.version + "  ·  service on the Pi" : "";
-  const halted = Object.values(status && status.engines || {}).filter(e => e.halted).map(e => e.series + ": " + e.halted);
+  const halted = Object.values(status && status.engines || {}).concat(v2() ? [v2()] : []).filter(e => e.halted).map(e => (e.series || "v2") + ": " + e.halted);
+  const w = $("world"); w.disabled = !v2(); w.style.color = ui.world === "anti" ? css("--down") : ""; w.dataset.mark = ui.world === "anti" ? "A" : "";
   $("banner").innerHTML = "Simulation only. No account, no real orders." + (halted.length ? " <b>HALTED — " + esc(halted.join("; ")) + "</b>" : "") + (status && !status.ok ? " <b>Service degraded.</b>" : "");
   drawChart();
 }
 
-function renderAnti() {
-  const el = $("panelAnti"); el.hidden = !ui.open.anti; if (el.hidden) return;
-  el.innerHTML = '<h3 class="down">Anti-world ' + ui.coin + '</h3><div class="pbody"><div class="note"><b>Not running here yet</b>The anti-world is a twin of every strategy that takes the other side of each bet, for the same stake, at the same moment. It is part of the app\'s second strategy version, which this service has not ported. Nothing is being simulated for it.</div></div>';
-}
-
-function renderReal() {
-  const coin = ui.coin, el = $("panelReal"); el.hidden = !ui.open.real; if (el.hidden) return;
-  const eng = engine(coin), a = account(coin), tab = ui.tab, st = status && status.rounds[COINS[coin].series], title = "<h3>Kalshi " + coin + " 15-min</h3>";
-  if (!status) { el.innerHTML = title + '<div class="pbody"><div class="note">Waiting for the service…</div></div>'; return; }
-  if (!eng || !a) { el.innerHTML = title + '<div class="pbody"><div class="note"><b>Recording only</b>' + coin + "'s trades, Kalshi's order book each second and every settlement are being stored. No strategy runs on " + coin + " yet: the ones registered are the per-coin originals, and the app's current five-coin design has not been ported.</div></div>"; return; }
+function renderPanel(w) {
+  const anti = w === "anti", coin = ui.coin, el = $(anti ? "panelAnti" : "panelReal"); el.hidden = !ui.open[w]; if (el.hidden) return;
+  const e = v2(), a = account(w), tab = ui.tab[w], st = status && status.rounds[COINS[coin].series];
+  const title = "<h3" + (anti ? ' class="down"' : "") + ">" + (anti ? "Anti-world " + coin : "Kalshi " + coin + " 15-min") + "</h3>";
+  if (!e || !a) { el.innerHTML = title + '<div class="pbody"><div class="note">' + (status ? "<b>Not running</b>The second engine version is not running on this service." : "Waiting for the service…") + "</div></div>"; return; }
   let body = "";
   if (tab === "account") {
-    const good = a.pnl >= 0, q = st && st.quotes, v = a.view, open = a.open;
+    const good = a.pnl >= 0, q = st && st.quotes, v = a.views[coin], open = a.log.filter(l => l.status === "open"), here = open.filter(l => l.coin === coin);
     const odds = q && Number(q.yes_ask) > 0 && Number(q.no_ask) > 0 ? "UP " + Math.round(q.yes_ask * 100) + "¢ (" + (1 / q.yes_ask).toFixed(2) + "x)  ·  DOWN " + Math.round(q.no_ask * 100) + "¢ (" + (1 / q.no_ask).toFixed(2) + "x)" : "Loading…";
-    const chance = v ? "model " + Math.round(v.p_model * 100) + "%  ·  market " + Math.round(v.mid * 100) + "%" : "—";
-    const sig = !v ? ["—", "muted"] : v.bet ? [v.side + " · " + Math.round(v.conf) + "% confident · will bet", v.side === "UP" ? "up" : "down"] : [v.side + " " + Math.round(v.conf) + "%  ·  " + v.why, "muted"];
-    const bet = open.length === 1 ? [open[0].side + " × " + open[0].contracts + " @ " + Math.round(open[0].price * 100) + "¢ (" + open[0].multiplier.toFixed(2) + "x)", open[0].side === "UP" ? "up" : "down"]
-      : open.length ? [open.length + " bets  ·  " + open.filter(l => l.side === "UP").reduce((s, l) => s + l.contracts, 0) + " UP, " + open.filter(l => l.side === "DOWN").reduce((s, l) => s + l.contracts, 0) + " DOWN", ""] : ["None", "muted"];
+    const orig = anti ? world("real").find(x => "Anti " + x.name === a.name) : null, vv = anti ? (orig && orig.views[coin]) : v;
+    const chance = vv ? "model " + Math.round(vv.p_model * 100) + "%  ·  market " + Math.round(vv.mid * 100) + "%" : "—";
+    const sig = anti ? [a.retired ? "retired: it ran out, and its original trades on alone" : "mirrors " + a.name.slice(5) + ", other side, same stake", "muted"]
+      : !v ? ["—", "muted"] : v.bet ? [v.side + " · " + Math.round(v.conf) + "% confident · will bet", v.side === "UP" ? "up" : "down"] : [v.side + " " + Math.round(v.conf) + "%  ·  " + v.why, "muted"];
+    const bet = here.length === 1 ? [here[0].side + " × " + here[0].contracts + " @ " + Math.round(here[0].price * 100) + "¢ (" + here[0].multiplier.toFixed(2) + "x)", here[0].side === "UP" ? "up" : "down"]
+      : here.length ? [here.length + " bets  ·  " + here.filter(l => l.side === "UP").reduce((s, l) => s + l.contracts, 0) + " UP, " + here.filter(l => l.side === "DOWN").reduce((s, l) => s + l.contracts, 0) + " DOWN", ""] : ["None on " + coin, "muted"];
     body = '<div class="equity">' + usd(a.equity) + '</div><div class="pnl ' + (good ? "up" : "down") + '" style="background:var(--' + (good ? "uptint" : "downtint") + ')">' + (good ? "+" : "−") + usd(Math.abs(a.pnl)) + "  ·  " + (a.pnl_pct >= 0 ? "+" : "") + a.pnl_pct.toFixed(2) + "%</div>" +
-      '<div class="pstate ' + (open.length ? "up" : "") + '">' + (open.length ? open.length + " open" : "Watching") + "</div>" +
+      '<div class="pstate ' + (a.retired ? "down" : open.length ? "up" : "") + '">' + (a.retired ? "Retired" : open.length ? open.length + " open" : "Watching") + "</div>" +
       '<div class="facts"><div><span>Odds</span><span>' + esc(odds) + "</span></div><div><span>UP chance</span><span>" + chance + '</span></div><div><span>Signal</span><span class="' + sig[1] + '">' + esc(sig[0]) + '</span></div><div><span>Bets</span><span class="' + bet[1] + '">' + esc(bet[0]) + "</span></div></div>" +
-      '<div class="foot" style="top:200px;font-size:11px">Rounds monitored ' + eng.rounds_monitored + "  ·  participated " + a.joined + '</div><div class="foot muted" style="top:216px;font-size:10px">' + a.bets + " bets  ·  " + a.wins + " wins  ·  " + a.losses + " losses  ·  cash " + usd(a.cash) + "</div>";
+      '<div class="foot" style="top:200px;font-size:11px">One balance across all five coins  ·  ' + usd(a.at_risk) + " of " + usd(e.total_cap, 0) + ' at risk</div><div class="foot muted" style="top:216px;font-size:10px">' + a.bets + " bets  ·  " + a.wins + " wins  ·  " + a.losses + " losses  ·  cash " + usd(a.cash) + (a.bankruptcies ? "  ·  life " + (a.bankruptcies + 1) : "") + '</div><div class="foot muted" style="top:232px;font-size:10px">Rounds monitored ' + e.rounds_monitored + "  ·  participated " + a.joined + "</div>";
   } else if (tab === "log") {
-    const lots = a.log.slice().reverse(), at = Math.max(0, Math.min(ui.logAt, lots.length - 9)), page = lots.slice(at, at + 9), now = st ? Date.parse(st.closes) / 1000 : 0, net = lots.reduce((s, l) => s + (l.pnl || 0), 0);
-    ui.logAt = at;
+    const lots = a.log.slice().reverse(), at = Math.max(0, Math.min(ui.logAt[w], lots.length - 9)), page = lots.slice(at, at + 9), net = lots.reduce((s, l) => s + (l.pnl || 0), 0);
+    const live = new Set(Object.values(status.rounds).map(r => Date.parse(r.closes) / 1000)); ui.logAt[w] = at;
     body = !lots.length ? '<div class="foot muted thin" style="top:100px;font-size:14px">No bets yet</div><div class="foot muted" style="top:126px;font-size:11px">They\'ll show up here as they\'re placed</div>'
-      : '<table><tr><th>TIME</th><th>COIN</th><th>BET</th><th></th><th class="r">COST</th><th class="r">RESULT</th></tr>' + page.map(l => { const res = l.status === "open" ? ["open", "muted"] : [(l.status === "sold" ? "sold " : "") + (l.pnl > 0 ? "+" : "−") + "$" + Math.abs(l.pnl).toFixed(2), l.pnl > 0 ? "up" : "down"];
-          return '<tr class="' + (l.close === now ? "now" : "") + '"><td class="muted" style="font-size:9px">' + hm(l.t).replace(/\s?([AP])M$/i, (m, x) => " " + x.toLowerCase()) + "</td><td style='font-weight:600'>" + coin + '</td><td class="' + (l.side === "UP" ? "up" : "down") + '" style="font-weight:600">' + l.side + "</td><td>" + l.contracts + "×" + Math.round(l.price * 100) + '¢ <span class="muted" style="font-size:9px">' + (l.multiplier >= 10 ? l.multiplier.toFixed(0) : l.multiplier.toFixed(2)) + 'x</span></td><td class="r">$' + l.cost.toFixed(2) + '</td><td class="r ' + res[1] + '" style="font-weight:600">' + res[0] + "</td></tr>"; }).join("") + "</table>" +
+      : '<table><tr><th>TIME</th><th>COIN</th><th>BET</th><th></th><th class="r">COST</th><th class="r">RESULT</th></tr>' + page.map(l => { const res = l.status === "open" ? ["open", "muted"] : [(l.status === "sold" ? "sold " : "") + (l.pnl > 0 ? "+" : "−") + "$" + Math.abs(l.pnl).toFixed(2), l.pnl > 0 ? "up" : "down"], k = COINS[l.coin];
+          return '<tr class="' + (live.has(l.close) && l.status === "open" ? "now" : "") + '"><td class="muted" style="font-size:9px">' + hm(l.t).replace(/\s?([AP])M$/i, (m, x) => " " + x.toLowerCase()) + "</td><td style='font-weight:600'><span style='color:" + (k ? k.colour : "inherit") + "'>" + (k ? k.sign + " " : "") + "</span>" + esc(l.coin || "?") + '</td><td class="' + (l.side === "UP" ? "up" : "down") + '" style="font-weight:600">' + l.side + "</td><td>" + l.contracts + "×" + Math.round(l.price * 100) + '¢ <span class="muted" style="font-size:9px">' + (l.multiplier >= 10 ? l.multiplier.toFixed(0) : l.multiplier.toFixed(2)) + 'x</span></td><td class="r">$' + l.cost.toFixed(2) + '</td><td class="r ' + res[1] + '" style="font-weight:600">' + res[0] + "</td></tr>"; }).join("") + "</table>" +
         '<div class="foot muted" style="bottom:12px;font-size:10px">' + (at + 1) + "–" + Math.min(lots.length, at + 9) + " of " + a.log_total + "  ·  net " + (net >= 0 ? "+" : "−") + "$" + Math.abs(net).toFixed(2) + '  ·  <span style="display:inline-block;width:12px;height:10px;border-radius:3px;background:var(--hilite);vertical-align:-1px"></span> live round  ·  <button data-log="-3">▲</button> <button data-log="3">▼</button></div>';
   } else {
-    const rows = eng.accounts.slice().sort((x, y) => y.equity - x.equity), any = rows.some(r => r.bets);
-    body = rows.map((r, i) => '<button class="strat ' + (r.name === a.name ? "on" : "") + '" data-pick="' + esc(r.name) + '"><span class="n">' + (i === 0 && any && r.pnl_pct > 0 ? "★ " : "") + esc(r.name) + '</span><span class="e">' + usd(r.equity) + '</span><span class="p ' + (r.pnl_pct >= 0 ? "up" : "down") + '">' + (r.pnl_pct >= 0 ? "+" : "−") + Math.abs(r.pnl_pct).toFixed(1) + '%</span><span class="b">' + esc(r.blurb) + '</span><span class="r">' + r.bets + " bets · " + r.joined + "/" + eng.rounds_monitored + " rounds</span></button>").join("") +
-      '<div class="foot muted" style="bottom:10px;font-size:10px">Rounds monitored ' + eng.rounds_monitored + "  ·  tap a strategy to track it</div>";
+    const rows = world(w).slice().sort((x, y) => y.equity - x.equity), any = rows.some(r => r.bets);
+    body = rows.map((r, i) => '<button class="strat ' + (r.name === a.name ? "on" : "") + '" data-pick="' + esc(r.name) + '"><span class="n">' + (i === 0 && any && r.pnl_pct > 0 ? "★ " : "") + esc(r.name) + (r.retired ? ' <i class="down" style="font-style:normal;font-size:10px">retired</i>' : r.bankruptcies ? ' <i class="muted" style="font-style:normal;font-size:10px">life ' + (r.bankruptcies + 1) + "</i>" : "") + '</span><span class="e">' + usd(r.equity) + '</span><span class="p ' + (r.pnl_pct >= 0 ? "up" : "down") + '">' + (r.pnl_pct >= 0 ? "+" : "−") + Math.abs(r.pnl_pct).toFixed(1) + '%</span><span class="b">' + esc(r.blurb) + '</span><span class="r">' + r.bets + " bets · " + r.joined + "/" + e.rounds_monitored + " rounds</span></button>").join("") +
+      '<div class="foot muted" style="bottom:10px;font-size:10px">Rounds monitored ' + e.rounds_monitored + "  ·  tap a strategy to track it</div>";
   }
   el.innerHTML = title + '<button class="chip" data-cycle="1">' + esc(a.name) + "  ▾</button><div class='ptabs'>" +
     [["account", "Account"], ["log", "Log"], ["strategies", "Strategies"]].map(([k, n]) => '<button data-tab="' + k + '" class="' + (k === tab ? "on" : "") + '">' + n + "</button>").join("") + '</div><div class="pbody">' + body + "</div>";
@@ -255,16 +257,16 @@ const seen = {};
 function notify() {
   const on = store("alerts") === "1" && "Notification" in window && Notification.permission === "granted";
   $("bell").classList.toggle("muted", !on);
-  for (const coin of Object.keys(COINS)) { const a = account(coin); if (!a) continue; const dec = COINS[coin].decimals;
-    for (const l of a.log) { const key = coin + a.name + l.id + l.status, first = seen[coin + a.name] === undefined;
-      if (!seen[key] && !first && on) { const who = coin + " " + a.name;
+  for (const w of ["real", "anti"]) { const a = account(w); if (!a) continue;
+    for (const l of a.log) { const key = a.name + l.id + l.status + (a.bankruptcies || 0), first = seen[a.name] === undefined, dec = (COINS[l.coin] || { decimals: 2 }).decimals;
+      if (!seen[key] && !first && on) { const who = (l.coin || "") + " " + a.name;
         if (l.status === "open") new Notification(who + ": bet " + l.side + ", " + l.contracts + " × " + Math.round(l.price * 100) + "¢ (" + l.multiplier.toFixed(2) + "x)", { body: Math.round(l.model_prob * 100) + "% confident  ·  $" + l.cost.toFixed(2) + " incl. fee  ·  price to beat " + usd(l.strike, dec) });
-        else if (l.status === "sold") new Notification(who + ": sold early " + (l.pnl >= 0 ? "+" : "−") + "$" + Math.abs(l.pnl).toFixed(2), { body: l.side + " × " + l.contracts + " at " + Math.round(l.exit_price * 100) + "¢" });
+        else if (l.status === "sold") new Notification(who + ": sold early " + (l.pnl >= 0 ? "+" : "−") + "$" + Math.abs(l.pnl).toFixed(2), { body: l.side + " × " + l.contracts + " at " + Math.round(l.exit_price * 100) + "¢  ·  " + (l.why || "") });
         else new Notification(who + ": " + (l.status === "won" ? "won +" : "lost −") + "$" + Math.abs(l.pnl).toFixed(2), { body: l.side + " bet " + (l.status === "won" ? "paid out" : "missed") + "  ·  final " + usd(Number(String(l.final_value).replace(/,/g, "")) || 0, dec) }); }
       seen[key] = true; }
-    seen[coin + a.name] = true; }
+    seen[a.name] = true; }
 }
-function render() { renderPhone(); renderAnti(); renderReal(); notify(); }
+function render() { renderPhone(); renderPanel("anti"); renderPanel("real"); notify(); }
 
 async function poll() {
   try { status = await (await fetch("/api/status", { cache: "no-store" })).json(); } catch { status = null; }
@@ -281,14 +283,15 @@ async function pollSeries() {
 }
 
 document.addEventListener("click", (e) => {
-  const b = e.target.closest("button"); if (!b || b.disabled) return;
-  if (b.dataset.coin) { ui.coin = b.dataset.coin; store("coin", ui.coin); ui.logAt = 0; minute = []; pollSeries(); }
+  const b = e.target.closest("button"); if (!b || b.disabled) return; const panel = b.closest(".panel"), w = panel ? (panel.id === "panelAnti" ? "anti" : "real") : null;
+  if (b.dataset.coin) { ui.coin = b.dataset.coin; store("coin", ui.coin); minute = []; pollSeries(); }
   else if (b.dataset.range) { ui.range = b.dataset.range; store("range", ui.range); minute = []; pollSeries(); }
   else if (b.dataset.panel) { const p = b.dataset.panel; ui.open[p] = !ui.open[p]; store("open" + p, ui.open[p] ? "1" : "0"); }
-  else if (b.dataset.tab) ui.tab = b.dataset.tab;
-  else if (b.dataset.pick) { ui.pick[ui.coin] = b.dataset.pick; store("pick" + ui.coin, b.dataset.pick); ui.logAt = 0; }
-  else if (b.dataset.cycle) { const names = engine(ui.coin).accounts.map(a => a.name); ui.pick[ui.coin] = names[(names.indexOf(ui.pick[ui.coin]) + 1) % names.length]; store("pick" + ui.coin, ui.pick[ui.coin]); ui.logAt = 0; }
-  else if (b.dataset.log) ui.logAt += Number(b.dataset.log);
+  else if (b.dataset.world) { ui.world = ui.world === "anti" ? "real" : "anti"; store("world", ui.world); }
+  else if (b.dataset.tab) ui.tab[w] = b.dataset.tab;
+  else if (b.dataset.pick) { ui.pick[w] = b.dataset.pick; store("pick" + w, b.dataset.pick); ui.logAt[w] = 0; }
+  else if (b.dataset.cycle) { const names = world(w).map(a => a.name); ui.pick[w] = names[(names.indexOf(ui.pick[w]) + 1) % names.length]; store("pick" + w, ui.pick[w]); ui.logAt[w] = 0; }
+  else if (b.dataset.log) ui.logAt[w] += Number(b.dataset.log);
   else if (b.dataset.closeall) { for (const p of ["real", "anti"]) { ui.open[p] = false; store("open" + p, "0"); } }
   else if (b.dataset.bell) { const on = store("alerts") === "1"; if (on) store("alerts", "0"); else if ("Notification" in window) Notification.requestPermission().then(p => { store("alerts", p === "granted" ? "1" : "0"); render(); }); }
   render();

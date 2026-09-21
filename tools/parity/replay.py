@@ -1,16 +1,19 @@
-"""Replay a recording through a fresh, unmodified engine and compare the trades.
+"""Replay a v2 recording through a fresh, unmodified engine and compare.
 
-Reads calls.jsonl from a folder made by record.py, builds a new KalshiTrader per coin in a
+Reads calls.jsonl(.gz) from a folder made by record.py, builds a new KalshiTrader in a
 temporary folder, and makes the same calls in the same order. The engine reads the wall clock
-internally (time.time() in its index-offset window), so the clock the engine sees is replaced
-with the recorded time of each call. kalshi_trader.py itself is not edited.
+internally, so the clock it sees is replaced with the recorded time of each call.
+kalshi_trader.py itself is not edited.
 
-Passes when the replayed trade CSV is identical, line for line, to the one the live run wrote,
-and every account ends with the same cash.
+Passes when the replayed trade log and early-sales log are identical to the live run's, line for
+line, and every account ends with the same cash.
 
-Run it:
-    python tools/parity/replay.py tools/parity/recordings/20260920_123000
-    python tools/parity/replay.py <folder> --keep out/   # keep the replayed files
+    python tools/parity/replay.py <folder>
+    python tools/parity/replay.py <folder> --trace <folder>/trace.jsonl.gz
+
+--trace writes what the engine thought after every step (volatility, index offset, each
+strategy's view of that coin, and all twelve accounts' cash) for another engine to be checked
+against. The Go port's replay reads it: service/cmd/replay2.
 """
 
 import argparse
@@ -41,6 +44,9 @@ class ReplayClock:
     def monotonic(self):
         return self.t
 
+    def localtime(self, secs=None):
+        return real_time.localtime(self.t if secs is None else secs)
+
     def strftime(self, fmt, *args):
         return real_time.strftime(fmt, *(args or (real_time.localtime(self.t),)))
 
@@ -53,94 +59,83 @@ def read_lines(path):
         return []
 
 
-def cash_by_account(path):
-    try:
-        with open(path) as f:
-            return {n: a["cash"] for n, a in json.load(f)["accounts"].items()}
-    except FileNotFoundError:
-        return {}
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("folder")
-    ap.add_argument("--keep", help="copy the replayed files here instead of discarding them")
-    ap.add_argument("--trace", help="write what the engine thought after every step to this "
-                                    ".jsonl.gz file, for comparing another engine against")
+    ap.add_argument("--trace")
     args = ap.parse_args()
 
     path = os.path.join(args.folder, "calls.jsonl")
     opener = open
-    if not os.path.exists(path):  # fixtures are stored compressed
+    if not os.path.exists(path):
         path, opener = path + ".gz", gzip.open
     with opener(path, "rt") as f:
         rows = [json.loads(line) for line in f if line.strip()]
-    meta = rows[0]["meta"]
-    calls = rows[1:]
+    meta, calls = rows[0]["meta"], rows[1:]
+    if meta.get("engine") != "v2":
+        sys.exit("this recording is for the first engine version: use tools/parity/v1/replay.py at ed05fc2")
 
     clock = ReplayClock()
     clock.t = rows[0]["t"]
     kalshi_trader.time = clock  # the only patch: the engine's view of the clock
 
     out = tempfile.mkdtemp(prefix="parity_replay_")
-    traders, counts, events = {}, collections.Counter(), collections.Counter()
-    for coin in meta["coins"]:
-        a = meta["assets"][coin]
-        traders[coin] = kalshi_trader.KalshiTrader(
-            out, suffix=a["suffix"], offset_pct=a["index_offset_pct"],
-            sd_pct=a["index_sd_pct"], default_sigma=a["default_sigma"])
-
+    trader = kalshi_trader.KalshiTrader(out, meta["assets"])
+    counts, events = collections.Counter(), collections.Counter()
     trace = gzip.open(args.trace, "wt") if args.trace else None
     for i, row in enumerate(calls):
         clock.t = row["t"]
-        result = getattr(traders[row["coin"]], row["call"])(*row["args"])
-        if trace and row["call"] == "step":
-            t = traders[row["coin"]]
-            views = {n: None if a.view is None else
-                     [a.view["p_up"], a.view["p_model"], a.view["best"]["side"],
-                      a.view["best"]["edge"], a.view["signal"]["bet"]]
-                     for n, a in t.accounts.items()}
-            trace.write(json.dumps({"i": i, "coin": row["coin"], "sigma2": t.sigma2,
-                                    "offset": t.offset_pct, "views": views}) + "\n")
+        result = getattr(trader, row["call"])(*row["args"])
         counts[row["call"]] += 1
         for e in result or []:
             events[e["kind"]] += 1
-    for t in traders.values():
-        t.save(force=True)
+        if trace and row["call"] == "step":
+            coin = row["args"][0]
+            c = trader.coins[coin]
+            views = {}
+            for n, a in trader.accounts.items():
+                v = a.views.get(coin)
+                if not a.params.get("anti"):
+                    views[n] = None if v is None else [v["p_up"], v["p_model"], v["best"]["side"],
+                                                       v["best"]["edge"], v["signal"]["bet"]]
+            trace.write(json.dumps({"i": i, "coin": coin, "sigma2": c.sigma2, "offset": c.offset_pct,
+                                    "views": views, "cash": {n: a.cash for n, a in trader.accounts.items()}}) + "\n")
+    trader.save(force=True)
     if trace:
         trace.close()
+        # The state this replay ended in, under the recorded clock: what another engine's replay
+        # is compared with. The live run's own state file was saved on its own schedule, so its
+        # equity figures belong to a different moment.
+        shutil.copy(os.path.join(out, "kalshi_balance.json"), os.path.join(os.path.dirname(args.trace), "replay_state.json"))
 
     print(f"replayed {len(calls)} calls: {dict(counts)}")
-    print(f"trade events produced: {dict(events) or 'none'}")
-
+    print(f"events produced: {dict(events) or 'none'}")
     ok = True
-    for coin in meta["coins"]:
-        suffix = meta["assets"][coin]["suffix"]
-        name = f"kalshi_trades{suffix}.csv"
-        live, replayed = read_lines(os.path.join(args.folder, name)), read_lines(os.path.join(out, name))
-        diffs = [i for i in range(max(len(live), len(replayed)))
-                 if (live[i] if i < len(live) else None) != (replayed[i] if i < len(replayed) else None)]
-        rows_live = max(0, len(live) - 1)
+    for name in ("kalshi_trades.csv", "kalshi_exits.csv"):
+        live, again = read_lines(os.path.join(args.folder, name)), read_lines(os.path.join(out, name))
+        diffs = [i for i in range(max(len(live), len(again)))
+                 if (live[i] if i < len(live) else None) != (again[i] if i < len(again) else None)]
         if diffs:
             ok = False
-            print(f"{coin}: TRADES DIFFER. live {rows_live} rows, replay {max(0, len(replayed) - 1)}; "
-                  f"{len(diffs)} line(s) differ, first at line {diffs[0] + 1}:")
             i = diffs[0]
+            print(f"{name}: DIFFERS. live {max(0, len(live) - 1)} rows, replay {max(0, len(again) - 1)}; first at line {i + 1}:")
             print(f"    live:   {live[i] if i < len(live) else '(missing)'}")
-            print(f"    replay: {replayed[i] if i < len(replayed) else '(missing)'}")
+            print(f"    replay: {again[i] if i < len(again) else '(missing)'}")
         else:
-            print(f"{coin}: trades match ({rows_live} rows)")
+            print(f"{name}: match ({max(0, len(live) - 1)} rows)")
 
-        bal = f"kalshi_balance{suffix}.json"
-        c_live, c_rep = cash_by_account(os.path.join(args.folder, bal)), cash_by_account(os.path.join(out, bal))
-        if c_live != c_rep:
-            ok = False
-            print(f"{coin}: CASH DIFFERS. live {c_live} replay {c_rep}")
-        else:
-            print(f"{coin}: final cash matches for {len(c_live)} accounts")
-
-    if args.keep:
-        shutil.copytree(out, args.keep, dirs_exist_ok=True)
+    def cash(folder):
+        try:
+            with open(os.path.join(folder, "kalshi_balance.json")) as f:
+                return {n: (a["cash"], a.get("bankruptcies", 0), a.get("retired", False))
+                        for n, a in json.load(f)["accounts"].items()}
+        except FileNotFoundError:
+            return {}
+    if cash(args.folder) != cash(out):
+        ok = False
+        print(f"ACCOUNTS DIFFER.\n  live   {cash(args.folder)}\n  replay {cash(out)}")
+    else:
+        print(f"final cash, bankruptcies and retirements match for {len(cash(out))} accounts")
     shutil.rmtree(out, ignore_errors=True)
     print("PARITY OK" if ok else "PARITY FAILED")
     sys.exit(0 if ok else 1)

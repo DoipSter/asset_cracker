@@ -1,16 +1,17 @@
-"""Record everything the trading engine is told during a live run.
+"""Record everything the v2 trading engine is told during a live run.
 
-Runs the unmodified engine (kalshi_trader.py) from the live feeds with no window, wired the
-same way Monitor wires it in asset_cracker.py, and logs every call into the engine to
-calls.jsonl with the wall-clock time it was made. replay.py feeds that log back through a
-fresh engine; if the engine is deterministic, it reproduces the same trade CSV.
+v2 is kalshi_trader.py as of main dc10fd4: one KalshiTrader for every coin, one balance per
+strategy shared across coins, and an anti-world twin for each strategy. (The harness for the
+first version, one trader per coin, is in v1/ and needs the engine at ed05fc2.)
 
-Run it:
-    python tools/parity/record.py --minutes 30
-    python tools/parity/record.py --minutes 30 --coins BTC
+Runs the unmodified engine from the live feeds with no window, wired the way Monitor wires it
+in asset_cracker.py, and logs every call into the engine to calls.jsonl with the wall-clock time
+it was made. replay.py feeds that log back through a fresh engine.
 
-Each run writes to a new folder under tools/parity/recordings/. Simulation only: it reads
-public data and places no orders, exactly like the app.
+    python tools/parity/record.py --minutes 45
+    python tools/parity/record.py --minutes 45 --coins BTC,ETH
+
+Simulation only: public reads, no account, no orders.
 """
 
 import argparse
@@ -18,6 +19,7 @@ import collections
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -25,51 +27,34 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 
-import asset_cracker as app  # noqa: E402  (the feeds live here; importing opens no window)
 from kalshi_trader import KalshiTrader  # noqa: E402
 
-# The engine methods that take input from outside. Everything else is derived from these.
 RECORDED = ("observe", "seed_vol", "seed_offsets", "step", "note_settlement", "on_settled")
 
 
-class Recorder:
-    """One coin: the engine, its feeds, and the log of calls made into the engine."""
+def load_app():
+    """asset_cracker builds nothing at import, but it does import tkinter and ctypes.wintypes.
+    Both import on macOS and Linux, so it can be used for its feeds without opening a window."""
+    import asset_cracker
+    return asset_cracker
 
-    def __init__(self, asset, folder, log, lock):
-        self.asset = asset
-        self.coin = asset["coin"]
-        self.log, self.lock = log, lock
-        self.trader = KalshiTrader(
-            folder, suffix=asset["suffix"], offset_pct=asset["index_offset_pct"],
-            sd_pct=asset["index_sd_pct"], default_sigma=asset["default_sigma"])
+
+class Feed:
+    """One coin's feeds, queued for the main thread as Monitor does."""
+
+    def __init__(self, app, asset, trader, log):
+        self.app, self.asset, self.coin, self.trader, self.log = app, asset, asset["coin"], trader, log
         self.results = queue.Queue()
         self.price = None
-        self._clock_offsets = collections.deque(maxlen=200)  # exchange time - PC time
-        self.counts = collections.Counter()
-        self.events = collections.Counter()
-
-    # ---- the same clock correction Monitor.now() applies -------------------
+        self._clock_offsets = collections.deque(maxlen=200)
 
     def now(self):
         offsets = list(self._clock_offsets)
         return time.time() + (max(offsets) if offsets else 0)
 
-    # ---- calling the engine, and writing down that we did ------------------
-
-    def call(self, name, *args):
-        assert name in RECORDED
-        row = {"t": time.time(), "coin": self.coin, "call": name, "args": list(args)}
-        with self.lock:
-            self.log.write(json.dumps(row) + "\n")
-        self.counts[name] += 1
-        out = getattr(self.trader, name)(*args)
-        for e in out or []:
-            self.events[e["kind"]] += 1
-        return out
-
-    # ---- feeds, started exactly as Monitor starts them ---------------------
-
     def start(self):
+        app, asset = self.app, self.asset
+
         def on_price(price, exchange_ts):
             if exchange_ts:
                 self._clock_offsets.append(exchange_ts - time.time())
@@ -77,7 +62,7 @@ class Recorder:
 
         def seed():
             try:
-                rows = app._get_json("/candles?granularity=60", self.asset["product"])
+                rows = app._get_json("/candles?granularity=60", asset["product"])
                 rows.sort(key=lambda r: r[0])
                 self.results.put(("seed", [(r[0] + 60, r[4]) for r in rows[-50:]]))
             except Exception:
@@ -85,101 +70,99 @@ class Recorder:
 
         def offsets():
             try:
-                found = app.fetch_recent_offsets(self.asset["series"], self.asset["product"])
+                found = app.fetch_recent_offsets(asset["series"], asset["product"])
                 if found:
                     self.results.put(("offsets", found))
             except Exception:
                 pass
 
-        threads = [
-            (app.stream_prices, (on_price, lambda: self.results.put(("offline",)),
-                                 self.asset["product"])),
+        for target, args in (
+            (app.stream_prices, (on_price, lambda: self.results.put(("offline",)), asset["product"])),
             (app.stream_kalshi, (lambda m: self.results.put(("market", m)),
                                  lambda t, r, v, c: self.results.put(("settled", t, r, v, c)),
-                                 self.trader.pending_tickers, self.now, self.asset["series"])),
-            (seed, ()),
-            (offsets, ()),
-        ]
-        for target, args in threads:
+                                 lambda: self.trader.pending_tickers(self.coin), self.now, asset["series"])),
+            (seed, ()), (offsets, ()),
+        ):
             threading.Thread(target=target, args=args, daemon=True).start()
 
-    # ---- Monitor._pump and Monitor._handle, minus the drawing --------------
-
-    def pump(self):
-        latest_price = None
+    def pump(self, call):
+        latest = None
         try:
             while True:
                 msg = self.results.get_nowait()
                 if msg[0] == "price":
-                    latest_price = msg  # bursts: only the newest reaches the engine
+                    latest = msg  # bursts: only the newest reaches the engine
                 else:
-                    self.handle(msg)
+                    self.handle(msg, call)
         except queue.Empty:
             pass
-        if latest_price:
-            self.handle(latest_price)
+        if latest:
+            self.handle(latest, call)
 
-    def handle(self, msg):
+    def handle(self, msg, call):
         kind = msg[0]
         if kind == "price":
             self.price = msg[1]
-            self.call("observe", self.price, msg[2] or self.now())
+            call("observe", self.coin, self.price, msg[2] or self.now())
         elif kind == "seed":
-            done = [p for t, p in msg[1] if t <= self.now()]
-            self.call("seed_vol", done)
+            call("seed_vol", self.coin, [p for t, p in msg[1] if t <= self.now()])
         elif kind == "market":
             if self.price:
-                self.call("step", msg[1], self.price, self.now())
+                call("step", self.coin, msg[1], self.price, self.now())
             self.trader.save()
         elif kind == "settled":
             _, ticker, result, final, close = msg
-            self.call("note_settlement", close, final)
-            self.call("on_settled", ticker, result, final, self.now(), self.price)
+            call("note_settlement", self.coin, close, final)
+            call("on_settled", ticker, result, final, self.now(), self.price)
         elif kind == "offsets":
-            self.call("seed_offsets", [list(pair) for pair in msg[1]])
+            call("seed_offsets", self.coin, [list(pair) for pair in msg[1]])
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--minutes", type=float, default=30.0)
-    ap.add_argument("--coins", default="BTC,ETH")
+    ap.add_argument("--minutes", type=float, default=45.0)
+    ap.add_argument("--coins", default="")
     ap.add_argument("--out", default=os.path.join(ROOT, "tools", "parity", "recordings"))
     args = ap.parse_args()
 
-    folder = os.path.join(args.out, time.strftime("%Y%m%d_%H%M%S"))
+    app = load_app()
+    coins = [c.strip().upper() for c in args.coins.split(",") if c.strip()] or list(app.ASSETS)
+    assets = {c: app.ASSETS[c] for c in coins}
+    folder = os.path.join(args.out, time.strftime("%Y%m%d_%H%M%S") + "_v2")
     os.makedirs(folder)
-    coins = [c.strip().upper() for c in args.coins.split(",") if c.strip()]
-    lock = threading.Lock()
+
+    counts, events = collections.Counter(), collections.Counter()
     with open(os.path.join(folder, "calls.jsonl"), "w") as log:
-        meta = {"t": time.time(), "meta": {
-            "coins": coins, "python": sys.version.split()[0],
-            "assets": {c: app.ASSETS[c] for c in coins}}}
-        log.write(json.dumps(meta) + "\n")
-        recorders = [Recorder(app.ASSETS[c], folder, log, lock) for c in coins]
-        for r in recorders:
-            r.start()
-        print(f"recording {', '.join(coins)} for {args.minutes:g} min -> {folder}", flush=True)
-        stop_at = time.monotonic() + args.minutes * 60
-        report_at = time.monotonic() + 60
+        started = time.time()
+        log.write(json.dumps({"t": started, "meta": {"engine": "v2", "coins": coins,
+                  "python": sys.version.split()[0], "assets": assets}}) + "\n")
+        trader = KalshiTrader(folder, assets)
+
+        def call(name, *a):
+            assert name in RECORDED
+            log.write(json.dumps({"t": time.time(), "call": name, "args": list(a)}) + "\n")
+            counts[name] += 1
+            for e in getattr(trader, name)(*a) or []:
+                events[e["kind"]] += 1
+
+        feeds = [Feed(app, assets[c], trader, log) for c in coins]
+        for f in feeds:
+            f.start()
+        print(f"recording v2, {', '.join(coins)}, {args.minutes:g} min -> {folder}", flush=True)
+        stop_at, report_at = time.monotonic() + args.minutes * 60, time.monotonic() + 60
         try:
             while time.monotonic() < stop_at:
-                for r in recorders:
-                    r.pump()
+                for f in feeds:
+                    f.pump(call)
                 if time.monotonic() >= report_at:
                     report_at += 60
                     log.flush()
-                    for r in recorders:
-                        print(f"  {r.coin}: calls {dict(r.counts)} events {dict(r.events)}",
-                              flush=True)
-                time.sleep(0.008)  # Monitor pumps every 8 ms
+                    print(f"  calls {dict(counts)} events {dict(events)}", flush=True)
+                time.sleep(0.008)
         except KeyboardInterrupt:
             print("stopped early")
-        for r in recorders:
-            r.trader.save(force=True)
-
-    print("done.")
-    for r in recorders:
-        print(f"  {r.coin}: calls {dict(r.counts)} events {dict(r.events)}")
+        trader.save(force=True)
+    print(f"done. calls {dict(counts)} events {dict(events)}")
     print(f"replay it with: python tools/parity/replay.py {folder}")
 
 

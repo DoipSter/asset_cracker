@@ -48,7 +48,7 @@ func New(ctx context.Context, db *store.Store, series, coin, product string, off
 	for i, p := range k.Strategies {
 		names[i] = p.Name
 	}
-	setup, err := db.EnsureSimSetup(ctx, series, "kalshi15m", names, cents(k.StartBalance))
+	setup, err := db.EnsureSimSetup(ctx, series, "kalshi15m", 1, names, cents(k.StartBalance))
 	if err != nil {
 		return nil, fmt.Errorf("%s: sim setup: %w", series, err)
 	}
@@ -77,9 +77,27 @@ func New(ctx context.Context, db *store.Store, series, coin, product string, off
 // Seed primes volatility and the index offset from the exchanges, as the Python does at launch.
 // Failing to seed is not fatal: the engine starts from its defaults and learns.
 func (r *Runner) Seed(ctx context.Context, client *kalshi.Client, userAgent string) {
+	closes, measured := seedData(ctx, client, userAgent, r.Series, r.Product)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(closes) > 0 {
+		r.trader.SeedVol(closes)
+	}
+	var fresh [][2]float64
+	for _, m := range measured {
+		if !r.trader.HasOffsetAt(m[0]) {
+			fresh = append(fresh, m)
+		}
+	}
+	r.trader.SeedOffsets(fresh)
+}
+
+// seedData fetches what an engine is primed with at start: the last fifty finished one-minute
+// closes, and for each of the last ten settled rounds how far Kalshi's settled value sat from
+// our exchange's average over that round's final minute.
+func seedData(ctx context.Context, client *kalshi.Client, userAgent, series, product string) (closes []float64, measured [][2]float64) {
 	now := time.Now()
-	if candles, err := coinbase.Candles(ctx, userAgent, r.Product, 60, time.Time{}, time.Time{}); err == nil {
-		var closes []float64
+	if candles, err := coinbase.Candles(ctx, userAgent, product, 60, time.Time{}, time.Time{}); err == nil {
 		if len(candles) > 50 {
 			candles = candles[len(candles)-50:]
 		}
@@ -88,16 +106,12 @@ func (r *Runner) Seed(ctx context.Context, client *kalshi.Client, userAgent stri
 				closes = append(closes, c.Close)
 			}
 		}
-		r.mu.Lock()
-		r.trader.SeedVol(closes)
-		r.mu.Unlock()
 	} else {
-		slog.Warn("could not seed volatility", "series", r.Series, "err", err)
+		slog.Warn("could not seed volatility", "series", series, "err", err)
 	}
-
-	settled, err := client.SettledMarkets(ctx, r.Series, 10)
+	settled, err := client.SettledMarkets(ctx, series, 10)
 	if err != nil || len(settled) == 0 {
-		return
+		return closes, nil
 	}
 	type done struct {
 		closes time.Time
@@ -120,28 +134,25 @@ func (r *Runner) Seed(ctx context.Context, client *kalshi.Client, userAgent stri
 		}
 	}
 	if len(rounds) == 0 {
-		return
+		return closes, nil
 	}
-	candles, err := coinbase.Candles(ctx, userAgent, r.Product, 60, lo.Add(-3*time.Minute), hi.Add(2*time.Minute))
+	candles, err := coinbase.Candles(ctx, userAgent, product, 60, lo.Add(-3*time.Minute), hi.Add(2*time.Minute))
 	if err != nil {
-		return
+		return closes, nil
 	}
 	byStart := map[int64]coinbase.Candle{}
 	for _, c := range candles {
 		byStart[c.Start.Unix()] = c
 	}
-	var measured [][2]float64
 	for _, d := range rounds {
 		// The candle covering the round's final minute; open and close average out to about its mean.
 		if c, ok := byStart[d.closes.Unix()-60]; ok {
-			if ours := (c.Open + c.Close) / 2; ours > 0 && !r.trader.HasOffsetAt(unix(d.closes)) {
+			if ours := (c.Open + c.Close) / 2; ours > 0 {
 				measured = append(measured, [2]float64{unix(d.closes), d.value/ours - 1})
 			}
 		}
 	}
-	r.mu.Lock()
-	r.trader.SeedOffsets(measured)
-	r.mu.Unlock()
+	return closes, measured
 }
 
 // Observe takes a trade print.
@@ -158,10 +169,10 @@ func (r *Runner) Observe(t coinbase.Trade) {
 func f(s string) float64 { v, _ := strconv.ParseFloat(s, 64); return v }
 
 // Step is one look at the open round: let every strategy decide, then record all of it.
-func (r *Runner) Step(ctx context.Context, at time.Time, marketID int64, info kalshi.MarketInfo, closes time.Time, q kalshi.Quotes, price string) error {
+func (r *Runner) Step(ctx context.Context, evalID int64, at time.Time, marketID int64, info kalshi.MarketInfo, closes time.Time, q kalshi.Quotes, price string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	rec := store.StepRecord{At: at, MarketID: marketID, UnderlyingPrice: price, Quotes: q}
+	rec := store.StepRecord{EvaluationID: evalID, At: at, MarketID: marketID, UnderlyingPrice: price, Quotes: q}
 	r.ptb, r.closes = *info.FloorStrike, unix(closes)
 	p := f(price)
 	if r.halted != "" || p == 0 {

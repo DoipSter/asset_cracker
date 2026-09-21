@@ -22,6 +22,7 @@ import (
 	"github.com/doipster/asset_cracker/service/internal/config"
 	"github.com/doipster/asset_cracker/service/internal/health"
 	"github.com/doipster/asset_cracker/service/internal/kalshi"
+	"github.com/doipster/asset_cracker/service/internal/kalshi15m2"
 	"github.com/doipster/asset_cracker/service/internal/runner"
 	"github.com/doipster/asset_cracker/service/internal/store"
 	"github.com/doipster/asset_cracker/service/internal/web"
@@ -96,6 +97,33 @@ func run() error {
 		byProduct[product] = append(byProduct[product], r)
 	}
 
+	// The second engine version: one runner for every coin flagged "v2", sharing twelve balances.
+	var coins2 []runner.Coin2
+	coinOf := map[string]string{} // series -> coin, for the ones v2 trades
+	for _, in := range instruments {
+		if on, _ := in.Spec["v2"].(bool); !on || in.Source != "kalshi" {
+			continue
+		}
+		num := func(key string, fallback float64) float64 {
+			if v, ok := in.Spec[key].(float64); ok {
+				return v
+			}
+			return fallback
+		}
+		priceFrom, _ := in.Spec["price_from"].(string)
+		coins2 = append(coins2, runner.Coin2{Coin: in.Underlying, Series: in.Symbol, Product: strings.TrimPrefix(priceFrom, "coinbase:"),
+			Cal: kalshi15m2.Calibration{OffsetPct: num("index_offset_pct", 0.000057), SDPct: num("index_sd_pct", 0.000144),
+				DefaultSigma: num("default_sigma", 8e-5), Decimals: int(num("decimals", 2))}})
+		coinOf[in.Symbol] = in.Underlying
+	}
+	var run2 *runner.Runner2
+	if len(coins2) > 0 {
+		if run2, err = runner.NewRunner2(ctx, db, coins2); err != nil {
+			return err
+		}
+		run2.Seed(ctx, client, cfg.UserAgent)
+	}
+
 	var ticksWritten atomic.Int64
 	if len(products) > 0 {
 		trades := make(chan coinbase.Trade, 4096)
@@ -109,6 +137,9 @@ func run() error {
 			coinbase.Stream(ctx, cfg.UserAgent, names, latest, func(t coinbase.Trade) {
 				for _, r := range byProduct[t.Product] {
 					r.Observe(t)
+				}
+				if run2 != nil {
+					run2.Observe(t)
 				}
 				select {
 				case trades <- t:
@@ -136,7 +167,7 @@ func run() error {
 		priceFrom, _ := in.Spec["price_from"].(string) // "coinbase:BTC-USD"
 		p := &kalshi.Poller{
 			Client: client, Series: in.Symbol, Round: round,
-			Sink: &sink{db: db, instrumentID: in.ID, latest: latest, product: strings.TrimPrefix(priceFrom, "coinbase:"), run: runners[in.Symbol]},
+			Sink: &sink{db: db, instrumentID: in.ID, latest: latest, product: strings.TrimPrefix(priceFrom, "coinbase:"), run: runners[in.Symbol], run2: run2, coin: coinOf[in.Symbol]},
 		}
 		pollers[in.Symbol] = p
 		wg.Add(1)
@@ -184,7 +215,7 @@ func run() error {
 			ok = ok && time.Since(st.LastQuotesAt) < time.Minute
 		}
 		return map[string]any{
-			"ok": ok, "version": version, "uptime_seconds": time.Since(started).Seconds(), "mode": "simulation: six strategies per coin on live data, no real orders",
+			"ok": ok, "version": version, "uptime_seconds": time.Since(started).Seconds(), "mode": "simulation on live data, no real orders: engine v2 (five coins, shared balances, anti-world) beside v1",
 			"ticks_written": ticksWritten.Load(), "prices": prices, "rounds": rounds,
 		}, ok
 	}
@@ -198,6 +229,9 @@ func run() error {
 					engines[series] = r.Snapshot()
 				}
 				doc["engines"] = engines
+				if run2 != nil {
+					doc["v2"] = run2.Snapshot()
+				}
 				return doc
 			})
 		})
@@ -246,7 +280,9 @@ type sink struct {
 	instrumentID int64
 	latest       *coinbase.Latest
 	product      string
-	run          *runner.Runner
+	run          *runner.Runner  // version 1 on this series, or nil
+	run2         *runner.Runner2 // version 2, shared by every coin it trades
+	coin         string          // set when version 2 trades this series
 }
 
 // price is the latest trade price, or "" if it is stale: a stale price is worse than none.
@@ -266,10 +302,22 @@ func (s *sink) SaveMarket(ctx context.Context, m kalshi.MarketInfo, closes time.
 }
 
 func (s *sink) SaveQuotes(ctx context.Context, at time.Time, marketID int64, m kalshi.MarketInfo, closes time.Time, q kalshi.Quotes) error {
-	if s.run == nil { // a record-only series
-		return s.db.InsertEvaluation(ctx, at, marketID, s.price(), q)
+	// One snapshot row per second per market; every engine version hangs its decisions off it.
+	price := s.price()
+	evalID, err := s.db.InsertEvaluation(ctx, at, marketID, price, q)
+	if err != nil {
+		return err
 	}
-	return s.run.Step(ctx, at, marketID, m, closes, q, s.price())
+	var first error
+	if s.run != nil {
+		first = s.run.Step(ctx, evalID, at, marketID, m, closes, q, price)
+	}
+	if s.run2 != nil && s.coin != "" {
+		if err := s.run2.Step(ctx, s.coin, evalID, at, marketID, m, closes, q, price); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 func (s *sink) SaveResult(ctx context.Context, marketID int64, m kalshi.MarketInfo, closes time.Time) (bool, error) {
@@ -278,10 +326,18 @@ func (s *sink) SaveResult(ctx context.Context, marketID int64, m kalshi.MarketIn
 		settled = time.Now()
 	}
 	first, err := s.db.RecordResult(ctx, marketID, m.Result, m.ExpirationValue, settled)
-	if err != nil || !first || s.run == nil {
+	if err != nil || !first {
 		return first, err
 	}
-	return true, s.run.Settled(ctx, marketID, m, closes, s.price())
+	if s.run != nil {
+		err = s.run.Settled(ctx, marketID, m, closes, s.price())
+	}
+	if s.run2 != nil && s.coin != "" {
+		if err2 := s.run2.Settled(ctx, s.coin, marketID, m, closes, s.price()); err == nil {
+			err = err2
+		}
+	}
+	return true, err
 }
 
 func (s *sink) Unsettled(ctx context.Context, before time.Time) (map[string]kalshi.Pending, error) {
