@@ -77,9 +77,11 @@ Consequences to accept:
   15-minute yes/no contract and a spot coin are different instrument types.
 - **Strategy**: code plus parameters, **versioned**. Results always attach to a version. A
   retired version cannot return without an explicit override.
-- **Account**: a virtual balance with its own positions and ledger. Sim or real, never mixed.
-- **Bucket**: a slice of capital with risk limits, holding one or more accounts and running
-  one strategy version. The unit the supervisor acts on.
+- **Venue account**: the one actual account at a venue (or its simulated stand-in). Sim or
+  real, never mixed.
+- **Bucket**: **one virtual subdivision of one venue account** (decided by Brad, 2026-09-20),
+  with its own cash in the ledger, its own risk limits, and one strategy version. The venue
+  sees only the whole account; the split exists in our ledger. The unit the supervisor acts on.
 - **Common pool**: receives tax from successful buckets and the remains of closed ones; seeds
   new buckets.
 - **Profit pool**: what is kept. Can fund expansion (more buckets, higher limits) by proposal

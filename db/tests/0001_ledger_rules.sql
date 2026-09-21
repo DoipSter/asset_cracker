@@ -7,7 +7,7 @@ begin;
 
 insert into actor (kind, handle) values ('system', 'test');
 insert into ledger_account (kind, mode, name) values
-    ('external', 'sim', 'owners'), ('common_pool', 'sim', 'common pool'), ('trading', 'sim', 'bucket A cash'),
+    ('external', 'sim', 'owners'), ('common_pool', 'sim', 'common pool'), ('bucket', 'sim', 'bucket A cash'), ('bucket', 'sim', 'bucket B cash'),
     ('external', 'real', 'owners'), ('common_pool', 'real', 'common pool');
 
 create function pg_temp.acct(m run_mode, n text) returns bigint language sql as
@@ -108,24 +108,45 @@ begin
 end $$;
 
 do $$
-declare v bigint; b bigint; s bigint;
+declare v bigint; s bigint; va bigint; va_real bigint;
 begin
-    -- 8. A sim bucket cannot hold a real-money account, and one pool per mode.
+    -- 8. A bucket is one virtual subdivision of one venue account, in the same mode.
     insert into source (code, name, has_market_data) values ('test', 'Test venue', true) returning id into s;
     insert into strategy (family, name) values ('test', 'T');
     insert into strategy_version (strategy_id, version, params, code_ref, created_by)
         select st.id, 1, '{}', 'test', a.id from strategy st, actor a where st.family = 'test' and a.handle = 'test'
         returning id into v;
-    insert into bucket (name, mode, strategy_version_id, limits, tax_rate_bps) values ('A', 'sim', v, '{}', 1000) returning id into b;
-    insert into trading_account (bucket_id, mode, source_id, ledger_account_id, name)
-        values (b, 'sim', s, pg_temp.acct('sim', 'bucket A cash'), 'main');
+    insert into venue_account (source_id, mode, name) values (s, 'sim', 'paper') returning id into va;
+    insert into venue_account (source_id, mode, name) values (s, 'real', 'live') returning id into va_real;
+    insert into bucket (name, mode, venue_account_id, ledger_account_id, strategy_version_id, limits, tax_rate_bps)
+        values ('A', 'sim', va, pg_temp.acct('sim', 'bucket A cash'), v, '{}', 1000);
     begin
-        insert into trading_account (bucket_id, mode, source_id, ledger_account_id, name)
-            values (b, 'sim', s, pg_temp.acct('real', 'owners'), 'sneaky');
-        raise exception 'TEST FAILED: a sim bucket took a real ledger account';
+        insert into bucket (name, mode, venue_account_id, ledger_account_id, strategy_version_id, limits, tax_rate_bps)
+            values ('B', 'sim', va_real, pg_temp.acct('sim', 'bucket B cash'), v, '{}', 1000);
+        raise exception 'TEST FAILED: a sim bucket was placed in a real venue account';
     exception when foreign_key_violation then
-        raise notice 'ok 8: sim bucket with a real ledger account refused';
+        raise notice 'ok 8: sim bucket in a real venue account refused';
     end;
+    begin
+        insert into bucket (name, mode, venue_account_id, ledger_account_id, strategy_version_id, limits, tax_rate_bps)
+            values ('B', 'sim', va, pg_temp.acct('sim', 'bucket A cash'), v, '{}', 1000);
+        raise exception 'TEST FAILED: two buckets shared one virtual account';
+    exception when unique_violation then
+        raise notice 'ok 8b: two buckets sharing one virtual account refused';
+    end;
+    begin
+        insert into bucket (name, mode, venue_account_id, ledger_account_id, strategy_version_id, limits, tax_rate_bps)
+            values ('B', 'sim', va, pg_temp.acct('sim', 'common pool'), v, '{}', 1000);
+        raise exception 'TEST FAILED: a bucket used the common pool as its cash';
+    exception when others then
+        if sqlerrm like 'TEST FAILED%' then raise; end if;
+        raise notice 'ok 8c: bucket using a non-bucket ledger account refused';
+    end;
+    insert into bucket (name, mode, venue_account_id, ledger_account_id, strategy_version_id, limits, tax_rate_bps)
+        values ('B', 'sim', va, pg_temp.acct('sim', 'bucket B cash'), v, '{}', 1000);
+    assert (select buckets from venue_account_virtual_cash where venue_account_id = va) = 2, 'two buckets in one venue account';
+    assert (select bucket_cash_cents from venue_account_virtual_cash where venue_account_id = va) = 15000, 'virtual cash adds up';
+    raise notice 'ok 8d: two buckets subdivide one venue account; their cash adds up to 15000';
     begin
         insert into ledger_account (kind, mode, name) values ('common_pool', 'sim', 'second pool');
         raise exception 'TEST FAILED: a second common pool was created';
@@ -141,9 +162,9 @@ begin
     insert into instrument (source_id, kind, symbol, underlying) select id, 'binary_contract', 'T15M', 'BTC' from source where code = 'test' returning id into i;
     insert into market (instrument_id, ticker, strike) values (i, 'T15M-1', 100) returning id into m;
     insert into evaluation (at, market_id, underlying_price, quotes) values (now(), m, 101, '{"yes_ask":0.6}') returning id into e;
-    insert into decision (at, evaluation_id, bucket_id, trading_account_id, strategy_version_id, model_prob, market_prob, side, edge, action, blocked_by, size_alone, human_weight, size_applied)
-        select now(), e, b.id, t.id, b.strategy_version_id, 0.7, 0.6, 'yes', 0.04, 'none', 'cooling down', 10, 0.5, 5
-          from bucket b join trading_account t on t.bucket_id = b.id;
+    insert into decision (at, evaluation_id, bucket_id, strategy_version_id, model_prob, market_prob, side, edge, action, blocked_by, size_alone, human_weight, size_applied)
+        select now(), e, b.id, b.strategy_version_id, 0.7, 0.6, 'yes', 0.04, 'none', 'cooling down', 10, 0.5, 5
+          from bucket b where b.name = 'A';
     insert into human_weight (set_by, target_kind, target_id, weight, set_at) select id, 'bucket', 1, 0.5, now() - interval '1 hour' from actor where handle = 'test';
     insert into human_weight (set_by, target_kind, target_id, weight, set_at) select id, 'bucket', 1, 2,   now() from actor where handle = 'test';
     assert (select weight from current_human_weight where target_kind = 'bucket' and target_id = 1) = 2, 'latest weight wins';

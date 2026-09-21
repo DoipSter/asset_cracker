@@ -102,7 +102,7 @@ comment on table strategy_version is 'Results always attach to a version. The ro
 create table ledger_account (
     id        bigint generated always as identity primary key,
     kind      text not null check (kind in (
-                  'trading',        -- a bucket's cash at a venue
+                  'bucket',         -- one bucket's virtual share of a venue account
                   'common_pool',    -- tax and reaped funds; seeds new buckets
                   'profit_pool',    -- what is kept
                   'venue',          -- the other side of every trade and settlement
@@ -196,13 +196,31 @@ create view ledger_balance as
      group by a.id;
 
 -- ---------------------------------------------------------------------------------------------
--- Buckets: a slice of capital with limits, running one strategy version.
+-- Venue accounts and buckets.
+--
+-- A venue account is the one actual account at a venue (a Kalshi account, say, or its simulated
+-- stand-in). It is divided into buckets: each bucket is ONE virtual subdivision of ONE venue
+-- account, with its own cash in the ledger, its own limits, and one strategy version.
+-- The venue only ever sees the whole account; the split exists here.
 -- ---------------------------------------------------------------------------------------------
+
+create table venue_account (
+    id            bigint generated always as identity primary key,
+    source_id     bigint not null references source,
+    mode          run_mode not null,
+    name          text not null,
+    external_ref  text,                               -- the venue's own id for the account; never a credential
+    unique (id, mode),
+    unique (source_id, mode, name)
+);
+comment on table venue_account is 'Buckets in one venue account share its real position book: the venue nets opposite sides. The service must net or forbid conflicts before real trading.';
 
 create table bucket (
     id                    bigint generated always as identity primary key,
     name                  text not null unique,
-    mode          run_mode not null,
+    mode                  run_mode not null,
+    venue_account_id      bigint not null,
+    ledger_account_id     bigint not null unique,     -- this bucket's virtual cash: exactly one
     slot                  integer,                    -- which place in the line-up it fills
     strategy_version_id   bigint not null references strategy_version,
     status                text not null default 'active'
@@ -214,22 +232,33 @@ create table bucket (
     trip_reason           text,
     frozen_at             timestamptz,
     replaced_by_bucket_id bigint references bucket,
-    unique (id, mode)
+    -- A sim bucket can only sit in a sim venue account and hold sim cash, and likewise for real.
+    foreign key (venue_account_id, mode)  references venue_account (id, mode),
+    foreign key (ledger_account_id, mode) references ledger_account (id, mode)
 );
+create index on bucket (venue_account_id);
 comment on table bucket is 'Closed, never topped up: a tripped bucket winds down, is reaped into the common pool, and is frozen. Frozen buckets are kept forever.';
 
--- A bucket holds one or more accounts, each with its own cash at one venue.
-create table trading_account (
-    id                 bigint generated always as identity primary key,
-    bucket_id          bigint not null,
-    mode          run_mode not null,
-    source_id          bigint not null references source,
-    ledger_account_id  bigint not null unique,
-    name               text not null,
-    foreign key (bucket_id, mode)         references bucket (id, mode),
-    foreign key (ledger_account_id, mode) references ledger_account (id, mode),
-    unique (bucket_id, name)
-);
+create function bucket_ledger_account_kind() returns trigger language plpgsql as $$
+begin
+    if (select kind from ledger_account where id = new.ledger_account_id) <> 'bucket' then
+        raise exception 'bucket % must use a ledger account of kind ''bucket''', new.name;
+    end if;
+    return new;
+end $$;
+create trigger ledger_account_kind before insert or update of ledger_account_id on bucket
+    for each row execute function bucket_ledger_account_kind();
+
+-- The virtual cash in each venue account: what the venue's own balance should equal, once
+-- open positions are accounted for. The check against the venue's figure is the service's job.
+create view venue_account_virtual_cash as
+    select v.id as venue_account_id, v.mode, v.name,
+           coalesce(sum(lb.balance_cents), 0)::bigint as bucket_cash_cents,
+           count(b.id) as buckets
+      from venue_account v
+      left join bucket b on b.venue_account_id = v.id
+      left join ledger_balance lb on lb.account_id = b.ledger_account_id
+     group by v.id;
 
 create table bucket_event (
     id         bigint generated always as identity primary key,
@@ -276,7 +305,6 @@ create table decision (
     at                   timestamptz not null,
     evaluation_id        bigint not null,
     bucket_id            bigint not null references bucket,
-    trading_account_id   bigint not null references trading_account,
     strategy_version_id  bigint not null references strategy_version,
     model_prob           double precision,            -- what the strategy believed
     market_prob          double precision,            -- what the market's price implied
@@ -319,7 +347,7 @@ select ensure_month_partitions((current_date + interval '1 month')::date);
 
 create table trade_order (
     id                  bigint generated always as identity primary key,
-    trading_account_id  bigint not null references trading_account,
+    bucket_id           bigint not null references bucket,
     market_id           bigint not null references market,
     decision_id         bigint,                       -- with decision_at: the journal row behind it
     decision_at         timestamptz,
@@ -334,7 +362,7 @@ create table trade_order (
     placed_at           timestamptz not null default now(),
     foreign key (decision_id, decision_at) references decision (id, at)
 );
-create index on trade_order (trading_account_id, placed_at);
+create index on trade_order (bucket_id, placed_at);
 
 create table fill (
     id           bigint generated always as identity primary key,
@@ -351,13 +379,13 @@ create trigger append_only before update or delete on fill for each row execute 
 create table settlement (
     id                  bigint generated always as identity primary key,
     market_id           bigint not null references market,
-    trading_account_id  bigint not null references trading_account,
+    bucket_id           bigint not null references bucket,
     at                  timestamptz not null,
     side                text not null,
     qty                 numeric not null,
     payout_cents        bigint not null check (payout_cents >= 0),
     transfer_id         bigint references ledger_transfer,        -- null when the payout is zero
-    unique (market_id, trading_account_id, side)
+    unique (market_id, bucket_id, side)
 );
 create trigger append_only before update or delete on settlement for each row execute function forbid_change();
 
