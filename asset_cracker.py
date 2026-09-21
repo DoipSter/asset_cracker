@@ -63,6 +63,9 @@ BUTTON = "#232A3D"
 HILITE = "#2C3752"  # a lighter band behind the current window's orders in the log
 AMBER = "#F2B84B"  # the soft "a bet was just placed" glow on the Strategies tab
 FLASH_SECONDS = 9.0  # how long that glow takes to fade away (one slow pulse, no blinking)
+# An active pill is filled with TEXT, so a bright symbol on it is unreadable. Blended this far
+# toward BG, the dimmest of the five still clears 4.5:1 there.
+SYMBOL_ON_LIGHT = 0.5
 
 
 def mix_color(base, top, amount):
@@ -522,34 +525,42 @@ def save_muted(coin, value):
         pass  # not being able to remember the setting isn't worth an error
 
 
-# The coins we track. Each gets its own phone window, side panel, accounts and files.
-# The index gap and volatility were measured from a week of Kalshi settlements (Sep 2026).
-# Up to five coins, all funded from one balance per strategy. Index offset and volatility
-# `symbol` is the coin's sign, checked against the font by research/font_probe.py -- a
-# codepoint Segoe UI lacks draws as a hollow box, which is how U+25CE was rejected for Solana.
-# are per coin; BTC and ETH are measured (see research/), the rest start from BTC's numbers
-# and self-calibrate from their own settlements within the hour. `decimals` is how many
-# Kalshi quotes that coin's strikes to, which is the precision a price has to be shown
-# at for a 15-minute move to be visible at all: DOGE moves in the sixth decimal.
+# The coins we track, up to five, each with its own phone page and side panel, all funded from
+# one balance per strategy. What each field is for:
+#
+#   index_offset_pct / index_sd_pct / default_sigma
+#       How this coin's price behaves and how far Kalshi's settlement index sits above our
+#       exchange's. BTC and ETH were measured over a week of settlements (see research/); the
+#       rest start from BTC's numbers and self-calibrate from their own within the hour.
+#   decimals
+#       How many Kalshi quotes this coin's strikes to, which is the precision a price has to
+#       be shown at for a 15-minute move to be visible at all: DOGE moves in the sixth.
+#   symbol
+#       The coin's sign, checked against the font by research/font_probe.py -- a codepoint
+#       Segoe UI lacks draws as a hollow box, which is how U+25CE was rejected for Solana.
+#   colour
+#       For the sign only. The ticker beside it keeps the colour everything else uses, so a row
+#       reads as text with a mark rather than as five differently coloured labels. Each clears
+#       5.8:1 against the dark backgrounds; SYMBOL_ON_LIGHT dims it for an active pill.
 ASSETS = {
     "BTC": dict(coin="BTC", name="Bitcoin", product="BTC-USD", series="KXBTC15M",
-                symbol="₿",
+                symbol="₿", colour="#F7931A",  # bitcoin orange
                 icon="btc.ico", index_offset_pct=0.000057,
                 index_sd_pct=0.000144, default_sigma=8e-5, min_pad_pct=0.000187, decimals=2),
     "ETH": dict(coin="ETH", name="Ethereum", product="ETH-USD", series="KXETH15M",
-                symbol="Ξ",
+                symbol="Ξ", colour="#8FA2F2",  # periwinkle; #627EEA is too dark here
                 icon="eth.ico", index_offset_pct=0.0000713,
                 index_sd_pct=0.0002156, default_sigma=9.4e-5, min_pad_pct=0.000187, decimals=2),
     "SOL": dict(coin="SOL", name="Solana", product="SOL-USD", series="KXSOL15M",
-                symbol="≡",
+                symbol="≡", colour="#14F195",  # solana green
                 icon="eth.ico", index_offset_pct=0.000057,
                 index_sd_pct=0.000216, default_sigma=1.1e-4, min_pad_pct=0.00025, decimals=4),
     "XRP": dict(coin="XRP", name="XRP", product="XRP-USD", series="KXXRP15M",
-                symbol="✕",
+                symbol="✕", colour="#4FC3F7",  # ripple blue; its real mark is black
                 icon="eth.ico", index_offset_pct=0.000057,
                 index_sd_pct=0.000216, default_sigma=1.1e-4, min_pad_pct=0.00025, decimals=4),
     "DOGE": dict(coin="DOGE", name="Dogecoin", product="DOGE-USD", series="KXDOGE15M",
-                 symbol="Ð",
+                 symbol="Ð", colour="#E3C044",  # dogecoin gold, lifted off #C2A633
                  icon="eth.ico", index_offset_pct=0.000057,
                  index_sd_pct=0.000216, default_sigma=1.2e-4, min_pad_pct=0.00025, decimals=6),
 }
@@ -590,6 +601,20 @@ class Drawing:
             (x + self.ox) * self.k, y * self.k, text=s, font=self.font(size, weight),
             fill=fill, anchor=anchor, **kw
         )
+
+    def marked_text(self, cx, y, symbol, rest, size, mark, fill, **kw):
+        """Draw "<symbol> <rest>" centred on cx, with only the symbol coloured.
+
+        Two canvas items rather than one, because a text item takes a single fill. They are
+        measured and placed by hand so the pair still reads as one centred label.
+        """
+        font = tkfont.Font(family="Segoe UI Semibold", size=-self.px(size))
+        gap = 4
+        w_sym = font.measure(symbol) / self.k
+        w_rest = font.measure(rest) / self.k
+        start = cx - (w_sym + gap + w_rest) / 2
+        self.text(start, y, symbol, size, mark, anchor="w", **kw)
+        self.text(start + w_sym + gap, y, rest, size, fill, anchor="w", **kw)
 
     def _button(self, tag, on_click):
         self.canvas.tag_bind(tag, "<Button-1>", lambda e: on_click())
@@ -839,8 +864,12 @@ class Monitor(Drawing, tk.Toplevel):
             active = coin == self.coin
             tags = ("btn", f"page_{coin}")
             self.rrect(x1, 71, x1 + wide, 97, 12, fill=TEXT if active else BUTTON, tags=tags)
-            label = f"{ASSETS[coin]['symbol']} {coin}"
-            self.text(x1 + wide / 2, 84, label, 10, BG if active else MUTED, tags=tags)
+            asset = ASSETS[coin]
+            # an active pill is filled with TEXT, so its bright sign has to be dimmed
+            mark = (mix_color(asset["colour"], BG, SYMBOL_ON_LIGHT) if active
+                    else asset["colour"])
+            self.marked_text(x1 + wide / 2, 84, asset["symbol"], coin, 10, mark,
+                             BG if active else MUTED, tags=tags)
             self._button(f"page_{coin}", lambda c=coin: self.hub.switch(c))
 
         # All three controls sit either side of the island, clear of the coin pills below.
@@ -854,8 +883,12 @@ class Monitor(Drawing, tk.Toplevel):
         self._button("close", self.quit_app)
 
         # "BTC index  · live" caption (the settlement index, as the prediction market uses)
-        self.text(W / 2 - 4, 122, f"{self.asset['symbol']} {self.coin} index", 12, MUTED,
-                  anchor="e")
+        # measured and centred by hand so the live dot beside it stays where it was
+        caption = f"{self.coin} index"
+        font = tkfont.Font(family="Segoe UI Semibold", size=-self.px(12))
+        w = (font.measure(self.asset["symbol"]) + font.measure(caption)) / self.k + 4
+        self.marked_text(W / 2 - 4 - w / 2, 122, self.asset["symbol"], caption, 12,
+                         self.asset["colour"], MUTED)
         self.live_dot = self.circle(W / 2 + 8, 122, 4, fill=MUTED, width=0)
         self.live_text = self.text(W / 2 + 16, 122, "connecting", 12, MUTED, anchor="w")
 
