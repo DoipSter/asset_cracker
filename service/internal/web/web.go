@@ -1,7 +1,8 @@
-// Package web serves the read-only pages: the home page, the phone widget, and the JSON they poll.
+// Package web serves the home page, the phone widget, and the JSON they poll.
 //
-// Everything here reads. There is no route that changes anything, and the server it is mounted
-// on listens on localhost only; it is viewed from another machine through an SSH tunnel.
+// The pages read. The buckets page also posts four controls, all for simulated money:
+// the orders switch, approving or retiring a version-3 strategy, the allocation rates,
+// and resetting the sim books. The server listens on localhost only.
 package web
 
 import (
@@ -88,7 +89,7 @@ type Live func() map[string]any
 
 // Routes mounts the pages and their API on mux: the home page at /, the phone widget at /widget.
 // The widget asks for /api/... by absolute path, so it works from either address.
-func Routes(mux *http.ServeMux, db *store.Store, userAgent string, live Live, src Sources) {
+func Routes(mux *http.ServeMux, db *store.Store, userAgent string, live Live, src Sources, ctl Control) {
 	serve := func(path string, body []byte) {
 		mux.HandleFunc("GET "+path, func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -98,7 +99,7 @@ func Routes(mux *http.ServeMux, db *store.Store, userAgent string, live Live, sr
 	}
 	serve("/{$}", homePage)
 	serve("/widget", widgetPage)
-	homeRoutes(mux, db, userAgent, src)
+	homeRoutes(mux, db, userAgent, src, ctl)
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
 		defer cancel()

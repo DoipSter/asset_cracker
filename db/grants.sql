@@ -42,3 +42,8 @@ grant select on candle to assetcracker_ro;
 -- through the service role; the surface only reads it.
 grant select on instrument, source, market, price_tick, evaluation, candle_return, analysis_result to assetcracker_ro;
 grant select, insert on analysis_result to assetcracker;
+
+-- The buckets page writes these. The orders switch is one row that changes; the reset
+-- function is the only way the service role deletes simulated books.
+grant update (value, set_at, set_by, note) on operator_setting to assetcracker;
+grant execute on function reset_sim(text) to assetcracker;

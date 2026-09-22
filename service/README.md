@@ -4,8 +4,9 @@ The Asset Cracker service, in Go. See `docs/platform-brief.md` for where it is g
 
 **Today it records market data and runs one live engine (integer cents, paper broker) in simulation.**
 v1 and v2 are frozen archives, imported only by `cmd/replay` and `cmd/replay2`. There is no order
-code and there are no credentials: every request is an unauthenticated public read, and every
-ledger account is `sim`.
+code and there are no credentials. The pages are served on localhost. The buckets page can turn
+new orders on or off, approve or retire a version-3 strategy, set the allocation rates, and reset
+the simulated books. Every ledger account is `sim`.
 
 | Package | |
 |---|---|
@@ -23,7 +24,7 @@ ledger account is `sim`.
 | `internal/pyfloat` | CPython's float rounding, repr and floor division, where Go differs |
 | `cmd/replay` | v1 parity gate |
 | `cmd/replay2` | v2 parity gate |
-| `internal/web` | The read-only status page: one embedded HTML file and the JSON it polls. No route changes anything |
+| `internal/web` | The status page, and the buckets-page controls (orders, version-3 approval, allocation, sim reset) |
 | `internal/health` | `GET /healthz` on localhost: prices, rounds, counts; 503 if anything is stale |
 | `internal/readsurface` | The agents' read-only door: the MCP tools of `assetcracker mcp`. Windowed, capped, paged reads of candles, prints, the book and markets, and in-database summaries (returns, vol profile, momentum grid, features, stored analyses). Every call in a READ ONLY transaction with a timeout. `docs/mcp-read-surface.md` |
 
@@ -68,7 +69,7 @@ in `docs/mcp-read-surface.md`.
 | `AC_DATABASE_URL` | `postgres:///assetcracker?host=/var/run/postgresql` (unix socket, peer auth, no password) |
 | `AC_HTTP_ADDR` | `127.0.0.1:8377` |
 | `AC_USER_AGENT` | `asset-cracker/0.1` |
-| `AC_V3` | on unless exactly `off`: settle-only (no new orders) when off |
+| `AC_V3` | on unless exactly `off`. The buckets page can override this; with no saved switch, off means settle-only |
 | `AC_GATE_MIN_EDGE` | `0.02`: the after-fee return per dollar staked the promotion gate's sample floor is sized to find |
 | `AC_GATE_POWER` | `0.8`: the chance of finding it when it is there |
 | `AC_GATE_MAX_DRAWDOWN_CENTS` | `25000`: the deepest fall from peak the gate allows |

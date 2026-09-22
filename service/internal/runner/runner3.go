@@ -144,6 +144,12 @@ type Runner3 struct {
 	plumbing   bool // the engine is built with NewPlumbingEngine: dev only
 	feePerFill bool
 
+	// ordersLive is the buckets-page switch for NEW orders. It starts as opts.On and can
+	// change while the process runs. Off makes the next look send nothing. On resumes
+	// orders only for buckets this process was built allowed to order; a process that
+	// started settle-only stays so until the next start, which reads the saved switch.
+	ordersLive atomic.Bool
+
 	// writeBudget is writeBudget3. It is a field only so that a test can make a real deadline
 	// expire in milliseconds; nothing in the service changes it.
 	writeBudget time.Duration
@@ -253,6 +259,7 @@ func NewRunner3(ctx context.Context, db Store3, coins []Coin3, opts Options3) (*
 		last: map[string]string{}, lastAt: map[string]float64{}, entryPrice: map[string]float64{},
 		refused: map[int64]string{}, seeded: map[int64]bool{}, writeBudget: writeBudget3,
 		state: stateSuspended, reason: "starting: memory has not been rebuilt from the database yet"}
+	r.ordersLive.Store(opts.On)
 	r.since = r.now()
 
 	// 1. The names to seed: the approved versions, and only with AC_V3 on. Each is vetted BEFORE
@@ -615,8 +622,8 @@ func (r *Runner3) Step(ctx context.Context, coin string, evalID int64, at time.T
 	// an empty price before this; observing the book needs no price, and skipping it could only
 	// leave the holds too high.)
 	r.paper.ObserveBook(m.Ticker, evalID, at, closes, q)
-	if f(price) == 0 || r.mayOrderCount() == 0 {
-		return // no fresh price, or observe-only / settle-only
+	if f(price) == 0 || !r.ordersLive.Load() || r.mayOrderCount() == 0 {
+		return // no fresh price, orders switched off, or observe-only / settle-only
 	}
 	now := k3.UnixSeconds(at)
 	decisions, intents := r.engine.Decide(coin, m, q, r.viewFor(coin, m.Ticker, at), now)
@@ -1406,6 +1413,79 @@ func (r *Runner3) read(ctx context.Context, pending []string) (*fresh, error) {
 	return out, nil
 }
 
+// SetOrders is the buckets-page switch. Off stops the next look. On resumes orders for
+// buckets this process was built allowed to order, and otherwise waits for the next start.
+// "now" means this process honours the switch on its next look. "next-start" means the
+// saved value is what the next start will use, and this process has no bucket it can order.
+func (r *Runner3) SetOrders(on bool) string {
+	r.ordersLive.Store(on)
+	r.mu.Lock()
+	n := r.mayOrderCount()
+	r.mu.Unlock()
+	r.notesMu.Lock()
+	r.notes = nil
+	r.notesMu.Unlock()
+	if n > 0 {
+		return "now"
+	}
+	return "next-start"
+}
+
+// OrdersStatus is what the buckets page shows: whether a look right now would send an
+// order, and whether the switch applies to this process or to the next start.
+func (r *Runner3) OrdersStatus() (placing bool, effective string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := r.mayOrderCount()
+	if n == 0 {
+		return false, "next-start"
+	}
+	return r.ordersLive.Load() && r.state == stateRunning, "now"
+}
+
+// HoldForReset stops writes while the simulated books are deleted. A rebuild will not
+// start for an hour, so a heal cannot put the deleted buckets back into memory.
+func (r *Runner3) HoldForReset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.suspendLocked("sim books are being reset")
+	r.healAfter = r.now().Add(time.Hour)
+}
+
+// AbortReset lets the runner rebuild from the books, which are still there.
+func (r *Runner3) AbortReset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state == stateSuspended {
+		r.healAfter = r.now()
+	}
+}
+
+// ReleaseAfterReset drops every held bucket. The database no longer has them, so a
+// rebuild of the old ids would invent an empty account and then try to trade it.
+func (r *Runner3) ReleaseAfterReset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	defer r.fenceLocked("reset")
+	r.buckets = nil
+	r.ids = nil
+	r.engine, _ = k3.NewEngine()
+	r.paper = r.newPaper()
+	r.pendingIDs = nil
+	r.probe = nil
+	r.markers = nil
+	r.entryPrice = map[string]float64{}
+	r.quotes = map[string]seenQuotes{}
+	r.last = map[string]string{}
+	r.lastAt = map[string]float64{}
+	r.state = stateRunning
+	r.reason = ""
+	r.failures = 0
+	r.healAfter = time.Time{}
+	r.since = r.now()
+	r.gen++
+}
+
 // ---- /api/status ------------------------------------------------------------------------------
 
 // Snapshot is the "v3" block of /api/status. It waits on r.mu (a status page may wait out a
@@ -1422,11 +1502,11 @@ func (r *Runner3) Snapshot(ctx context.Context) map[string]any {
 		switch {
 		case len(r.buckets) == 0:
 			mode = "observe-only"
-		case r.mayOrderCount() == 0:
+		case !r.ordersLive.Load() || r.mayOrderCount() == 0:
 			mode = "settle-only"
 		}
 	}
-	doc := map[string]any{"engine": "v3", "on": r.opts.On, "state": r.state, "mode": mode, "reason": r.reason, "plumbing": r.plumbing,
+	doc := map[string]any{"engine": "v3", "on": r.ordersLive.Load(), "state": r.state, "mode": mode, "reason": r.reason, "plumbing": r.plumbing,
 		"fault_injection_built": FaultInjectionBuilt, "failures_in_a_row": r.failures,
 		"skipped_busy": map[string]any{"step": r.skippedStep.Load(), "settled": r.skippedSettled.Load()}, "restart_notes": notes}
 	if r.state != stateRunning {
@@ -1472,7 +1552,7 @@ func (r *Runner3) Snapshot(ctx context.Context) map[string]any {
 // says, for each approved version that is not trading, WHY, from what NewRunner3 recorded rather
 // than by inference:
 //
-//	"<name>: approved, but AC_V3 is off"
+//	"<name>: approved, but new orders are off"
 //	"<name>: refused at start: <why>: a restart alone will not change this"   vet said no at this start
 //	"<name>: its bucket ran out and is frozen: not traded, not replaced" seeded at this start, not held
 //	"<name>: approved, but the next start will refuse it: <why>"         approved while running; vet says no
@@ -1505,8 +1585,8 @@ func (r *Runner3) restartNotes(ctx context.Context) (notes []string) {
 		now[v.ID] = true
 		switch {
 		case loaded[v.ID]:
-		case !r.opts.On:
-			notes = append(notes, v.Name+": approved, but AC_V3 is off")
+		case !r.ordersLive.Load():
+			notes = append(notes, v.Name+": approved, but new orders are off")
 		case r.refused[v.ID] != "":
 			notes = append(notes, v.Name+": refused at start: "+r.refused[v.ID]+": a restart alone will not change this")
 		case r.seeded[v.ID]:

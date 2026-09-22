@@ -284,14 +284,14 @@ func TestHomeAddsUp(t *testing.T) {
 // absolute path, so it must work from there unchanged; / is the home page.
 func TestPagesAndBadRequests(t *testing.T) {
 	mux := http.NewServeMux()
-	Routes(mux, nil, "test", func() map[string]any { return map[string]any{} }, testSources(nil, store.Capital{}))
+	Routes(mux, nil, "test", func() map[string]any { return map[string]any{} }, testSources(nil, store.Capital{}), Control{})
 	get := func(path string) (int, string) {
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
 		return rec.Code, rec.Body.String()
 	}
-	if code, body := get("/"); code != 200 || !strings.Contains(body, `href="widget"`) {
-		t.Errorf("/ answered %d", code)
+	if code, body := get("/"); code != 200 || !strings.Contains(body, `href="widget"`) || !strings.Contains(body, `id="j-controls"`) {
+		t.Errorf("/ answered %d, or the buckets page has no controls", code)
 	}
 	if code, body := get("/widget"); code != 200 || !strings.Contains(body, `fetch("/api/status"`) {
 		t.Errorf("/widget answered %d, or no longer asks for /api/status by absolute path", code)

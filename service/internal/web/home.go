@@ -511,7 +511,7 @@ var assetRanges = map[string]time.Duration{"15M": 15 * time.Minute, "1H": time.H
 const maxMarkers = 500
 
 // homeRoutes mounts the three routes of docs/api-home.md that this file serves.
-func homeRoutes(mux *http.ServeMux, db *store.Store, userAgent string, src Sources) {
+func homeRoutes(mux *http.ServeMux, db *store.Store, userAgent string, src Sources, ctl Control) {
 	cache := &windows{by: map[string]window{}}
 	moves := &changes{first: map[string]float64{}, firstAt: map[string]time.Time{}, fetched: map[string]time.Time{}, inflight: map[string]bool{}}
 	rounds := &roundPrices{by: map[string]roundPoints{}}
@@ -643,6 +643,12 @@ func homeRoutes(mux *http.ServeMux, db *store.Store, userAgent string, src Sourc
 		}
 		writeJSON(w, doc)
 	})
+
+	var cs controlStore
+	if db != nil {
+		cs = db
+	}
+	controlRoutes(mux, cs, list, ctl)
 }
 
 type roundReader interface {
@@ -720,6 +726,13 @@ type bucketList struct {
 }
 
 const bucketListFor = time.Minute
+
+// drop forgets the cached listing so the page reads the books again after a reset.
+func (c *bucketList) drop() {
+	c.mu.Lock()
+	c.tried = time.Time{}
+	c.mu.Unlock()
+}
 
 func (c *bucketList) get(db bucketReader, now time.Time) bucketListing {
 	c.mu.Lock()

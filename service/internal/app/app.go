@@ -88,7 +88,13 @@ func Run(version string) error {
 	case faults.On() && !strings.HasSuffix(cfg.DatabaseName(), "_dev"):
 		return fmt.Errorf("fault injection is switched on against database %q, which is not a *_dev one: refusing to start", cfg.DatabaseName())
 	}
-	run3, err := runner.NewRunner3(ctx, runner.WrapStore3(db, faults), coins, runner.Options3{On: cfg.V3, DatabaseName: cfg.DatabaseName()})
+	ordersOn := cfg.V3
+	if saved, set, err := db.OrdersSetting(ctx); err != nil {
+		return fmt.Errorf("orders switch: %w", err)
+	} else if set {
+		ordersOn = saved
+	}
+	run3, err := runner.NewRunner3(ctx, runner.WrapStore3(db, faults), coins, runner.Options3{On: ordersOn, DatabaseName: cfg.DatabaseName()})
 	if err != nil {
 		return err
 	}
@@ -313,10 +319,39 @@ func Run(version string) error {
 					doc["engine"] = run3.Snapshot(sctx)
 					cancel()
 				} else {
-					doc["engine"] = map[string]any{"state": "absent", "on": cfg.V3, "reason": "no tradable series"}
+					doc["engine"] = map[string]any{"state": "absent", "on": ordersOn, "reason": "no tradable series"}
 				}
 				return doc
-			}, src)
+			}, src, web.Control{
+				EnvOn: cfg.V3,
+				Status: func() (bool, string) {
+					if run3 == nil {
+						return false, "next-start"
+					}
+					return run3.OrdersStatus()
+				},
+				Apply: func(on bool) string {
+					if run3 == nil {
+						return "next-start"
+					}
+					return run3.SetOrders(on)
+				},
+				Hold: func() {
+					if run3 != nil {
+						run3.HoldForReset()
+					}
+				},
+				Release: func() {
+					if run3 != nil {
+						run3.ReleaseAfterReset()
+					}
+				},
+				Abort: func() {
+					if run3 != nil {
+						run3.AbortReset()
+					}
+				},
+			})
 			web.AnalysisRoutes(ctx, mux, db, gate)
 		})
 	stop()
