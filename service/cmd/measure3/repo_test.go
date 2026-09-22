@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -122,15 +123,47 @@ func TestEmitRefusesWithoutResults(t *testing.T) {
 	if err := emitMigration(r); err == nil {
 		t.Fatal("emit after a failed R2 must refuse")
 	}
-	// Both passed: the engine still refuses, because drift_tol has no measurement under the
-	// protocol as it stands. This is the check that keeps an unmeasured number out of the record.
+	// Both passed, and the frozen costs are whole ten-thousandths: the migration is written,
+	// with drift_tol as the third amendment's fact 0. A frozen cost the engine refuses (finer
+	// than 0.0001) still stops it: the engine's rule, not this tool's, decides.
 	res.R2.Pass = true
 	if err := writeJSON(r.researchPath(testResultFile), res); err != nil {
 		t.Fatal(err)
 	}
+	if err := writeJSON(r.researchPath(frozenFile), frozenParams{Lambda: 0.4, StaleCost: 0.00125, StaleCostSell: 0.001, ProtocolSHA: protocolSHA}); err != nil {
+		t.Fatal(err)
+	}
 	if err := emitMigration(r); err == nil {
-		t.Fatal("emit must refuse while drift_tol is not accepted by engine.Validate")
-	} else if _, statErr := os.Stat(filepath.Join(r.Root, "db", "migrations", migrationName)); statErr == nil {
-		t.Fatal("a migration was written despite the refusal")
+		t.Fatal("a cost finer than 0.0001 must be refused by the engine")
+	}
+	if err := writeJSON(r.researchPath(frozenFile), frozenParams{Lambda: 0.4, StaleCost: 0.0012, StaleCostSell: 0.001, ProtocolSHA: protocolSHA}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(r.Root, "db", "migrations"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// emit records HEAD's sha as code_ref: give the temp dir one commit.
+	for _, args := range [][]string{{"init", "-q"}, {"-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = r.Root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Skipf("git %v: %v %s", args, err, out)
+		}
+	}
+	if err := emitMigration(r); err != nil {
+		t.Fatalf("emit refused after both rules passed: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(r.Root, "db", "migrations", migrationName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, want := range []string{`"drift_tol":0`, `"kind":"fact"`, `"lambda":0.4`, `"stale_cost":0.0012`, "'Scalper'", "'Value'", "'draft'", "DEV PLUMBING%"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("migration lacks %s", want)
+		}
+	}
+	if strings.Contains(s, "placeholder") && !strings.Contains(s, "position('placeholder'") {
+		t.Error("a placeholder reached the migration")
 	}
 }

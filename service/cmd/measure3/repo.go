@@ -21,10 +21,12 @@ const (
 	errataPath   = "docs/v3-measurement-protocol-errata.md"
 	researchDir  = "research/v3"
 
-	// protocolSHA is the sha-256 of the protocol text this tool was written against (the second
-	// amendment, commit 1c174e6). The tool refuses to run against any other text: a new amendment
-	// is a new protocol, and the tool is read again with it (section 6, last line).
-	protocolSHA = "8449e67337eee6e89387556d163853680c085af17495da19e3e2ae026fc8d068"
+	// protocolSHA is the sha-256 of the protocol text this tool was written against: the third
+	// amendment (drift_tol as the fact 0), 2026-09-22. The tool refuses to run against any other
+	// text: a new amendment is a new protocol, and the tool is read again with it (section 6,
+	// last line). The second amendment's text was 8449e67337ee...; the tool's first run against
+	// the record (research/v3/runs.jsonl, 07:10 UTC) was under that text and froze nothing.
+	protocolSHA = "46017747d9a45c833a7b17da25b6b3e199657f7ee1d7d1a635d611fd551c2dbf"
 
 	noErrataLine = "No errata yet."
 )

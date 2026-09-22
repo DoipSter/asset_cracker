@@ -644,11 +644,20 @@ func TestParamsRefuseWhatIsNotMeasured(t *testing.T) {
 			t.Error("a provenance that disagrees with its field must be refused")
 		}
 	}
+	// The third amendment (2026-09-22): drift_tol as a fact of exactly 0 is accepted; as a fact
+	// of any other value, or as a convention, it is not; and the amendment loosens no other field.
+	gateOpen := Provenance{Kind: KindFact, Value: 0, Note: "no reference engine runs beside the third; the drift gate is open and the number decides nothing"}
+	if _, err := Scalper(Measured{Lambda: shaped(0.2), StaleCost: shaped(0.007), StaleCostSell: shaped(0.006), DriftTol: gateOpen, ProtocolSHA: "a", ResultSHA: "b"}); err != nil {
+		t.Errorf("drift_tol as the fact 0 must be accepted: %v", err)
+	}
 	for _, bad := range []Measured{
 		{Lambda: shaped(0), StaleCost: shaped(0.007), StaleCostSell: shaped(0.006), DriftTol: shaped(0.001), ProtocolSHA: "a", ResultSHA: "b"},     // R1
 		{Lambda: shaped(0.2), StaleCost: shaped(0.00705), StaleCostSell: shaped(0.006), DriftTol: shaped(0.001), ProtocolSHA: "a", ResultSHA: "b"}, // finer than 0.0001
 		{Lambda: shaped(0.2), StaleCost: shaped(0.007), StaleCostSell: shaped(0.006), DriftTol: shaped(0.001)},                                     // no shas
 		{Lambda: Provenance{Kind: KindConvention, Value: 0.5, Note: "a guess"}, StaleCost: shaped(0.007), StaleCostSell: shaped(0.006), DriftTol: shaped(0.001), ProtocolSHA: "a", ResultSHA: "b"},
+		{Lambda: shaped(0.2), StaleCost: shaped(0.007), StaleCostSell: shaped(0.006), DriftTol: Provenance{Kind: KindFact, Value: 0.05, Note: "x"}, ProtocolSHA: "a", ResultSHA: "b"},    // a fact, but not 0
+		{Lambda: shaped(0.2), StaleCost: shaped(0.007), StaleCostSell: shaped(0.006), DriftTol: Provenance{Kind: KindConvention, Value: 0, Note: "x"}, ProtocolSHA: "a", ResultSHA: "b"}, // 0, but a convention
+		{Lambda: shaped(0.2), StaleCost: Provenance{Kind: KindFact, Value: 0, Note: "x"}, StaleCostSell: shaped(0.006), DriftTol: gateOpen, ProtocolSHA: "a", ResultSHA: "b"},            // the amendment is for drift_tol alone
 	} {
 		if _, err := Scalper(bad); err == nil {
 			t.Errorf("must be refused: %+v", bad)

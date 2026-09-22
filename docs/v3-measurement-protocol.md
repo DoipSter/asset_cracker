@@ -1,5 +1,18 @@
 # v3 measurement protocol (pre-registered)
 
+**Third amendment, 2026-09-22 07:25 UTC (2026-09-22 00:25 PT; `T_c` is the commit's time), at the owner's instruction.** `drift_tol` is not
+measured. The reference it was to be measured against, the second engine, stopped at release `000fa9d`, and the
+scratch database step S5 named is no longer a place an engine runs (the service refuses to start against it, release
+`1b5d334`). With no reference the drift gate is open (section 2) and the number decides nothing. `drift_tol` is
+therefore registered as kind `fact`, value `0`, note "no reference engine runs beside the third; the drift gate is
+open and the number decides nothing", and `engine.Params.Validate` accepts kind `fact` for that one field and no
+other. The three remaining numbers, `lambda`, `stale_cost` and `stale_cost_sell`, stay `measured` under sections 3
+and 4. Should a reference engine run again, a measured `drift_tol` is a new version, not a change to this one.
+Also recorded: the queries of section 1 and 3.1 and the coverage query have now been executed against the record,
+by `cmd/measure3 train` on 2026-09-22 07:10 UTC, on the 10 windows then complete; nothing was frozen (section 6),
+and section 9 item 5 is superseded to that extent. Made before TRAIN's 480th window (about 2026-09-27 04:15 UTC), so
+it costs no TEST window (section 0). Its commit is the new `T_c`.
+
 **Second amendment, 2026-09-22 UTC (evening of 2026-09-21 PT), at the owner's instruction.** Release `000fa9d`
 (2026-09-22 04:17 UTC) stopped the v1 and v2 engines; the last v2 `decision` row is at 04:17:01 UTC **[PROD]**. The
 first text measured lambda on v2's decisions and M2/M2s on v2's orders, so its TRAIN could never close. Since

@@ -251,9 +251,16 @@ func (p Params) validate(plumbing bool) error {
 	}
 	for _, key := range measuredFields {
 		pr, has := p.Provenance[key]
-		if has && pr.Kind != KindMeasured && pr.Kind != KindPlaceholder {
-			fail("%s must be measured; it is labelled %q", key, pr.Kind)
+		if !has || pr.Kind == KindMeasured || pr.Kind == KindPlaceholder {
+			continue
 		}
+		// The protocol's third amendment (2026-09-22): drift_tol has no reference engine to be
+		// measured against, so it is a fact, 0, and the gate it fed is open. That one field, and
+		// only as a fact of exactly 0; the other three stay measured.
+		if key == "drift_tol" && pr.Kind == KindFact && pr.Value == 0 {
+			continue
+		}
+		fail("%s must be measured; it is labelled %q", key, pr.Kind)
 	}
 	if usesMeasured && (p.ProtocolSHA == "" || p.ResultSHA == "") {
 		fail("measured numbers need the protocol's and the result's sha")

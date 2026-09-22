@@ -18,9 +18,9 @@ import (
 // engine.Scalper or engine.Value refuses the params: every number must carry its provenance and
 // the four measured ones must be measured. There is no flag that relaxes that.
 //
-// drift_tol: the protocol measured it in step S5 against a live second engine on the scratch
-// database, and that engine is stopped. Until the owner's third amendment says what stands in
-// its place, engine.Validate refuses the versions here, and this command emits nothing.
+// drift_tol: the third amendment (2026-09-22) registers it as the fact 0, because the reference
+// engine it was to be measured against is stopped and the drift gate is open. engine.Validate
+// accepts exactly that and nothing looser.
 const migrationName = "0020_kalshi15m_v3_versions.sql"
 
 func emitMigration(r repo) error {
@@ -61,7 +61,7 @@ func emitMigration(r repo) error {
 		Lambda:        measured(frozen.Lambda, fmt.Sprintf("M1, the lower one-sided 95%% bound, floored to 0.01, on TRAIN %s to %s", frozen.TrainFirstClose.Format(time.RFC3339), frozen.TrainLastClose.Format(time.RFC3339))),
 		StaleCost:     measured(frozen.StaleCost, "M2: measured on the recorded TRAIN book at rows where the forecast alone would buy; no order; a proxy for v3's fills"),
 		StaleCostSell: measured(frozen.StaleCostSell, "M2s: measured on the recorded TRAIN book at rows where the forecast alone would sell; no order; a proxy for v3's fills"),
-		// No measurement exists (see the comment above). Validate decides whether this may stand.
+		// The third amendment's words, exactly; Validate accepts this one fact and no other.
 		DriftTol:    engine.Provenance{Kind: engine.KindFact, Value: 0, Note: "no reference engine runs beside the third; the drift gate is open and the number decides nothing"},
 		ProtocolSHA: protocolSHA,
 		ResultSHA:   resultSHA,
