@@ -1,4 +1,4 @@
-package kalshi15m3
+package engine
 
 import (
 	"bufio"
@@ -12,7 +12,7 @@ import (
 
 	"github.com/doipster/asset_cracker/service/internal/broker"
 	"github.com/doipster/asset_cracker/service/internal/kalshi"
-	k2 "github.com/doipster/asset_cracker/service/internal/kalshi15m2"
+	k2 "github.com/doipster/asset_cracker/service/internal/legacy/kalshi15m2"
 )
 
 // PLACEHOLDER NUMBERS. Nothing in this file is a measurement. lambda, the two staleness costs and

@@ -1,4 +1,4 @@
-package kalshi15m3
+package engine
 
 import (
 	"errors"
@@ -299,7 +299,7 @@ func (p Params) validate(plumbing bool) error {
 		fail("levels %d is outside 1..5, and only five are recorded", p.Levels)
 	}
 	if len(bad) > 0 {
-		return errors.New("kalshi15m3 params " + p.Name + ": " + strings.Join(bad, "; "))
+		return errors.New("engine params " + p.Name + ": " + strings.Join(bad, "; "))
 	}
 	return nil
 }

@@ -1,4 +1,4 @@
-package kalshi15m3
+package engine
 
 import (
 	"fmt"
@@ -107,7 +107,7 @@ func newEngine(plumbing bool, accounts []*Account) (*Engine, error) {
 			a.validated = true
 		}
 		if seen[a.BucketID] {
-			return nil, fmt.Errorf("kalshi15m3: bucket %d appears twice", a.BucketID)
+			return nil, fmt.Errorf("engine: bucket %d appears twice", a.BucketID)
 		}
 		seen[a.BucketID] = true
 		if a.Positions == nil {
@@ -680,7 +680,7 @@ func BookedFromRow(bucketID, marketID int64, action, side string, at float64, de
 	num := func(m map[string]any, key string) (float64, bool) { f, ok := m[key].(float64); return f, ok }
 	b := Booked{BucketID: bucketID, MarketID: marketID, Action: broker.Action(action), Side: broker.Side(side), At: at, Fills: fills}
 	if version, _ := num(detail, "v"); version != 3 {
-		return b, fmt.Errorf("kalshi15m3: order detail is not version 3")
+		return b, fmt.Errorf("engine: order detail is not version 3")
 	}
 	var ok [3]bool
 	b.Coin, ok[0] = detail["coin"].(string)
@@ -690,19 +690,19 @@ func BookedFromRow(bucketID, marketID int64, action, side string, at float64, de
 	strike, okStrike := num(detail, "strike")
 	w, okWindow := detail["window"].(map[string]any)
 	if !ok[0] || !ok[1] || !ok[2] || !okClose || !okStrike || !okWindow {
-		return b, fmt.Errorf("kalshi15m3: order detail lacks coin, ticker, why, close, strike or window")
+		return b, fmt.Errorf("engine: order detail lacks coin, ticker, why, close, strike or window")
 	}
 	b.Close, b.Strike = closeAt, strike
 	equity, okEquity := num(w, "equity_cents")
 	kMax, okKMax := num(w, "k_max")
 	if !okEquity || !okKMax {
-		return b, fmt.Errorf("kalshi15m3: order detail's window lacks equity_cents or k_max")
+		return b, fmt.Errorf("engine: order detail's window lacks equity_cents or k_max")
 	}
 	b.Window = Window{Close: windowKey(closeAt), EquityCents: int64(math.Round(equity)), KMax: kMax}
 	if b.Action == broker.Buy {
 		k, okKelly := num(detail, "kelly")
 		if !okKelly {
-			return b, fmt.Errorf("kalshi15m3: a buy's detail lacks kelly")
+			return b, fmt.Errorf("engine: a buy's detail lacks kelly")
 		}
 		b.Kelly = k
 	}

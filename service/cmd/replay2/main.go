@@ -24,7 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	k "github.com/doipster/asset_cracker/service/internal/kalshi15m2"
+	k "github.com/doipster/asset_cracker/service/internal/legacy/kalshi15m2"
 )
 
 const tolerance = 1e-12

@@ -2,25 +2,30 @@
 
 The Asset Cracker service, in Go. See `docs/platform-brief.md` for where it is going.
 
-**Today it records market data and runs the six kalshi15m strategies live, in simulation.**
-Twelve sim buckets (six per coin, $150 each) bet against Kalshi's real order book with imaginary
-money. There is no order code and there are no credentials: every request is an unauthenticated
-public read, and every ledger account is `sim`.
+**Today it records market data and runs one live engine (integer cents, paper broker) in simulation.**
+v1 and v2 are frozen archives, imported only by `cmd/replay` and `cmd/replay2`. There is no order
+code and there are no credentials: every request is an unauthenticated public read, and every
+ledger account is `sim`.
 
 | Package | |
 |---|---|
-| `cmd/assetcracker` | Wires everything together; graceful shutdown on SIGINT/SIGTERM |
+| `cmd/assetcracker` | Thin main: `app.Run`, and `assetcracker mcp` |
+| `internal/app` | Start ingest, one runner, HTTP |
+| `internal/engine` | The live kalshi15m engine: pure `Decide` / `Fold`, integer cents |
+| `internal/broker` | Paper fills from the recorded book |
+| `internal/runner` | The live runner (Runner3) |
 | `internal/config` | Settings from the environment, with defaults that suit the Pi |
-| `internal/store` | Postgres access (pgx). Market data only |
+| `internal/store` | Postgres access (pgx). Imports none of our packages |
+| `internal/analysis` | Promotion-gate figures; maps store reads into facts |
 | `internal/coinbase` | Trade prints from Coinbase's WebSocket `matches` channel, to `price_tick` |
 | `internal/kalshi` | Once a second per series: the open round, its order-book quotes, to `evaluation`; and how each round settled, to `market` |
-| `internal/kalshi15m` | The first strategy family: doipster's six, ported from `kalshi_trader.py`. Pure decisions (`Params.Decide`) separate from bookkeeping (`Account`) |
-| `internal/kalshi15m2` | The second version (main at dc10fd4): one balance per strategy shared across five coins, a $1,000 bank with $250 at risk, the busy Scalper with take_capture, running out and being staked again, and the anti-world twins. Checked by `cmd/replay2` |
+| `internal/legacy` | Frozen v1/v2 engines and runners. Replay only |
 | `internal/pyfloat` | CPython's float rounding, repr and floor division, where Go differs |
-| `cmd/replay` | The parity gate: replays a recording through the Go port and compares with the Python |
-| `internal/runner` | Runs a strategy family live for one series: feeds the engine, journals every decision, books every simulated fill and payout in the ledger, saves and restores state. Halts the series if money moved but could not be recorded |
+| `cmd/replay` | v1 parity gate |
+| `cmd/replay2` | v2 parity gate |
 | `internal/web` | The read-only status page: one embedded HTML file and the JSON it polls. No route changes anything |
 | `internal/health` | `GET /healthz` on localhost: prices, rounds, counts; 503 if anything is stale |
+| `internal/readsurface` | The agents' read-only door: the MCP tools of `assetcracker mcp`. Windowed, capped, paged reads of candles, prints, the book and markets, and in-database summaries (returns, vol profile, momentum grid, features, stored analyses). Every call in a READ ONLY transaction with a timeout. `docs/mcp-read-surface.md` |
 
 What it watches comes from the `instrument` table (`db/migrations/0002_seed_sources.sql`), so
 adding a coin is a row, not a code change.
@@ -39,12 +44,22 @@ second, with its tick count; 15M, 1H, 24H and 7D; the strategies panel on the ri
 the coin you are looking at, with Account, Log and Strategies. The bell turns on browser
 notifications for the tracked strategy.
 
-The panels show the second engine version: the right one the six strategies, the left one their
-anti-world twins, each with Account, Log (every coin, with its sign) and Strategies; the world
-toggle switches whose bets the chart marks. The first version keeps running on BTC and ETH and
-is recorded, but is not on the page. Not ported: the bankruptcy post-mortem file (the ledger and
-journal hold the same facts) and the per-round CSV (rounds are rows in `market`). Not carried over by choice: Pause all and Reset all (the page is
-read-only), the amber glow after a bet, and dragging a frameless window.
+The live engine is v3 (integer cents, paper broker). v1 and v2 are frozen archives: their
+ledger rows remain, they place no new sim bets, and `cmd/replay` / `cmd/replay2` still check
+them. The Python widget stays as it is (INT-10). Not ported: the bankruptcy post-mortem file
+(the ledger and journal hold the same facts) and the per-round CSV (rounds are rows in
+`market`). Not carried over by choice: Pause all and Reset all (the page is read-only), the
+amber glow after a bet, and dragging a frameless window.
+
+## Reading it from an agent
+
+    assetcracker mcp       # the read surface on stdin/stdout; nothing else runs
+
+The repository's `.cursor/mcp.json` runs that over SSH against the dev database on the Pi, so
+Cursor's agent can call `instruments`, `candles`, `bars`, `book`, `markets`, `returns_summary`,
+`vol_profile`, `momentum_grid`, `features` and `analysis_results` directly. It needs the dev
+build from `deploy/pi/deploy.sh`. What each tool returns, and what it deliberately cannot do, is
+in `docs/mcp-read-surface.md`.
 
 ## Settings
 
@@ -53,6 +68,7 @@ read-only), the amber glow after a bet, and dragging a frameless window.
 | `AC_DATABASE_URL` | `postgres:///assetcracker?host=/var/run/postgresql` (unix socket, peer auth, no password) |
 | `AC_HTTP_ADDR` | `127.0.0.1:8377` |
 | `AC_USER_AGENT` | `asset-cracker/0.1` |
+| `AC_V3` | on unless exactly `off`: settle-only (no new orders) when off |
 | `AC_GATE_MIN_EDGE` | `0.02`: the after-fee return per dollar staked the promotion gate's sample floor is sized to find |
 | `AC_GATE_POWER` | `0.8`: the chance of finding it when it is there |
 | `AC_GATE_MAX_DRAWDOWN_CENTS` | `25000`: the deepest fall from peak the gate allows |
@@ -65,6 +81,7 @@ a warning, so a mistyped variable never makes a looser gate. The rule they set i
 ## Working on it
 
     cd service && go vet ./... && go test ./...
+    tools/guard-frozen.sh      # frozen v1/v2 archives must not change unless AC_ALLOW_LEGACY=1
     deploy/pi/deploy.sh        # test, cross-compile for linux/arm64, copy to /opt/assetcracker
 
 Run it by hand on the Pi against the dev database, as `acdeploy`:

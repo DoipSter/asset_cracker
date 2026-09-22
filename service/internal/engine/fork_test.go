@@ -1,4 +1,4 @@
-package kalshi15m3
+package engine
 
 import (
 	"encoding/json"
@@ -164,7 +164,7 @@ func TestDecideIsPure(t *testing.T) {
 
 	for _, typ := range []reflect.Type{reflect.TypeOf(Engine{}), reflect.TypeOf(Account{})} {
 		for i := 0; i < typ.NumField(); i++ {
-			if s := typ.Field(i).Type.String(); s == "*kalshi15m3.Model" || s == "*kalshi15m3.CoinState" || s == "kalshi15m3.Model" {
+			if s := typ.Field(i).Type.String(); s == "*engine.Model" || s == "*engine.CoinState" || s == "engine.Model" {
 				t.Errorf("%s.%s reaches the model state: Engine must never touch a CoinState", typ.Name(), typ.Field(i).Name)
 			}
 		}
@@ -220,8 +220,8 @@ func TestDriftGate(t *testing.T) {
 	}
 	mk := Market{Ticker: "T", Strike: 80020, Close: 1500}
 	base := m.View("BTC", mk, 80029, 1030, nil)
-	if !base.OK || !base.Drift || base.DriftWhy != "v2's inputs are absent" {
-		t.Fatalf("absent inputs must close the gate: %+v", base)
+	if !base.OK || base.Drift {
+		t.Fatalf("no live reference must leave the gate open: %+v", base)
 	}
 	same := &V2Inputs{Sigma2: base.Sigma2, IndexOffset: base.Offset, OffsetSource: base.OffsetSource}
 	if v := m.View("BTC", mk, 80029, 1030, same); v.Drift || v.DriftDiff != 0 {

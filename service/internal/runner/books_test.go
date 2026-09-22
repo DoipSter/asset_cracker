@@ -40,8 +40,8 @@ func TestCompositionAddsUpToTheTotal(t *testing.T) {
 	books, capital := world1()
 	v := Value(books, capital, []string{"BTC", "ETH", "SOL", "XRP", "DOGE"})
 
-	if len(v.Groups) != 5 {
-		t.Fatalf("%d groups, want 5", len(v.Groups))
+	if len(v.Groups) != 3 {
+		t.Fatalf("%d groups, want 3", len(v.Groups))
 	}
 	var sum Line
 	for i, g := range v.Groups {
@@ -59,11 +59,9 @@ func TestCompositionAddsUpToTheTotal(t *testing.T) {
 		t.Errorf("total contributed %d, want what came from outside, %d", v.Total.ContributedCents, capital.Money.External)
 	}
 	want := map[string]Line{
-		"strategies": {ValueCents: 98_900, CashCents: 98_000, AtRiskCents: 2_000, ContributedCents: 198_659, Unmarked: 1, Count: 1},
-		"anti":       {ValueCents: 101_000, CashCents: 101_000, ContributedCents: 200_000, Count: 1}, // the retired twin's cash is not counted; its seed is
-		"v1":         {ValueCents: 14_620, CashCents: 14_000, AtRiskCents: 500, ContributedCents: 15_000, Count: 1},
-		"v3":         {}, // no third-engine bucket exists: the group is there, and all zeros
-		"money":      {ValueCents: 1_341, CashCents: 1_341, ContributedCents: 1_341, Count: 4},
+		"v3":     {}, // no live-engine bucket exists: the group is there, and all zeros
+		"legacy": {ValueCents: 214_520, CashCents: 213_000, AtRiskCents: 2_500, ContributedCents: 413_659, Unmarked: 1, Count: 3},
+		"money":  {ValueCents: 1_341, CashCents: 1_341, ContributedCents: 1_341, Count: 4},
 	}
 	for _, g := range v.Groups {
 		w := want[g.Key]
@@ -156,9 +154,9 @@ func TestUnheldLiveBucketsCountAtTheirLedgerCash(t *testing.T) {
 	if on.Total != off.Total {
 		t.Errorf("total with the engine on %+v, off %+v", on.Total, off.Total)
 	}
-	v1 := off.Groups[2]
-	if v1.Key != "v1" || v1.ValueCents != 14_620+14_937 || v1.CashCents != 14_000+14_937 || v1.ContributedCents != 30_000 || v1.Count != 2 {
-		t.Errorf("first engine group: %+v", v1)
+	v1 := off.Groups[1]
+	if v1.Key != "legacy" || v1.ValueCents != 214_520+14_937 || v1.CashCents != 213_000+14_937 || v1.ContributedCents != 413_659+15_000 || v1.Count != 4 {
+		t.Errorf("legacy group: %+v", v1)
 	}
 	var line *Line
 	for i := range off.Buckets {
@@ -241,17 +239,17 @@ func sumLines(lines []Line) Line {
 	return sum
 }
 
-// The third engine's buckets are a group of their own, the five groups add up to the total, and
+// The live engine's buckets are a group of their own, the three groups add up to the total, and
 // staking them changes no other group by a cent: the money group's contribution in particular,
 // which is "everything from outside that no bucket group has" and must take the new group off too.
-func TestFiveGroupsAddUpToTheTotal(t *testing.T) {
+func TestThreeGroupsAddUpToTheTotal(t *testing.T) {
 	coins := []string{"BTC", "ETH", "SOL", "XRP", "DOGE"}
 	before0, capital0 := world1()
 	before := Value(before0, capital0, coins)
 	books, capital := world3()
 	v := Value(books, capital, coins)
 
-	if got := strings.Join(Groups, " "); got != "strategies anti v1 v3 money" {
+	if got := strings.Join(Groups, " "); got != "v3 legacy money" {
 		t.Fatalf("groups are %q", got)
 	}
 	sum := sumLines(v.Groups)
@@ -263,70 +261,66 @@ func TestFiveGroupsAddUpToTheTotal(t *testing.T) {
 		t.Errorf("total contributed %d, want what came from outside, %d", v.Total.ContributedCents, capital.Money.External)
 	}
 	want := Line{Scope: "group", Key: "v3", ValueCents: 97_400 + 2_450 + 100_000, CashCents: 197_400, AtRiskCents: 2_600, ContributedCents: 200_000, Count: 2}
-	if v.Groups[3] != want {
-		t.Errorf("third engine group: %+v, want %+v", v.Groups[3], want)
+	if v.Groups[0] != want {
+		t.Errorf("live engine group: %+v, want %+v", v.Groups[0], want)
 	}
 	for i, g := range v.Groups {
 		if g.Key != "v3" && g != before.Groups[i] {
-			t.Errorf("staking the third engine changed %s: %+v, was %+v", g.Key, g, before.Groups[i])
+			t.Errorf("staking the live engine changed %s: %+v, was %+v", g.Key, g, before.Groups[i])
 		}
 	}
-	// Staking earned nothing; the one bet is 150 cents under water at the bid.
 	if got := v.Total.ValueCents - v.Total.ContributedCents - (before.Total.ValueCents - before.Total.ContributedCents); got != -150 {
-		t.Errorf("the third engine's arrival reads as %d cents earned, want -150", got)
+		t.Errorf("the live engine's arrival reads as %d cents earned, want -150", got)
 	}
 }
 
-// A third-engine bucket goes to its own group by its version NUMBER, from whichever side names
+// A live-engine bucket goes to its own group by its version NUMBER, from whichever side names
 // it: the engine's book (the Version field, or the engine label when a book does not set the
-// field) and the ledger's capital. A bucket in one group by value and another by contribution
-// would read as a gain in the first and the same loss in the second.
-func TestThirdEngineBucketsNeverLandInStrategies(t *testing.T) {
+// field) and the ledger's capital. Archived v1/v2 buckets (including twins) sit in "legacy".
+func TestLiveEngineBucketsNeverLandInLegacy(t *testing.T) {
 	books, capital := world3()
 	for i := range books[2].Buckets {
 		books[2].Buckets[i].Version = 0 // a book that says only "v3"
 	}
 	v := Value(books, capital, []string{"BTC"})
-	if g := v.Groups[3]; g.Count != 2 || g.ValueCents != 199_850 || g.ContributedCents != 200_000 {
+	if g := v.Groups[0]; g.Count != 2 || g.ValueCents != 199_850 || g.ContributedCents != 200_000 {
 		t.Errorf("by engine label: %+v", g)
 	}
-	if g := v.Groups[0]; g.Count != 1 || g.ContributedCents != 198_659 {
-		t.Errorf("strategies took a third-engine bucket: %+v", g)
+	if g := v.Groups[1]; g.Count != 3 || g.ContributedCents != 413_659 {
+		t.Errorf("legacy took a live-engine bucket: %+v", g)
 	}
 
-	// The third engine is not running at all (AC_V3 off and the runner not built): its live
-	// buckets are counted at their ledger cash, in the same group.
 	capital.Buckets[5].CashCents, capital.Buckets[6].CashCents = 97_400, 100_000
 	off := Value(books[:2], capital, []string{"BTC"})
-	if g := off.Groups[3]; g.Key != "v3" || g.Count != 2 || g.ValueCents != 197_400 || g.ContributedCents != 200_000 {
+	if g := off.Groups[0]; g.Key != "v3" || g.Count != 2 || g.ValueCents != 197_400 || g.ContributedCents != 200_000 {
 		t.Errorf("unheld: %+v", g)
 	}
 	for _, c := range []struct {
 		version int
 		anti    bool
 		want    string
-	}{{1, false, "v1"}, {2, false, "strategies"}, {2, true, "anti"}, {3, false, "v3"}, {3, true, "v3"}, {4, false, "strategies"}} {
+	}{{1, false, "legacy"}, {2, false, "legacy"}, {2, true, "legacy"}, {3, false, "v3"}, {3, true, "v3"}, {4, false, "legacy"}} {
 		if got := groupOf(c.version, c.anti); got != c.want {
 			t.Errorf("groupOf(%d, %v) = %q, want %q", c.version, c.anti, got, c.want)
 		}
 	}
 }
 
-// With no third-engine bucket anywhere, the other four groups and the total are exactly what
-// they were before the group existed, and the batch gains exactly one all-zero row.
-func TestNoThirdEngineBucketsLeavesTheOtherGroupsAlone(t *testing.T) {
+// With no live-engine bucket anywhere, the other two groups and the total are exactly what
+// they were, and the batch gains exactly one all-zero row.
+func TestNoLiveEngineBucketsLeavesTheOtherGroupsAlone(t *testing.T) {
 	books, capital := world1()
 	v := Value(books, capital, []string{"BTC", "ETH", "SOL", "XRP", "DOGE"})
-	if g := v.Groups[3]; g != (Line{Scope: "group", Key: "v3"}) {
-		t.Errorf("an empty third engine group is %+v, want all zeros", g)
+	if g := v.Groups[0]; g != (Line{Scope: "group", Key: "v3"}) {
+		t.Errorf("an empty live engine group is %+v, want all zeros", g)
 	}
-	four := sumLines([]Line{v.Groups[0], v.Groups[1], v.Groups[2], v.Groups[4]})
-	four.Scope, four.Key = "total", "all"
-	if four != v.Total {
-		t.Errorf("the four older groups add up to %+v, total is %+v", four, v.Total)
+	two := sumLines([]Line{v.Groups[1], v.Groups[2]})
+	two.Scope, two.Key = "total", "all"
+	if two != v.Total {
+		t.Errorf("the archived groups add up to %+v, total is %+v", two, v.Total)
 	}
 	rows := v.Snapshots(time.Unix(1_790_000_000, 0), false)
-	if len(rows) != 6 || rows[4].Scope != "group" || rows[4].Key != "v3" || rows[4].ValueCents != 0 || rows[4].ContributedCents != 0 || rows[4].AtRiskCents != 0 {
+	if len(rows) != 4 || rows[1].Scope != "group" || rows[1].Key != "v3" || rows[1].ValueCents != 0 || rows[1].ContributedCents != 0 || rows[1].AtRiskCents != 0 {
 		t.Errorf("snapshot rows: %+v", rows)
 	}
 }

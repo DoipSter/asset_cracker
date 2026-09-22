@@ -16,16 +16,16 @@ import (
 
 	"github.com/doipster/asset_cracker/service/internal/broker"
 	"github.com/doipster/asset_cracker/service/internal/coinbase"
+	k3 "github.com/doipster/asset_cracker/service/internal/engine"
 	"github.com/doipster/asset_cracker/service/internal/kalshi"
-	k3 "github.com/doipster/asset_cracker/service/internal/kalshi15m3"
 	"github.com/doipster/asset_cracker/service/internal/store"
 )
 
-// This file runs the third engine (package kalshi15m3) live, in SIMULATION: it has no order code
+// This file runs the live engine (package engine) in SIMULATION: it has no order code
 // and no venue client; what "fills" is decided by the paper broker from the recorded book.
 // Design: docs/honest-fills-v3.md, section 5. The rules that shape everything below:
 //
-//   - The third engine must never be able to halt, stall or mis-record the first two. So nothing
+//   - The live engine must never be able to halt, stall or mis-record ingest. So nothing
 //     that is called from a poller or from the Coinbase stream ever WAITS on r.mu, the lock that
 //     is held across a database write: Inputs and Observe touch the model only (which has its own
 //     small mutex, held across arithmetic alone), and Step and Settled give up at once if r.mu is
@@ -36,7 +36,7 @@ import (
 //     SUSPENDED: it writes nothing at all, settlements included, until a rebuild from the
 //     database has succeeded. There is no permanent halt.
 //   - Which buckets the engine holds is decided ONCE, in NewRunner3, and never changes while the
-//     service runs, because the second engine's cached capital depends on that list.
+//     service runs.
 //   - "Is held" and "may order" are separate. A held bucket is valued and SETTLED whatever AC_V3
 //     or its version's status says; those gate new orders only.
 
@@ -48,7 +48,7 @@ type Coin3 struct {
 
 // Options3 is what NewRunner3 must be told from outside.
 type Options3 struct {
-	// On is AC_V3 == "on". Off (the default) means no new orders; held bets are still settled.
+	// On is AC_V3 != "off". Off means no new orders; held bets are still settled.
 	On bool
 	// DatabaseName is the database the service is connected to. Dev plumbing versions are
 	// constructed only when it ends in "_dev" (see devPlumbing).
@@ -551,9 +551,9 @@ func (r *Runner3) marketOf(info kalshi.MarketInfo, closes time.Time) k3.Market {
 }
 
 // Inputs computes the model's view of one coin's open round and returns it as the journal map
-// stored with that second's evaluation row. It runs BEFORE v1 and v2 step, so it takes the
-// model's mutex and coinMu only, never r.mu. nil on a panic, or for a coin v3 does not look at.
-func (r *Runner3) Inputs(coin string, info kalshi.MarketInfo, closes, at time.Time, price string, v2in map[string]any) (out map[string]any) {
+// stored with that second's evaluation row. It takes the model's mutex and coinMu only, never
+// r.mu. nil on a panic, or for a coin the engine does not look at.
+func (r *Runner3) Inputs(coin string, info kalshi.MarketInfo, closes, at time.Time, price string) (out map[string]any) {
 	defer func() {
 		if r.caught("Inputs", recover()) {
 			out = nil
@@ -562,7 +562,7 @@ func (r *Runner3) Inputs(coin string, info kalshi.MarketInfo, closes, at time.Ti
 	if _, ok := r.coins[coin]; !ok {
 		return nil
 	}
-	view := r.model.View(coin, r.marketOf(info, closes), f(price), k3.UnixSeconds(at), k3.V2InputsFrom(v2in))
+	view := r.model.View(coin, r.marketOf(info, closes), f(price), k3.UnixSeconds(at), nil)
 	r.coinMu.Lock()
 	r.views[coin] = seenView{ticker: info.Ticker, at: at, view: view}
 	r.coinMu.Unlock()

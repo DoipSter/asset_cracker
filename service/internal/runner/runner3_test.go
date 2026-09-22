@@ -16,7 +16,7 @@ import (
 
 	"github.com/doipster/asset_cracker/service/internal/analysis"
 	"github.com/doipster/asset_cracker/service/internal/broker"
-	k3 "github.com/doipster/asset_cracker/service/internal/kalshi15m3"
+	k3 "github.com/doipster/asset_cracker/service/internal/engine"
 	"github.com/doipster/asset_cracker/service/internal/store"
 )
 
@@ -843,7 +843,7 @@ func TestNothingOnThePollersPathWaits(t *testing.T) {
 		go func() { defer close(done); g.look(mktA, above, up("150")) }()
 		<-entered // Step now holds r.mu across its write
 		infoB, closesB, _ := g.info(mktB)
-		within(t, "Inputs", func() { r.Inputs("ETH", infoB, closesB, g.now(), above, nil) })
+		within(t, "Inputs", func() { r.Inputs("ETH", infoB, closesB, g.now(), above) })
 		within(t, "Observe", func() { r.Observe(trade("ETH-USD", above, g.now())) })
 		within(t, "Step for another coin", func() {
 			r.Step(ctx, "ETH", 9001, g.now(), mktB, infoB, closesB, book("0.5500", "40", "0.4300", "70"), above)
@@ -875,7 +875,7 @@ func TestNothingOnThePollersPathWaits(t *testing.T) {
 		go func() { defer close(done); r.Tick(ctx) }()
 		<-entered
 		info, closes, _ := g.info(mktA)
-		within(t, "Inputs", func() { r.Inputs("BTC", info, closes, g.now(), above, nil) })
+		within(t, "Inputs", func() { r.Inputs("BTC", info, closes, g.now(), above) })
 		within(t, "Observe", func() { r.Observe(trade("BTC-USD", above, g.now())) })
 		within(t, "Step", func() { g.look(mktA, above, up("150")) })
 		within(t, "Settled", func() { g.settle(mktA, "yes") })
@@ -979,7 +979,7 @@ func TestPanicsAreRecovered(t *testing.T) {
 			switch where { // break something the entry point cannot do without
 			case "Inputs":
 				r.model = nil
-				if out := r.Inputs("BTC", info, closes, g.now(), above, nil); out != nil {
+				if out := r.Inputs("BTC", info, closes, g.now(), above); out != nil {
 					t.Fatalf("Inputs returned %v after a panic", out)
 				}
 			case "Observe":
@@ -1023,7 +1023,7 @@ func TestObserveOnlyAndFailedStarts(t *testing.T) {
 			t.Fatalf("names %v, created %v, held %v", g.s.setupNames, g.s.created, r.BucketIDs())
 		}
 		info, closes, _ := g.info(mktA)
-		j := r.Inputs("BTC", info, closes, g.now(), above, nil)
+		j := r.Inputs("BTC", info, closes, g.now(), above)
 		if p, ok := j["p_model"].(float64); !ok || !(p > 0.5) {
 			t.Fatalf("p_model is not journaled in observe-only mode: %v", j)
 		}

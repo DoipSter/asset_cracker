@@ -34,3 +34,11 @@ grant select on value_snapshot to assetcracker_ro;
 -- out for the same reason as value_snapshot: the research reads it through the read-only role.
 grant select, insert on candle to assetcracker;
 grant select on candle to assetcracker_ro;
+
+-- The read surface (0016, docs/mcp-read-surface.md). `assetcracker mcp` reads inside a READ ONLY
+-- transaction and, where its role is a member of assetcracker_ro, as that role: so the read-only
+-- role must be able to see every table the surface reads. Spelled out, like candle above, so the
+-- list of what agents can reach is in one place. analysis_result is written by research tools
+-- through the service role; the surface only reads it.
+grant select on instrument, source, market, price_tick, evaluation, candle_return, analysis_result to assetcracker_ro;
+grant select, insert on analysis_result to assetcracker;

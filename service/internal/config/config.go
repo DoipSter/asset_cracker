@@ -21,10 +21,9 @@ type Config struct {
 	HTTPAddr string
 	// UserAgent is sent with every request to a venue.
 	UserAgent string
-	// V3 is the switch for the third engine's NEW ORDERS, from AC_V3. Only the exact value "on"
-	// switches it on; unset, empty or anything else is off, which is the default. Releasing the
-	// code and switching the engine on are separate acts. Off means "no new orders": a bet the
-	// third engine already holds is still valued and settled (docs/honest-fills-v3.md, 5.4).
+	// V3 is the switch for the live engine's NEW ORDERS, from AC_V3. The default is on (unset or
+	// empty). Only the exact value "off" disables new orders. A bet already held is still valued
+	// and settled either way (docs/honest-fills-v3.md, 5.4).
 	V3 bool
 	// V3Faults is database-fault injection for the third engine, from AC_V3_FAIL_EVERY,
 	// AC_V3_FAIL_RUN, AC_V3_FAIL_KIND, AC_V3_FAIL_OPS and AC_V3_DELAY_COMMIT. It is read in every
@@ -87,7 +86,7 @@ func Load() Config {
 		DatabaseURL: env("AC_DATABASE_URL", "postgres:///assetcracker?host=/var/run/postgresql"),
 		HTTPAddr:    env("AC_HTTP_ADDR", "127.0.0.1:8377"),
 		UserAgent:   env("AC_USER_AGENT", "asset-cracker/0.1"),
-		V3:          os.Getenv("AC_V3") == "on",
+		V3:          os.Getenv("AC_V3") != "off",
 	}
 	c.V3Faults.Every, _ = strconv.Atoi(os.Getenv("AC_V3_FAIL_EVERY"))
 	c.V3Faults.Run, _ = strconv.Atoi(os.Getenv("AC_V3_FAIL_RUN"))

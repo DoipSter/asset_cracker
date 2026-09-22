@@ -10,7 +10,7 @@ import (
 
 	"github.com/doipster/asset_cracker/service/internal/coinbase"
 	"github.com/doipster/asset_cracker/service/internal/kalshi"
-	k2 "github.com/doipster/asset_cracker/service/internal/kalshi15m2"
+	k2 "github.com/doipster/asset_cracker/service/internal/legacy/kalshi15m2"
 	"github.com/doipster/asset_cracker/service/internal/store"
 )
 

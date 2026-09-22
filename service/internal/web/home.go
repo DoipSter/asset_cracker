@@ -50,10 +50,7 @@ type Feed struct {
 type Sources struct {
 	Release string
 	Healthy func() bool
-	// Books is every engine's book and the ledger's side of the balance sheet, read TOGETHER: the
-	// second engine gives both under one hold of its lock, so an allocation or a restake cannot
-	// fall between them. ok is false when the ledger's side could not be read; Capital.ReadAt is
-	// zero when it never has been.
+	// Books is the live engine's book and the ledger's side of the balance sheet, read together.
 	Books   func() ([]runner.Book, store.Capital, bool)
 	Markers func(coin string, since float64) []runner.Marker
 	Feeds   []Feed
@@ -173,7 +170,11 @@ func loadWindow(ctx context.Context, db homeReader, length time.Duration, now ti
 	if !w.have {
 		return w, nil
 	}
-	if w.groups, err = db.SnapshotsTakenAt(ctx, "group", runner.Groups, w.then.At); err != nil {
+	// Current Groups plus the keys a batch written before the archive rename used, so earned
+	// over a range that starts in that era can still be a figure (thenGroup).
+	keys := append([]string{}, runner.Groups...)
+	keys = append(keys, "strategies", "anti", "v1")
+	if w.groups, err = db.SnapshotsTakenAt(ctx, "group", keys, w.then.At); err != nil {
 		return w, err
 	}
 	// One point is left for the value right now, which the handler adds.
@@ -235,7 +236,7 @@ func earned(now runner.Line, then store.ValueSnapshot, have bool) (cents int64, 
 	return cents, pct
 }
 
-var groupLabels = map[string]string{"strategies": "Strategies", "anti": "Anti-world twins", "v1": "First engine", "v3": "Third engine", "money": "Money buckets"}
+var groupLabels = map[string]string{"v3": "Live engine", "legacy": "Archived engines", "money": "Money buckets"}
 
 // batchAccountsForTotal says whether the group rows found in the `then` batch add up to that
 // batch's total, in value and in contributed. It is the test the zero-baseline rule (groupEarned)
@@ -267,7 +268,7 @@ func batchAccountsForTotal(then store.ValueSnapshot, groups map[string]store.Val
 // for ever), and the lines would stop adding up to the total. With it they still add up: the
 // total then was the sum of the groups that were there, and the missing one adds 0 to both sides.
 func groupEarned(g runner.Line, w window, whole bool) (cents int64, ok bool) {
-	then, found := w.groups[g.Key]
+	then, found := thenGroup(g.Key, w.groups)
 	switch {
 	case found:
 		cents, _ = earned(g, then, true)
@@ -276,6 +277,28 @@ func groupEarned(g runner.Line, w window, whole bool) (cents int64, ok bool) {
 		return g.ValueCents - g.ContributedCents, true
 	}
 	return 0, false
+}
+
+// thenGroup is the snapshot the current group is compared with. "legacy" was stored as three
+// keys (strategies, anti, v1) before those engines were archived; a batch that still has those
+// rows is summed so earned over a range that starts before the rename is still a figure.
+func thenGroup(key string, groups map[string]store.ValueSnapshot) (store.ValueSnapshot, bool) {
+	if row, ok := groups[key]; ok {
+		return row, true
+	}
+	if key != "legacy" {
+		return store.ValueSnapshot{}, false
+	}
+	var sum store.ValueSnapshot
+	for _, old := range []string{"strategies", "anti", "v1"} {
+		row, ok := groups[old]
+		if !ok {
+			return store.ValueSnapshot{}, false
+		}
+		sum.ValueCents += row.ValueCents
+		sum.ContributedCents += row.ContributedCents
+	}
+	return sum, true
 }
 
 func unixf(t time.Time) float64 { return float64(t.UnixNano()) / 1e9 }

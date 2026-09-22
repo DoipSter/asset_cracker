@@ -1,10 +1,8 @@
 package runner
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math"
 	"strings"
 	"time"
@@ -73,17 +71,6 @@ type Book struct {
 	Positions []Position
 }
 
-// world and plain split an engine's strategy name into which of the pair it is and the name
-// the pair shares.
-func world(anti bool) string {
-	if anti {
-		return "anti"
-	}
-	return "real"
-}
-
-func plain(name string) string { return strings.TrimPrefix(name, "Anti ") }
-
 // markCents is what contracts are worth at a bid, in cents: no selling fee is taken off, because
 // the home page says "at the bid". ok is false when there is no bid.
 func markCents(contracts int, bid float64) (int64, bool) {
@@ -93,232 +80,20 @@ func markCents(contracts int, bid float64) (int64, bool) {
 	return int64(math.Round(float64(contracts) * bid * 100)), true
 }
 
-// Book is the first engine's buckets and open bets on this series.
-func (r *Runner) Book() Book {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := Book{Engine: "v1", Series: r.Series, Halted: r.halted}
-	m := r.trader.Market
-	for _, a := range r.trader.Accounts {
-		sb := r.setup.Buckets[a.Params.Name]
-		b := BucketBook{BucketID: sb.ID, Name: sb.Name, Strategy: a.Params.Name, Engine: "v1", World: "real", Version: 1, Life: store.LifeOf(sb.Name),
-			CashCents: cents(a.Cash), Bets: a.Bets}
-		for _, lot := range a.Log {
-			if lot.Status != "open" {
-				continue
-			}
-			bid := 0.0
-			if m != nil && m.Ticker == lot.Ticker {
-				bid = m.YesBid
-				if lot.Side != "UP" {
-					bid = m.NoBid
-				}
-			}
-			p := Position{Strategy: a.Params.Name, Engine: "v1", World: "real", Coin: r.Coin, Side: lot.Side, Ticker: lot.Ticker,
-				Contracts: lot.Contracts, EntryPrice: lot.Price, CostCents: cents(lot.Cost), Placed: lot.T, Closes: lot.Close, Underlying: lot.BTCPrice}
-			b.AtRiskCents += p.CostCents
-			if v, ok := markCents(lot.Contracts, bid); ok {
-				p.ValueCents, b.MarkedCents = &v, b.MarkedCents+v
-			} else {
-				b.Unmarked++
-			}
-			out.Positions = append(out.Positions, p)
-		}
-		out.Buckets = append(out.Buckets, b)
-	}
-	return out
-}
-
-// Markers lists this series' bets and early sales made at or after `since`.
-func (r *Runner) Markers(coin string, since float64) []Marker {
-	if coin != r.Coin {
-		return nil
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	var out []Marker
-	for _, a := range r.trader.Accounts {
-		for _, lot := range a.Log {
-			out = appendMarkers(out, since, Marker{Coin: r.Coin, Side: lot.Side, Strategy: a.Params.Name, Engine: "v1", World: "real"},
-				lot.T, lot.BTCPrice, lot.Status, lot.ExitT, lot.ExitBTC)
-		}
-	}
-	return out
-}
-
-// appendMarkers adds a lot's bet, and its early sale if it had one, when they fall in the span.
-func appendMarkers(out []Marker, since float64, m Marker, placed, price float64, status string, exitT, exitPrice *float64) []Marker {
-	if placed >= since {
-		m.T, m.Price, m.Kind = placed, price, "bet"
-		out = append(out, m)
-	}
-	if status == "sold" && exitT != nil && exitPrice != nil && *exitT >= since {
-		m.T, m.Price, m.Kind = *exitT, *exitPrice, "sold"
-		out = append(out, m)
-	}
-	return out
-}
-
-// BucketIDs is the ids of the buckets this series' strategies trade from. The first engine never
-// replaces a bucket, so they are the same for as long as the service runs.
-func (r *Runner) BucketIDs() []int64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	ids := make([]int64, 0, len(r.setup.Buckets))
-	for _, b := range r.setup.Buckets {
-		ids = append(ids, b.ID)
-	}
-	return ids
-}
-
-// Book is the second engine's twelve buckets and every open bet across the coins.
-func (r *Runner2) Book() Book {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.book()
-}
-
-// BookAndCapital is Book and Capital under ONE hold of the lock. Taken apart, a settlement that
-// takes an allocation, or a strategy running out and being staked again, can slip between the
-// two, and the valuation would lay books from before it beside capital from after it: a false
-// step of the whole amount, which a value snapshot would then keep for good.
-func (r *Runner2) BookAndCapital() (Book, store.Capital, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.book(), r.capital, r.capitalFresh
-}
-
-// book is Book for a caller that holds the lock.
-func (r *Runner2) book() Book {
-	out := Book{Engine: "v2", Halted: r.halted}
-	mk := r.trader.Markets()
-	for _, a := range r.trader.Accounts {
-		sb := r.setup.Buckets[a.Params.Name]
-		w := world(a.Params.Anti)
-		b := BucketBook{BucketID: sb.ID, Name: sb.Name, Strategy: plain(a.Params.Name), Engine: "v2", World: w, Version: 2, Retired: a.Retired,
-			Life: store.LifeOf(sb.Name), CashCents: cents(a.Cash), Bets: a.Bets}
-		if mark, ok := r.hwm[a.Params.Name]; ok {
-			b.HighWaterCents = &mark
-		}
-		for _, lot := range a.Log {
-			if lot.Status != "open" {
-				continue
-			}
-			bid := 0.0
-			if m := mk[lot.Coin]; m != nil && m.Ticker == lot.Ticker {
-				bid = m.YesBid
-				if lot.Side != "UP" {
-					bid = m.NoBid
-				}
-			}
-			p := Position{Strategy: b.Strategy, Engine: "v2", World: w, Coin: lot.Coin, Side: lot.Side, Ticker: lot.Ticker,
-				Contracts: lot.Contracts, EntryPrice: lot.Price, CostCents: cents(lot.Cost), Placed: lot.T, Closes: lot.Close, Underlying: lot.BTCPrice}
-			b.AtRiskCents += p.CostCents
-			if v, ok := markCents(lot.Contracts, bid); ok {
-				p.ValueCents, b.MarkedCents = &v, b.MarkedCents+v
-			} else {
-				b.Unmarked++
-			}
-			out.Positions = append(out.Positions, p)
-		}
-		out.Buckets = append(out.Buckets, b)
-	}
-	return out
-}
-
-// Markers lists one coin's bets and early sales made at or after `since`, in both worlds. Only
-// the current life of each strategy is in memory: a life that ran out took its log with it.
-func (r *Runner2) Markers(coin string, since float64) []Marker {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	var out []Marker
-	for _, a := range r.trader.Accounts {
-		for _, lot := range a.Log {
-			if lot.Coin != coin {
-				continue
-			}
-			out = appendMarkers(out, since, Marker{Coin: coin, Side: lot.Side, Strategy: plain(a.Params.Name), Engine: "v2", World: world(a.Params.Anti)},
-				lot.T, lot.BTCPrice, lot.Status, lot.ExitT, lot.ExitBTC)
-		}
-	}
-	return out
-}
-
-// Capital is the ledger's side of the balance sheet as last read, and whether that read worked.
-// It is re-read whenever this engine seeds, reaps or takes an allocation, which is the only time
-// it changes, so between those moments the cached copy is exact against the LEDGER and not
-// merely recent. (Venue fees paid and deployed cash do move with every fill; the snapshots take
-// neither from here.) It is the engine's memory that can run ahead of the ledger, when a write
-// failed and the engine halted: that is why a halted engine's books are never written down as a
-// value snapshot (SnapshotRefusal).
-func (r *Runner2) Capital() (store.Capital, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.capital, r.capitalFresh
-}
-
-// RefreshCapital reads the ledger's side again. The snapshot writer calls it only after a read
-// has failed. It never holds the engine's lock across the database: that lock is what every
-// step, settlement and price print waits on, and this is only a display figure. The lock is
-// taken twice, briefly, to note the generation before the read and to keep the result after it,
-// and the result is dropped if the engine re-read the capital (or halted) in between, because
-// the engine's read is then the newer one.
-func (r *Runner2) RefreshCapital(ctx context.Context) {
-	r.mu.Lock()
-	gen, held := r.capitalGen, r.held()
-	r.mu.Unlock()
-
-	m, moneyErr := r.db.MoneyBucketBalances(ctx)
-	var b []store.BucketCapital
-	var bucketErr error
-	if moneyErr == nil {
-		b, bucketErr = r.db.BucketCapitals(ctx, held)
-	}
-	at := time.Now()
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	switch {
-	case r.capitalGen != gen:
-	case moneyErr != nil:
-		slog.Warn("could not read where the money sits", "err", moneyErr)
-	case bucketErr != nil:
-		r.money = m
-		slog.Warn("could not read the capital behind the value snapshots", "err", bucketErr)
-	default:
-		r.money, r.capital, r.capitalFresh = m, store.Capital{Money: m, Buckets: b, ReadAt: at}, true
-	}
-}
-
-// Policy is the sustainment allocation's rates as last read.
-func (r *Runner2) Policy() store.SkimPolicy {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.policy
-}
-
-// The five groups the home page's composition is made of, in the order it lists them.
+// The groups the home page's composition is made of, in the order it lists them.
 //
-// The third engine has a group of its own (owner decision D5 of docs/honest-fills-v3.md).
-// "strategies" against "anti" is a PAIRED comparison of the same six names, each with its twin;
-// the third engine registers no twins, so two unpaired buckets inside "strategies" would break
-// the pairing and make that group's history incomparable with its own past. The group is listed
-// and written down whether or not a third-engine bucket exists: with none it is all zeros.
-var Groups = []string{"strategies", "anti", "v1", "v3", "money"}
+// "v3" is the live engine's group: the key is kept so earned-over-a-range still lines up with
+// snapshots already stored. Frozen v1/v2 buckets (no longer traded) sit in "legacy". "money" is
+// the four set-aside buckets.
+var Groups = []string{"v3", "legacy", "money"}
 
-// groupOf says which group a bucket belongs to, from its strategy version's number and whether
-// the version is an anti-world twin. Version 1 is the first engine and 3 the third, whatever
-// their params say; everything else (today only version 2) is one of the paired six or its twin.
+// groupOf says which group a bucket belongs to. Version 3 is the live engine; everything else
+// (archived v1/v2, including twins) is legacy.
 func groupOf(version int, anti bool) string {
-	switch {
-	case version == 1:
-		return "v1"
-	case version == 3:
+	if version == 3 {
 		return "v3"
-	case anti:
-		return "anti"
 	}
-	return "strategies"
+	return "legacy"
 }
 
 // versionOf is a held bucket's strategy version. The engine that built the book says it in

@@ -1,4 +1,4 @@
-package kalshi15m3
+package engine
 
 import (
 	"fmt"
@@ -6,17 +6,14 @@ import (
 	"sort"
 	"sync"
 
-	k2 "github.com/doipster/asset_cracker/service/internal/kalshi15m2"
 	"github.com/doipster/asset_cracker/service/internal/pyfloat"
 )
 
-// This file is a FORK of the second engine's per-coin state (kalshi15m2/trader.go: CoinState,
-// observe, knownAvg, seedVol, noteSettlement, addOffset, OffsetPct). That package's methods are
-// unexported and the package is frozen, so the code is copied, not called. The arithmetic is
-// kept byte for byte, including every float64() wrapper around a product that feeds an addition:
-// Go on arm64 fuses a multiply and an add into one instruction unless told not to, and the Pi
-// would then disagree with the second engine in the last bit. TestForkMatchesV2 holds the fork
-// to the original on the recorded parity fixtures; live, the drift gate (View.Drift) does.
+// This file is a FORK of the archived v2 per-coin state (legacy kalshi15m2 CoinState). That
+// package's methods are unexported and the package is frozen, so the code is copied, not called.
+// ProbYes is copied too (prob_model.go). The arithmetic is kept byte for byte, including every
+// float64() wrapper around a product that feeds an addition. TestForkMatchesV2 holds the fork
+// to the archive on the recorded fixtures. A nil ref does not close the drift gate.
 //
 // Left out on purpose: the minute closes and the tail context (only v2's Lottery reads them),
 // the round counters, and the Market pointer. None of them feeds sigma2, the offset or p_model.
@@ -100,7 +97,7 @@ func (c *CoinState) addOffset(at, offset float64) bool {
 }
 
 func (c *CoinState) noteSettlement(closeAt float64, finalValue any) {
-	indexAvg, ok := k2.ParseAmount(finalValue)
+	indexAvg, ok := ParseAmount(finalValue)
 	if !ok {
 		return
 	}
@@ -209,10 +206,11 @@ type View struct {
 	OffsetSource  string  // "measured" once three recent settlements are in, else "constant"
 	PModel        float64 // the RAW model probability of Yes; what decision.model_prob stores
 
-	// Drift is the gate of plan 4.3: true when the fork cannot be shown, this second, to be the
-	// model lambda was measured on. While it is true no ENTRY is sent for the coin; exits go on.
+	// Drift is the gate of plan 4.3: true when a live reference is supplied and the fork cannot
+	// be shown, this second, to be that model. While it is true no ENTRY is sent; exits go on.
+	// A nil reference (no live v2) leaves the gate open.
 	Drift     bool
-	DriftWhy  string  // "" | "v2's inputs are absent" | "offset source differs" | "p_model differs"
+	DriftWhy  string  // "" | "offset source differs" | "p_model differs"
 	DriftDiff float64 // |p_model - v2's|, when v2's inputs were there; what S5 reports
 	RefPModel float64 // v2's model probability, recomputed from v2's sigma2 and offset
 	HasRef    bool
@@ -248,7 +246,7 @@ type Model struct {
 // version; it has no default here, for the reason lambda has none.
 func NewModel(order []string, cal map[string]Calibration, driftTol float64) (*Model, error) {
 	if !(driftTol >= 0 && driftTol <= 1) {
-		return nil, fmt.Errorf("kalshi15m3: drift tolerance %v is outside 0..1", driftTol)
+		return nil, fmt.Errorf("engine: drift tolerance %v is outside 0..1", driftTol)
 	}
 	m := &Model{coins: map[string]*CoinState{}, driftTol: driftTol}
 	for _, name := range order {
@@ -328,8 +326,8 @@ func (m *Model) NoteSettlement(coin string, closeAt float64, finalValue any) {
 	}
 }
 
-// View computes what one second's decision needs. ref is the second engine's published inputs
-// for the coin this second, nil if v2 is absent.
+// View computes what one second's decision needs. ref is an optional characterisation against
+// the archived v2 model (fork tests); nil in the live service.
 func (m *Model) View(coin string, mk Market, price, now float64, ref *V2Inputs) View {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -345,15 +343,15 @@ func (m *Model) View(coin string, mk Market, price, now float64, ref *V2Inputs) 
 	if samples < 3 {
 		v.OffsetSource = "constant"
 	}
-	v.PModel = k2.ProbYes(price, mk.Strike, tau, c.Sigma2, known, offset, c.Cal.SDPct)
+	v.PModel = ProbYes(price, mk.Strike, tau, c.Sigma2, known, offset, c.Cal.SDPct)
 
 	switch {
 	case ref == nil:
-		v.Drift, v.DriftWhy = true, "v2's inputs are absent"
+		// v2 is not live. The fork test is the characterisation; do not block every entry.
 	default:
-		// the same price, strike, time and price ring; v2's volatility and offset
+		// the same price, strike, time and price ring; the archive's volatility and offset
 		v.HasRef = true
-		v.RefPModel = k2.ProbYes(price, mk.Strike, tau, ref.Sigma2, known, ref.IndexOffset, c.Cal.SDPct)
+		v.RefPModel = ProbYes(price, mk.Strike, tau, ref.Sigma2, known, ref.IndexOffset, c.Cal.SDPct)
 		v.DriftDiff = math.Abs(v.PModel - v.RefPModel)
 		switch {
 		case ref.OffsetSource != v.OffsetSource:

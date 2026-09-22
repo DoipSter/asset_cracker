@@ -5,10 +5,10 @@ import (
 	"time"
 )
 
-// AC_V3 is off unless it is exactly "on": releasing the code and switching the third engine on
-// are separate acts, and a typo must not switch it on.
-func TestV3IsOffUnlessExactlyOn(t *testing.T) {
-	for value, want := range map[string]bool{"": false, "on": true, "ON": false, "1": false, "true": false, "off": false, " on": false} {
+// AC_V3 is on unless it is exactly "off": the live binary has one engine, and only an explicit
+// settle-only switch stops new orders.
+func TestV3IsOnUnlessExactlyOff(t *testing.T) {
+	for value, want := range map[string]bool{"": true, "on": true, "ON": true, "1": true, "true": true, "off": false, " off": true} {
 		t.Setenv("AC_V3", value)
 		if got := Load().V3; got != want {
 			t.Errorf("AC_V3=%q: V3 = %v, want %v", value, got, want)

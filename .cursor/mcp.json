@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "assetcracker-dev": {
+      "command": "ssh",
+      "args": [
+        "-o", "BatchMode=yes",
+        "acdeploy@rpi-v5-1.local",
+        "env", "AC_DATABASE_URL=postgres:///assetcracker_dev?host=/var/run/postgresql",
+        "/opt/assetcracker/dev/assetcracker", "mcp"
+      ]
+    }
+  }
+}

@@ -13,7 +13,7 @@ import (
 
 	"github.com/doipster/asset_cracker/service/internal/coinbase"
 	"github.com/doipster/asset_cracker/service/internal/kalshi"
-	k3 "github.com/doipster/asset_cracker/service/internal/kalshi15m3"
+	k3 "github.com/doipster/asset_cracker/service/internal/engine"
 	"github.com/doipster/asset_cracker/service/internal/store"
 )
 
@@ -697,7 +697,7 @@ func (g *rig) info(marketID int64) (kalshi.MarketInfo, time.Time, string) {
 }
 
 // look is one second of one market as the sink drives it: Inputs (with the second engine's
-// inputs standing in as v3's own, so that the drift gate is open), then Step.
+// then Step.
 func (g *rig) look(marketID int64, price string, q kalshi.Quotes) {
 	g.t.Helper()
 	g.lookWith(g.r, marketID, price, q)
@@ -708,8 +708,7 @@ func (g *rig) lookWith(r *Runner3, marketID int64, price string, q kalshi.Quotes
 	info, closes, coin := g.info(marketID)
 	g.evalID++
 	at := g.now()
-	own := r.Inputs(coin, info, closes, at, price, nil)
-	r.Inputs(coin, info, closes, at, price, own)
+	r.Inputs(coin, info, closes, at, price)
 	r.Step(context.Background(), coin, g.evalID, at, marketID, info, closes, q, price)
 }
 

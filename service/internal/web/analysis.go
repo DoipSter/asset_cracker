@@ -225,10 +225,11 @@ func (c *analysisCache) compute(ctx context.Context, db *store.Store) (analysis.
 	// The buckets come before the windows: a window's read counts every listed version's
 	// journal rows on it, so it needs their ids. A bucket seeded between here and the leaderboard
 	// is read next minute, as before.
-	buckets, accounts, err := db.AnalysisBuckets(ctx)
+	bucketRows, err := db.AnalysisBuckets(ctx)
 	if err != nil {
 		return none, err
 	}
+	buckets, accounts := analysis.BucketsFrom(bucketRows)
 
 	// Read the windows not yet read, whole windows at a time, newest first; the windows tried
 	// before and held back come after those, so that a round whose settlement is never written
@@ -251,10 +252,11 @@ func (c *analysisCache) compute(ctx context.Context, db *store.Store) (analysis.
 			if read >= analysisMarketsPerRefresh {
 				break
 			}
-			facts, unready, err := db.AnalysisWindow(ctx, versions, all, pending[w])
+			data, err := db.AnalysisWindowData(ctx, versions, all, analysis.StoreMarkets(pending[w]))
 			if err != nil {
 				return none, err
 			}
+			facts, unready := analysis.AssembleWindow(pending[w], data)
 			read += len(pending[w]) // a market tried and held back cost its queries too
 			for _, f := range facts {
 				c.facts[f.ID] = f
@@ -326,7 +328,7 @@ func (c *analysisCache) storeDecisions(ctx context.Context, db *store.Store, doc
 	if len(fresh) == 0 {
 		return
 	}
-	n, err := db.InsertMetricSnapshots(ctx, fresh)
+	n, err := db.InsertMetricSnapshots(ctx, analysis.MetricRows(fresh))
 	if err != nil {
 		slog.Warn("analysis: gate decisions not stored; they will be tried again next refresh", "decisions", len(fresh), "err", err)
 		return
@@ -406,7 +408,7 @@ func (c *analysisCache) listSettled(ctx context.Context, db *store.Store, now ti
 		if err != nil {
 			return err
 		}
-		for _, m := range settled {
+		for _, m := range analysis.MarketsFrom(settled) {
 			c.markets[m.ID] = m
 		}
 		if since.Unix() == 0 {

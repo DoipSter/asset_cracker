@@ -404,7 +404,7 @@ function renderAlerts(){var h=S.home||{},out="",raw=arr(h.halted),hn=haltedNames
 
 /* ---------- home: lede, composition, rail ---------- */
 /* words of the page's own for composition lines, by key; the label is the API's, these are only the fallback and the small note under a line */
-var COMP_LABELS={v3:"Third engine"},COMP_NOTES={anti:"a measurement, not a competitor",v3:"honest fills: only what the recorded book displayed"};
+var COMP_LABELS={v3:"Live engine",legacy:"Archived engines"},COMP_NOTES={v3:"honest fills: only what the recorded book displayed",legacy:"v1 and v2, no longer trading"};
 function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.total:{};renderDateline();renderAlerts();
   var v=num(t.value_cents);
   if(v==null)setHTML($("total"),"—");else{var s=grp(Math.abs(v)/100,2),i=s.lastIndexOf(".");setHTML($("total"),(v<0?"(":"")+'<span class="cur">$</span>'+s.slice(0,i)+"<small>"+s.slice(i)+(v<0?")":"")+"</small>")}
@@ -566,13 +566,12 @@ function bucketRow(b,D){var eq=num(b.equity_cents),seed=num(b.seed_cents),hw=num
 function pc(bps){return(bps/100).toFixed(bps%100?2:0)+"%"}
 function renderBuckets(){var el=$("p-buckets"),d=S.buckets;
   if(!d){setHTML(el,'<p class="empty" style="margin-top:14px">'+(S.fail.buckets?"No answer from api/buckets yet. Trying again shortly.":"Reading the buckets…")+"</p>");return}
-  var bs=objs(d.buckets),G=[["strategies","Strategies","",[]],["anti","Anti-world twins","a measurement, not a competitor",[]],["v1","First engine","v1",[]],["v3","Third engine","v3 · honest fills",[]]],D=.1;
-  /* the third engine's group, and its jump button, are shown only when it has buckets: before it is staked the pane is exactly the three groups it always was */
-  bs.forEach(function(b){G[b.engine==="v3"?3:b.engine==="v1"?2:b.world==="anti"?1:0][3].push(b);var s=num(b.seed_cents);if(s&&b.status!=="frozen"){[b.equity_cents,b.high_water_cents].forEach(function(v){if(num(v)!=null)D=Math.max(D,Math.abs(v/s-1))})}});
+  var bs=objs(d.buckets),G=[["v3","Live engine","honest fills",[]],["legacy","Archived engines","v1 and v2, frozen",[]]],D=.1;
+  bs.forEach(function(b){G[b.engine==="v3"?0:1][3].push(b);var s=num(b.seed_cents);if(s&&b.status!=="frozen"){[b.equity_cents,b.high_water_cents].forEach(function(v){if(num(v)!=null)D=Math.max(D,Math.abs(v/s-1))})}});
   var cut=D*1.05>.5;D=Math.min(.5,Math.ceil(D*1.05*20)/20);
   var out='<div class="lede"><span class="k">The money story</span><h2 style="font-size:26px;margin-top:3px">Buckets</h2><p class="what">Bar: equity against seed. The centre tick <b style="font-style:normal">|</b> is the seed, the fill runs from it to equity, and the bracket <b style="font-style:normal">]</b> marks high water. Every bar spans ±'+Math.round(D*100)+"% of seed"+(cut?"; a bar that reaches the edge is cut off there":"")+". “Allocated” is the sustainment allocation taken to date.</p>"+[d.buckets_error,d.capital_error].filter(str).map(function(m){return'<p class="what"><b>Not current.</b> '+esc(m)+"</p>"}).join("")+
-    '<div class="jump" role="group" aria-label="Jump to">'+[["g0","Strategies"],["g1","Anti-world"],["g2","First engine"]].concat(G[3][3].length?[["g3","Third engine"]]:[],[["rule","Allocation rule"],["money","Set aside"],["ev","Notices"]]).map(function(j){return'<button type="button" data-k="j'+j[0]+'" data-j="j-'+j[0]+'">'+j[1]+"</button>"}).join("")+'</div></div><div class="cols">';
-  G.forEach(function(g,gi){if(g[0]==="v3"&&!g[3].length)return;var eq=0,seed=0,al=0,live=0,fz=0;g[3].forEach(function(b){al+=num(b.allocated_cents)||0;if(b.status==="frozen"){fz++;return}live++;eq+=num(b.equity_cents)||0;seed+=num(b.seed_cents)||0});
+    '<div class="jump" role="group" aria-label="Jump to">'+[["g0","Live engine"]].concat(G[1][3].length?[["g1","Archived"]]:[],[["rule","Allocation rule"],["money","Set aside"],["ev","Notices"]]).map(function(j){return'<button type="button" data-k="j'+j[0]+'" data-j="j-'+j[0]+'">'+j[1]+"</button>"}).join("")+'</div></div><div class="cols">';
+  G.forEach(function(g,gi){if(g[0]==="legacy"&&!g[3].length)return;var eq=0,seed=0,al=0,live=0,fz=0;g[3].forEach(function(b){al+=num(b.allocated_cents)||0;if(b.status==="frozen"){fz++;return}live++;eq+=num(b.equity_cents)||0;seed+=num(b.seed_cents)||0});
     out+='<details class="grp sec" id="j-g'+gi+'" data-g="'+g[0]+'"'+(S.fold[g[0]]?"":" open")+'><summary data-k="sum'+gi+'"><h2>'+g[1]+(g[2]?" <small>"+g[2]+"</small>":"")+'</h2><span class="f">'+(g[3].length?usd(eq):"—")+"</span></summary>"+
       (g[3].length?g[3].map(function(b){return bucketRow(b,D)}).join("")+'<div class="gsum"><span>'+live+" live bucket"+(live===1?"":"s")+(fz?" · "+fz+" closed":"")+"<small>live seed "+usd(seed)+" · allocated to date "+usd(al)+'</small></span><span class="f">'+usd(eq)+"</span></div>":'<p class="empty">None deployed.</p>')+"</details>"});
   out+="</div>";

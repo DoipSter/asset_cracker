@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/doipster/asset_cracker/service/internal/analysis"
 )
 
 // TestAnalysisStatementsOnDevDatabase runs the statements this file adds for the promotion gate
@@ -46,7 +44,7 @@ func TestAnalysisStatementsOnDevDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	buckets, _, err := s.AnalysisBuckets(ctx)
+	buckets, err := s.AnalysisBuckets(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,36 +57,34 @@ func TestAnalysisStatementsOnDevDatabase(t *testing.T) {
 		}
 	}
 	if len(markets) == 0 {
-		t.Log("no settled market on this database: AnalysisWindow's statements were NOT run")
+		t.Log("no settled market on this database: AnalysisWindowData's statements were NOT run")
 	} else {
 		newest := markets[len(markets)-1].Closes
-		var window []analysis.Market
+		var window []AnalysisMarket
 		for _, m := range markets {
 			if m.Closes == newest {
 				window = append(window, m)
 			}
 		}
-		facts, unready, err := s.AnalysisWindow(ctx, modelVersions, versions, window)
+		data, err := s.AnalysisWindowData(ctx, modelVersions, versions, window)
 		if err != nil {
-			t.Fatalf("AnalysisWindow: %v", err)
+			t.Fatalf("AnalysisWindowData: %v", err)
 		}
 		var scored, journaled int64
-		for _, f := range facts {
-			for _, b := range f.Score {
-				if math.IsNaN(b.ModelLog) || math.IsInf(b.ModelLog, 0) || math.IsNaN(b.MarketLog) || math.IsInf(b.MarketLog, 0) || b.ModelLog < 0 || b.MarketLog < 0 {
-					t.Errorf("market %d: log loss sums %v %v", f.ID, b.ModelLog, b.MarketLog)
-				}
-				if b.N > 0 && (b.ModelLog == 0 || b.MarketLog == 0) {
-					t.Errorf("market %d: %d rows scored and a log loss of exactly 0", f.ID, b.N)
-				}
-				scored += b.N
+		for _, row := range data.Scores {
+			if math.IsNaN(row.ModelLog) || math.IsInf(row.ModelLog, 0) || math.IsNaN(row.MarketLog) || math.IsInf(row.MarketLog, 0) || row.ModelLog < 0 || row.MarketLog < 0 {
+				t.Errorf("market %d: log loss sums %v %v", row.MarketID, row.ModelLog, row.MarketLog)
 			}
-			for _, n := range f.Decisions {
-				journaled += n
+			if row.N > 0 && (row.ModelLog == 0 || row.MarketLog == 0) {
+				t.Errorf("market %d: %d rows scored and a log loss of exactly 0", row.MarketID, row.N)
 			}
+			scored += row.N
 		}
-		t.Logf("window %d: %d markets, %d ready, %d held back, %d rows scored, %d journal rows counted over %d versions",
-			newest, len(window), len(facts), len(unready), scored, journaled, len(versions))
+		for _, row := range data.Decisions {
+			journaled += row.N
+		}
+		t.Logf("window %d: %d markets, %d score rows, %d journal rows counted over %d versions",
+			newest, len(window), scored, journaled, len(versions))
 	}
 
 	// 2. The writes, inside a transaction that never commits.
@@ -118,15 +114,15 @@ func TestAnalysisStatementsOnDevDatabase(t *testing.T) {
 	}
 	row, _ := json.Marshal(map[string]any{"strategy_version_id": version, "return_per_dollar": 0.2})
 	cfg, _ := json.Marshal(map[string]any{"z": 2.9913, "min_edge_per_dollar": 0.02})
-	first := analysis.Snapshot{VersionID: version, FirstClose: 900, LastClose: 36000, Decisions: 2400, Orders: 40, Trials: 18, Metrics: row, GateConfig: cfg, GatePassed: true}
-	n, err := insertMetricSnapshots(ctx, tx, []analysis.Snapshot{first})
+	first := MetricSnapshot{VersionID: version, FirstClose: 900, LastClose: 36000, Decisions: 2400, Orders: 40, Trials: 18, Metrics: row, GateConfig: cfg, GatePassed: true}
+	n, err := insertMetricSnapshots(ctx, tx, []MetricSnapshot{first})
 	if err != nil || n != 1 {
 		t.Fatalf("first insert: %d, %v", n, err)
 	}
 	// the same decision again writes nothing; a later one writes one
 	later := first
 	later.LastClose, later.GatePassed = 36900, false
-	n, err = insertMetricSnapshots(ctx, tx, []analysis.Snapshot{first, later})
+	n, err = insertMetricSnapshots(ctx, tx, []MetricSnapshot{first, later})
 	if err != nil || n != 1 {
 		t.Fatalf("repeat and later: %d written, %v; want 1", n, err)
 	}

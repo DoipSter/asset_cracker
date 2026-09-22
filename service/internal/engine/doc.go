@@ -1,4 +1,4 @@
-// Package kalshi15m3 is the third engine of the kalshi15m family. It is ours, not a port: there
+// Package engine is the live kalshi15m engine. It is ours, not a port: there
 // is no Python to match, so it has its own tests and no parity gate of its own.
 //
 // Simulated money only. Nothing here can place an order. The engine forms an intent
@@ -26,9 +26,9 @@
 //     arrives with its provenance; a version without it cannot be constructed (params.go).
 //
 // The per-coin model state (volatility, the price ring, the learned index offset) is a fork of
-// the second engine's CoinState, because that package's methods are unexported and the package
-// is frozen. The arithmetic is kept byte for byte and a test holds the fork to the original on
-// the recorded parity fixtures. ProbYes itself is not copied: it is exported, so it is called.
+// the archived v2 CoinState, including ProbYes. The arithmetic is kept byte for byte and a test
+// holds the fork to the original on the recorded parity fixtures. The live service does not
+// import that archive.
 //
 // No goroutines, no database, no logging, and the clock is always passed in. Model carries its
 // own small mutex (plan section 5.1) so that the price stream never waits behind an engine lock
@@ -56,4 +56,4 @@
 //   - Apply takes the step's intents beside its reports, and the runner calls AfterDecide once
 //     after every Decide: the soft state Decide may not touch (a dropped exit, and the seconds an
 //     exit was wanted with no order sent) changes there.
-package kalshi15m3
+package engine
