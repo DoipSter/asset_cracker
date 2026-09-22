@@ -227,7 +227,7 @@ func Run(version string) error {
 	}
 
 	src := web.Sources{Release: version}
-	capital := ledgerCapital(db, run3.BucketIDs) // asked each time: a reload changes the held set
+	capital, dropCapital := ledgerCapital(db, run3.BucketIDs) // asked each time: a reload changes the held set
 	src.Books = func() ([]runner.Book, store.Capital, bool) {
 		cap, ok := capital()
 		book := runner.Book{Engine: "v3", Halted: "a panic escaped the engine's Book"}
@@ -328,11 +328,15 @@ func Run(version string) error {
 				EnvOn:   cfg.V3,
 				Status:  run3.OrdersStatus,
 				Apply:   run3.SetOrders,
-				Hold:    run3.HoldForReset,
-				Release: run3.ReleaseAfterReset,
-				Abort:   run3.AbortReset,
+				Hold: run3.HoldForReset,
+				Release: func() {
+					run3.ReleaseAfterReset()
+					dropCapital() // the books are gone: the next snapshot reads the ledger, not last minute's figure
+				},
+				Abort: run3.AbortReset,
 				Reload: func(rctx context.Context) (int, int, error) {
 					report, err := run3.Reload(rctx)
+					dropCapital() // the held set changed: likewise
 					return report.Held, report.MayOrder, err
 				},
 			})

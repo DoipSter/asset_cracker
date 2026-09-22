@@ -17,14 +17,19 @@ import (
 // ledgerCapital is the ledger's side of the balance sheet, read at most once a minute. held
 // answers with the ids of the buckets the live engine holds at that moment: a reload on the
 // buckets page changes them while the service runs.
-func ledgerCapital(db *store.Store, held func() []int64) func() (store.Capital, bool) {
+//
+// drop forgets the cached read. The reset and the reload call it: on 2026-09-22 the snapshot
+// written seconds after the first reset still carried the wiped books' capital from a read a
+// minute old, and that row, in an append-only table, made "earned since" show the old loss as
+// a gain. A snapshot after a change to the books must read the ledger as it is now.
+func ledgerCapital(db *store.Store, held func() []int64) (read func() (store.Capital, bool), drop func()) {
 	var (
 		mu   sync.Mutex
 		last store.Capital
 		at   time.Time
 		good bool
 	)
-	return func() (store.Capital, bool) {
+	read = func() (store.Capital, bool) {
 		mu.Lock()
 		defer mu.Unlock()
 		if time.Since(at) > time.Minute {
@@ -39,6 +44,12 @@ func ledgerCapital(db *store.Store, held func() []int64) func() (store.Capital, 
 		}
 		return last, good
 	}
+	drop = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		at, good = time.Time{}, false
+	}
+	return read, drop
 }
 
 // snapshotValues appends one minute's value snapshots: the total and the groups every minute,
