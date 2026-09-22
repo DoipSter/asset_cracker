@@ -14,11 +14,17 @@ import (
 // exactly the instruments it had before they existed, so a ladder gets no 15-minute poller, no
 // runner, no engine, no place in the health check or the status document, and no asset on the
 // home page.
+//
+// It also leaves out, from both, every instrument switched on from the assets page (spec
+// "selected": true, migration 0018). The supervisor in assets.go records those, and nothing else
+// does: no poller here, no runner, no engine, no trade stream, no health check, no home page.
 func splitLadders(all []store.Instrument) (rest, ladders []store.Instrument) {
 	for _, in := range all {
-		if isLadder(in) {
+		switch {
+		case isSelected(in):
+		case isLadder(in):
 			ladders = append(ladders, in)
-		} else {
+		default:
 			rest = append(rest, in)
 		}
 	}

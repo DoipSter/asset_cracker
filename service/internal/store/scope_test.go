@@ -32,6 +32,29 @@ func TestAnalysisAndRecentRoundsReadOnlyTheFifteenMinuteSeries(t *testing.T) {
 	}
 }
 
+// A 15-minute series switched on from the assets page has round_seconds 900 like the five, and
+// must still stay out of the analysis and the home page: the scope names the five series.
+func TestFifteenMinuteScopeNamesTheFiveSeries(t *testing.T) {
+	if !strings.Contains(FifteenMinuteSeries, `i.spec @> '{"round_seconds": 900}'::jsonb and i.symbol in (`) {
+		t.Errorf("scope %q no longer asks for round_seconds 900 AND a named series", FifteenMinuteSeries)
+	}
+	if len(AnalysisSeries) != 5 {
+		t.Fatalf("AnalysisSeries has %d series, want the five", len(AnalysisSeries))
+	}
+	quoted := make([]string, len(AnalysisSeries))
+	for i, s := range AnalysisSeries {
+		quoted[i] = "'" + s + "'"
+	}
+	if !strings.Contains(FifteenMinuteSeries, "i.symbol in ("+strings.Join(quoted, ", ")+"))") {
+		t.Errorf("scope %q does not name exactly %v", FifteenMinuteSeries, AnalysisSeries)
+	}
+	for _, other := range []string{"KXBNB15M", "KXNEAR15M", "KXHYPE15M", "KXBTCD"} {
+		if strings.Contains(FifteenMinuteSeries, "'"+other+"'") {
+			t.Errorf("scope admits %s", other)
+		}
+	}
+}
+
 // TestScopeOnDevDatabase runs the scoped statements against a real Postgres, inside ONE
 // transaction that is rolled back. It runs only when AC_TEST_DB_URL names a *_dev database.
 // WRITTEN WITHOUT A DATABASE TO RUN IT ON (2026-09-21): until it has passed once, a failure may be
@@ -71,8 +94,12 @@ func TestScopeOnDevDatabase(t *testing.T) {
 	count := func() int64 { return one(sqlAnalysisSettledCount) }
 
 	source := one(`insert into source (code, name, has_market_data) values ('scopetest', 'scope test venue', true) returning id`)
+	// One of the five names (under the test's own source), as the scope now requires.
 	fifteen := one(`insert into instrument (source_id, kind, symbol, underlying, spec)
-	                values ($1, 'binary_contract', 'SCOPETEST15M', 'BTC', '{"round_seconds": 900}') returning id`, source)
+	                values ($1, 'binary_contract', 'KXBTC15M', 'BTC', '{"round_seconds": 900}') returning id`, source)
+	// A 15-minute series switched on from the assets page: round_seconds 900, not one of the five.
+	picked := one(`insert into instrument (source_id, kind, symbol, underlying, spec)
+	               values ($1, 'binary_contract', 'SCOPETESTSEL15M', 'BTC', '{"round_seconds": 900, "selected": true, "trade": false}') returning id`, source)
 	ladder := one(`insert into instrument (source_id, kind, symbol, underlying, spec)
 	               values ($1, 'binary_contract', 'SCOPETESTD', 'BTC', '{"ladder": true, "trade": false}') returning id`, source)
 
@@ -85,6 +112,10 @@ func TestScopeOnDevDatabase(t *testing.T) {
 	market(ladder, "SCOPETESTD-SETTLED", settledAt, "yes")
 	if got := count(); got != before {
 		t.Errorf("a settled ladder market changed the settled count from %d to %d", before, got)
+	}
+	market(picked, "SCOPETESTSEL15M-SETTLED", settledAt, "yes")
+	if got := count(); got != before {
+		t.Errorf("a settled market of a selected 15-minute series changed the settled count from %d to %d", before, got)
 	}
 	keep := market(fifteen, "SCOPETEST15M-SETTLED", settledAt, "no")
 	if got := count(); got != before+1 {

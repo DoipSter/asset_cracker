@@ -37,6 +37,13 @@ type Config struct {
 	// cmd/assetcracker keeps the analysis package's default for that one setting. The defaults
 	// live there, not here, so that they are stated once.
 	Gate Gate
+	// CatalogueCategories are the Kalshi categories the assets page's catalogue lists, from
+	// AC_CATALOGUE_CATEGORIES (comma-separated, as Kalshi spells them). MaxSelected is the most
+	// instruments the assets page may have switched on at once, from AC_MAX_SELECTED. Unset, empty
+	// or not a positive number is nil or 0 here, and the catalogue package's default applies
+	// (Crypto only; 10), stated there once.
+	CatalogueCategories []string
+	MaxSelected         int
 }
 
 // Gate mirrors analysis.GateSettings. It is a type of this package so that config imports
@@ -105,5 +112,13 @@ func Load() Config {
 	c.Gate.MinEdgePerDollar, _ = strconv.ParseFloat(os.Getenv("AC_GATE_MIN_EDGE"), 64)
 	c.Gate.Power, _ = strconv.ParseFloat(os.Getenv("AC_GATE_POWER"), 64)
 	c.Gate.MaxDrawdownCents, _ = strconv.ParseInt(os.Getenv("AC_GATE_MAX_DRAWDOWN_CENTS"), 10, 64)
+	for _, cat := range strings.Split(os.Getenv("AC_CATALOGUE_CATEGORIES"), ",") {
+		if cat = strings.TrimSpace(cat); cat != "" {
+			c.CatalogueCategories = append(c.CatalogueCategories, cat)
+		}
+	}
+	if n, err := strconv.Atoi(os.Getenv("AC_MAX_SELECTED")); err == nil && n > 0 {
+		c.MaxSelected = n
+	}
 	return c
 }
