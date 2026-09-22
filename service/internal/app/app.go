@@ -353,6 +353,7 @@ func Run(version string) error {
 				},
 			})
 			web.AnalysisRoutes(ctx, mux, db, gate)
+			startAssets(ctx, &wg, mux, db, cfg, pace, latest) // the searchable catalogue, /assets and its supervisor (assets.go)
 		})
 	stop()
 	wg.Wait()

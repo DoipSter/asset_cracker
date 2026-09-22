@@ -138,7 +138,14 @@ func (s *Store) UpsertMarket(ctx context.Context, instrumentID int64, m Market) 
 // it: thousands of ladder markets a day would otherwise flood the analysis' 100-markets-per-
 // refresh reads, and an hourly ladder market closing at :00 shares its close with a 15-minute
 // window and would keep that window out of the evidence while it waits for its result.
-const FifteenMinuteSeries = `i.spec @> '{"round_seconds": 900}'::jsonb`
+//
+// It also names the five series (AnalysisSeries). A 15-minute series switched on from the assets
+// page (migration 0018) is recorded with round_seconds 900 too, as the round poller reads it; the
+// names keep it out of the analysis and the recent rounds all the same.
+const FifteenMinuteSeries = `(i.spec @> '{"round_seconds": 900}'::jsonb and i.symbol in ('KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M'))`
+
+// AnalysisSeries are the five series FifteenMinuteSeries admits (migrations 0002 and 0006).
+var AnalysisSeries = []string{"KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M"}
 
 // RecordResult stores how a market settled. It writes only if no result is stored yet, and
 // reports whether this call was the one that stored it, so a settlement is acted on once.
