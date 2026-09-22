@@ -59,6 +59,12 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown command %q", cmd)
 	}
+	// The checkout is checked before any connection is made: a wrong protocol text or a dirty
+	// errata file refuses the run whether or not the record can be reached.
+	m := &measurer{repo: rp, now: time.Now().UTC()}
+	if _, err := m.preflight(); err != nil {
+		return err
+	}
 	if *dbURL == "" {
 		return errors.New("set AC_DATABASE_URL or -db to the record's connection string")
 	}
@@ -68,7 +74,7 @@ func run(args []string) error {
 		return fmt.Errorf("database: %w", err)
 	}
 	defer db.Close()
-	m := &measurer{repo: rp, r: reader{db}, now: time.Now().UTC()}
+	m.r = reader{db}
 	if cmd == "train" {
 		return m.train(ctx)
 	}
@@ -79,10 +85,20 @@ type measurer struct {
 	repo repo
 	r    reader
 	now  time.Time
+	prov *provenanceRecord // preflight's answer, made once
 }
 
 // preflight is what both commands check before any read: T_c, the protocol text, the errata.
+// It runs once; a second call returns the first answer.
 func (m *measurer) preflight() (prov provenanceRecord, err error) {
+	if m.prov != nil {
+		return *m.prov, nil
+	}
+	defer func() {
+		if err == nil {
+			m.prov = &prov
+		}
+	}()
 	hash, tc, err := m.repo.protocolCommit()
 	if err != nil {
 		return prov, err
