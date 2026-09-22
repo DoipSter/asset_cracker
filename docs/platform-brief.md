@@ -123,7 +123,10 @@ allocation**. "Tax" means only government tax, and the tax reserve is the bucket
 for it. The two were both being called tax; the ledger now says `sustainment` and `allocated`.
 
 **Built 2026-09-21** for simulated money, on the version 2 buckets (migration 0008,
-`service/internal/runner/runner2.go`, `tools/skim-policy.sh`). Brad's names for the buckets:
+`tools/skim-policy.sh`); **carried into the live engine 2026-09-22** (`service/internal/runner`,
+`allocateLocked`): taken at settlement, the rates read from the newest `skim_policy` row each
+time, so the four percentages saved on the buckets page are in force from the next settlement.
+Brad's names for the buckets:
 
 | Bucket | What it is | In the ledger |
 |---|---|---|

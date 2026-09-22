@@ -10,19 +10,21 @@ PostgreSQL 17 with data checksums, listening on localhost only. The service is n
 to the network; its health page is on `127.0.0.1:8377`. Off-LAN access, when the app needs it,
 goes through a private VPN.
 
-## Two environments, one machine
+## One record, one scratch database
 
-| | dev | prod |
+| | record | scratch |
 |---|---|---|
-| Database | `assetcracker_dev` | `assetcracker` |
-| Tables owned by | `acdeploy` | `assetcracker_owner` (no login) |
-| Service runs as | `acdeploy`, by hand | `assetcracker`, under systemd |
-| Migrate | `db/migrate.sh` | `db/migrate.sh prod` |
-| Release | `deploy/pi/deploy.sh` | `deploy/pi/deploy.sh prod` |
-| Wipe | `db/reset-dev.sh` | never |
+| Database | `assetcracker` | `assetcracker_dev` |
+| Holds | the tape, the strategy registry, the paper ledger | schema rehearsal only |
+| Tables owned by | `assetcracker_owner` (no login) | `acdeploy` |
+| Who writes | `assetcracker`, under systemd | nobody: the service refuses to start here |
+| Migrate | `db/migrate.sh prod` | `db/migrate.sh` (rehearse, then prod) |
+| Release | `deploy/pi/deploy.sh prod` | `deploy/pi/deploy.sh` copies a spare binary and does not run it |
+| Wipe | the buckets page, simulated books, after typing `reset sim` | `db/reset-dev.sh` |
 
-Dev is for trying things: it can be reset whenever it holds no ledger entries. Prod is the
-record. Both are sim-only until the real-trading gates in the brief are met.
+A strategy is a version row in the record. Graduation is its status (`draft`, `probation`,
+`bench`, `active`, `retired`), not a second database. Agents read the record as
+`assetcracker_ro`. Both databases are sim-only until the real-trading gates in the brief are met.
 
 ## Who can do what
 
@@ -38,7 +40,7 @@ Database roles in prod:
 |---|---|
 | `assetcracker_owner` | owns every table. Nothing logs in as it; migrations `set role` to it |
 | `assetcracker` | select and insert; update only the columns listed in `db/grants.sql`. No delete, no truncate, no DDL, so it cannot disable the triggers that keep the ledger append-only |
-| `assetcracker_ro` | read-only. For analysis and the MCP server later |
+| `assetcracker_ro` | read-only. Analysis and the MCP server. `acdeploy` is a member and connects only to take this role |
 
 The agent works only as `acdeploy`. Admin steps are handed to Brad as a command to run.
 

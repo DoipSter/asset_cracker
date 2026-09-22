@@ -5,7 +5,8 @@
 #   assetcracker_owner   no login. Owns every table. Migrations run as it.
 #   assetcracker         the service. Connects by peer auth as the OS user of the same name.
 #                        Owns nothing; see db/grants.sql for what it may do.
-#   assetcracker_ro      no login yet. Read-only, for analysis and the MCP server later.
+#   assetcracker_ro      no login. Read-only, for analysis and the MCP server.
+#                        acdeploy is a member, so it can connect and take this role.
 set -euo pipefail
 HOST="${AC_PI:-acdeploy@rpi-v5-1.local}"
 ssh -o BatchMode=yes "${HOST}" sudo -n -u postgres psql -X -q -v ON_ERROR_STOP=1 -d postgres -f - <<'SQL'
@@ -21,6 +22,10 @@ end $$;
 alter database assetcracker owner to assetcracker_owner;
 revoke connect on database assetcracker from public;
 grant connect on database assetcracker to assetcracker, assetcracker_ro;
+-- The deploy user reads the record only by taking assetcracker_ro (store.ReadOnly).
+-- Membership does not let that user write; the read-only role has select alone.
+grant connect on database assetcracker to acdeploy;
+grant assetcracker_ro to acdeploy;
 \c assetcracker
 grant usage on schema public to assetcracker_ro;
 alter default privileges for role assetcracker_owner in schema public grant select on tables to assetcracker_ro;

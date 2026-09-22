@@ -27,9 +27,22 @@ import (
 	"github.com/doipster/asset_cracker/service/internal/web"
 )
 
+// refuseScratchDatabase stops the service from recording into a scratch database. A name
+// ending in _dev is assetcracker_dev: migration rehearsal and constraint tests, not a second
+// market. The tape, the registry and the paper ledger live in assetcracker.
+func refuseScratchDatabase(name string) error {
+	if strings.HasSuffix(name, "_dev") {
+		return fmt.Errorf("database %q is scratch; the service records into assetcracker", name)
+	}
+	return nil
+}
+
 // Run is the service. version is the build stamp (set by deploy/pi/deploy.sh).
 func Run(version string) error {
 	cfg := config.Load()
+	if err := refuseScratchDatabase(cfg.DatabaseName()); err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

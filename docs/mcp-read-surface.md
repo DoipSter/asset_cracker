@@ -23,8 +23,8 @@ authentication. Code: `service/internal/readsurface` (the tools), `service/inter
 
 - **Read-only by the database, not by convention.** Every call runs in a `READ ONLY` transaction:
   Postgres itself refuses any insert, update, delete or DDL inside one, whatever the role. In the
-  real database the transaction also takes the `assetcracker_ro` role (`db/grants.sql` says what
-  it may see); in dev, where that role has no grants, it runs as the connected user, still read-only.
+  record the transaction also takes the `assetcracker_ro` role (`db/grants.sql` says what
+  it may see). Against a database where that role has no grants, it stays the connected user, still read-only.
 - **Bounded.** Every statement has a timeout: 10 s, or 30 s for the two grid tools. Raw reads
   return at most `limit` rows (default 500, cap 2000) and say `truncated: true` with a `next`
   cursor when the window held more. Reads that bin before they limit (`bars`, `book`, resampled
@@ -41,31 +41,28 @@ authentication. Code: `service/internal/readsurface` (the tools), `service/inter
 ## Connecting
 
 From Cursor on the Mac, the repository's `.cursor/mcp.json` declares the server as an SSH
-command against the **dev** database:
+command against the **record** (`assetcracker`):
 
 ```json
 {
   "mcpServers": {
-    "assetcracker-dev": {
+    "assetcracker": {
       "command": "ssh",
       "args": ["-o", "BatchMode=yes", "acdeploy@rpi-v5-1.local",
-               "env", "AC_DATABASE_URL=postgres:///assetcracker_dev?host=/var/run/postgresql",
-               "/opt/assetcracker/dev/assetcracker", "mcp"]
+               "env", "AC_DATABASE_URL=postgres:///assetcracker?host=/var/run/postgresql",
+               "/opt/assetcracker/current/assetcracker", "mcp"]
     }
   }
 }
 ```
 
-That binary is what `deploy/pi/deploy.sh` (dev mode) copies; it must be a build that has the
-subcommand (2026-09-21 or later). Any MCP client works the same way: run that command, speak the
-protocol on its stdin/stdout. Logging goes to stderr, which ssh carries separately.
+The binary is the release systemd is running. Any MCP client works the same way: run that
+command, speak the protocol on its stdin/stdout. Logging goes to stderr, which ssh carries
+separately.
 
-**The real database** is not reachable this way yet: `acdeploy` cannot connect to it (peer auth
-maps the OS user to a role of the same name), and `assetcracker_ro` has no login. Two ways to open
-it, both admin steps for Brad: a `pg_ident.conf` map letting `acdeploy` connect as `assetcracker_ro`
-over the socket, or mounting this same server on the running service's localhost HTTP mux
-(`mcp.StreamableHTTPHandler`, reached through the `tools/view.sh` tunnel). Dev and prod record the
-same public candles, so for the history nothing is lost meanwhile.
+`acdeploy` connects as itself and the transaction takes `assetcracker_ro`
+(`deploy/pi/setup-prod-db.sh` grants that membership). The scratch database is not a second
+copy of the tape, and this server does not read it.
 
 ## The tools
 

@@ -52,8 +52,8 @@ if [ "${MODE}" != "prod" ]; then
   remote "mkdir -p /opt/assetcracker/dev"
   scp -q -o BatchMode=yes "${out}" "${HOST}:/opt/assetcracker/dev/assetcracker.new"
   remote "mv /opt/assetcracker/dev/assetcracker.new /opt/assetcracker/dev/assetcracker"
-  echo "copied dev build ${sha}. Run it by hand on the Pi, on its own port:"
-  echo "  AC_HTTP_ADDR=127.0.0.1:8378 AC_DATABASE_URL='postgres:///assetcracker_dev?host=/var/run/postgresql' /opt/assetcracker/dev/assetcracker"
+  echo "copied spare binary ${sha} to /opt/assetcracker/dev."
+  echo "It is not a second service. The record is the systemd unit, on database assetcracker."
   exit 0
 fi
 

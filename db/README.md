@@ -2,9 +2,12 @@
 
 The platform's PostgreSQL schema. See `docs/platform-brief.md` for what it is for.
 
-    db/migrate.sh     # apply migrations/*.sql, in order, to assetcracker_dev on the Pi
+    db/migrate.sh     # rehearse migrations on the scratch database, assetcracker_dev
     db/test.sh        # run tests/*.sql there; every test rolls itself back
     db/reset-dev.sh   # empty a _dev database (refuses anything else, or one holding ledger entries)
+
+`assetcracker_dev` is scratch. The tape, the registry and the paper ledger are the record,
+`assetcracker`. The service refuses to start against a scratch database.
 
 Postgres only listens on the Pi, so both scripts pipe SQL over SSH as `acdeploy`. Nothing
 runs on, or is installed on, the machine you launch them from.

@@ -22,7 +22,7 @@ import (
 // The intended way to reach it from a laptop is over SSH, which keeps the data on the Pi and
 // borrows SSH's authentication:
 //
-//	ssh acdeploy@rpi-v5-1.local env AC_DATABASE_URL=postgres:///assetcracker_dev?host=/var/run/postgresql /opt/assetcracker/dev/assetcracker mcp
+//	ssh acdeploy@rpi-v5-1.local env AC_DATABASE_URL=postgres:///assetcracker?host=/var/run/postgresql /opt/assetcracker/current/assetcracker mcp
 //
 // Only MCP messages may go to stdout. Logging goes to stderr (set in main), which ssh carries
 // separately.
