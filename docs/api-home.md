@@ -232,11 +232,26 @@ that applies to that row, AND `coverage.complete` is true.
     "scorecard_cut_min_abs_t": 2.807,   // the same correction with that count: by_band and by_coin rows
     "dominant_window_share": 0.5     // a leaderboard row whose top_window_share reaches this is flagged
   },
+  "gate": {                          // the promotion rule, as applied to every leaderboard row below. See "The promotion gate"
+    "note": "...",                   // the rule in words
+    "min_windows": 30,
+    "family_alpha": 0.05,
+    "trials": 18,                    // MEASURED, as in conventions
+    "z": 2.9913,                     // conventions.leaderboard_min_abs_t: the standard errors return_lower sits below the return. 0 when trials is 0
+    "min_edge_per_dollar": 0.02,     // SETTING (AC_GATE_MIN_EDGE): the after-fee return per dollar the sample floor is sized to find
+    "power": 0.8,                    // SETTING (AC_GATE_POWER): the chance of finding it when it is there
+    "max_drawdown_cents": 25000,     // SETTING (AC_GATE_MAX_DRAWDOWN_CENTS)
+    "bootstrap_resamples": 1000,     // how return_se is made: windows resampled with replacement, this many times, from a fixed seed
+    "bootstrap_seed": 20260921
+  },
   "scorecard": {
     "what": "Brier score of the model's probability against the market's own mid price, on settled rounds. Lower is better. The unit is one 15-minute window (all coins together), because bets inside a window are not independent.",
-    "overall": { "n_rows": 20242, "n_windows": 11, "brier_model": 0.1635, "brier_market": 0.1561, "diff": 0.0074, "se": 0.0044, "t": 1.69, "verdict": "unresolved" },
-    "by_band": [ { "band": "under 60 s", "n_rows": 0, "n_windows": 0, "brier_model": 0, "brier_market": 0, "diff": 0, "se": 0, "t": 0, "verdict": "unresolved" } ],
-    "by_coin": [ { "coin": "BTC", "n_rows": 0, "n_windows": 0, "brier_model": 0, "brier_market": 0, "diff": 0, "se": 0, "t": 0, "verdict": "unresolved" } ]
+    "overall": { "n_rows": 20242, "n_windows": 11, "brier_model": 0.1635, "brier_market": 0.1561, "diff": 0.0074, "se": 0.0044, "t": 1.69, "verdict": "unresolved",
+                 "logloss_model": 0.5052, "logloss_market": 0.4519, "logloss_diff": 0.0532, "logloss_se": 0.0492 },
+    "by_band": [ { "band": "under 60 s", "n_rows": 0, "n_windows": 0, "brier_model": 0, "brier_market": 0, "diff": 0, "se": 0, "t": 0, "verdict": "unresolved",
+                   "logloss_model": 0, "logloss_market": 0, "logloss_diff": 0, "logloss_se": 0 } ],
+    "by_coin": [ { "coin": "BTC", "n_rows": 0, "n_windows": 0, "brier_model": 0, "brier_market": 0, "diff": 0, "se": 0, "t": 0, "verdict": "unresolved",
+                   "logloss_model": 0, "logloss_market": 0, "logloss_diff": 0, "logloss_se": 0 } ]
   },
   "fills": {
     "what": "The simulator sells any size at the bid. This re-prices every early sale as if only the size actually displayed at that second had filled, the rest riding to settlement.",
@@ -246,9 +261,20 @@ that applies to that row, AND `coverage.complete` is true.
   },
   "leaderboard": {
     "what": "Per strategy version. Windows are the independent sample, not bets. Lifetime includes every earlier life of a strategy that ran out.",
-    "rows": [ { "strategy": "Scalper", "engine": "v2", "world": "real", "lives": 1, "book_cents": 127000, "lifetime_pnl_cents": 27693,
+    "rows": [ { "strategy_version_id": 7, "strategy": "Scalper", "engine": "v2", "world": "real", "lives": 1, "book_cents": 127000, "lifetime_pnl_cents": 27693,
                 "bets": 36, "windows": 5, "mean_window_pnl_cents": 5538, "se_cents": 5100, "t": 1.09,
-                "top_window_share": 0.97, "verdict": "unresolved", "flags": ["one window is 97% of the result"] } ]
+                "top_window_share": 0.97, "verdict": "unresolved", "flags": ["one window is 97% of the result"],
+                "orders": 71, "decisions": 4180, "staked_cents": 192706,          // orders that filled (buys and sales); journal rows in the period; what the bets cost, fees inside
+                "return_per_dollar": 0.1437, "return_se": 0.3256,                // lifetime_pnl_cents / staked_cents, and its bootstrap standard error
+                "return_lower": -0.8303, "return_t": 0.44,                       // return less gate.z standard errors (0 when gate.z is 0); return over its standard error
+                "windows_needed": 71259,                                         // the sample floor from the power calculation; 0 = could not be computed
+                "first_close": 1790000100, "last_close": 1790003700,             // unix s: the windows counted run from 900 s before the first to the last
+                "drawdown": { "max_cents": 73113, "now_cents": 57632, "longest_underwater_windows": 9, "worst_window_cents": -21880 },
+                "gate": { "evaluated": true, "passed": false,
+                          "checks": [ { "name": "windows",     "passed": false, "why": "5 windows, floor 71259 (min_windows 30, windows_needed 71259)" },
+                                      { "name": "edge",        "passed": false, "why": "return 0.1437 per dollar, lower bound -0.8303 at z 2.9913" },
+                                      { "name": "drawdown",    "passed": false, "why": "deepest fall 73113 cents, limit 25000" },
+                                      { "name": "calibration", "passed": false, "why": "the model is scored on 24 windows, fewer than min_windows 30" } ] } } ]
   }
 }
 ```
@@ -259,6 +285,53 @@ means the model is WORSE. `verdict` for the scorecard is `model better`, `model 
 `unresolved`; for the leaderboard `ahead`, `behind` or `unresolved`. The three `what` strings are
 longer than the examples above: they say which column is the model, what a row is, and how each
 figure is made. Show them whole.
+
+**Log loss** sits beside Brier on every scorecard row, made the same way from the same rows: per
+window, then a mean over windows, with `logloss_diff` model minus market and its `logloss_se`.
+Each probability is held at least 1e-6 from 0 and 1 before its log is taken, so a model that says
+0 to something that happens is charged ln(1e6) = 13.8, never infinity. It is a second reading of
+calibration. The verdict is decided on the Brier difference alone (the one hypothesis stated in
+advance), and no verdict is read from the log loss.
+
+**The promotion gate.** `gate` at the top is the rule; each leaderboard row's `gate` is the rule
+applied to that row. A version passes when every check passes:
+
+- `windows`: at least `min_windows` settled windows with a bet, and at least `windows_needed`,
+  the sample floor from a power calculation: the windows at which a true return of
+  `min_edge_per_dollar` would be found with probability `power` at threshold `z`, given the
+  spread the bootstrap measured (`return_se` times the square root of `windows`). 0 means no
+  floor could be computed (no spread measured yet), and the check fails.
+- `edge`: `return_lower` is above zero. That is the after-fee return per dollar staked less `z`
+  bootstrap standard errors, so it passes exactly when `return_t` reaches the leaderboard's own
+  threshold. `return_per_dollar` is a ratio of sums, P&L over stake, not a mean of per-window
+  returns; the bootstrap resamples whole windows, so bets in one round and the coins in the same
+  minutes stay together.
+- `drawdown`: `drawdown.max_cents`, the deepest fall of realised P&L from a running peak walked
+  window by window from the first life's start, is within `max_drawdown_cents`.
+- `calibration`: the model the version trades on is scored by the scorecard on at least
+  `min_windows` windows and the overall verdict does not read `model worse`. Today only the second
+  engine's originals trade the scored model; every other version fails this check with `why`
+  saying it is not scored. This check is weak and says so: it is the absence of a finding against
+  the model, not a finding for it.
+
+Every check is decided on the figures as published (four places for the return, whole cents for
+the drawdown), so a row cannot show a number on one side of the bar and a verdict on the other.
+`evaluated` is false, `checks` empty and `why` present when no decision can be made: coverage is
+not complete, `trials` is 0, or the row has no settled window with a bet. The verdict and the
+gate's `edge` check are two readings of the same windows (mean window P&L with its plain standard
+error; return per dollar with its bootstrap one) and can differ. The gate is the rule capital
+follows. `min_edge_per_dollar`, `power` and `max_drawdown_cents` are the service's settings
+(`AC_GATE_MIN_EDGE`, `AC_GATE_POWER`, `AC_GATE_MAX_DRAWDOWN_CENTS`); a setting that cannot be
+applied leaves the default in place, never a looser gate.
+
+**Every gate decision is stored.** When a document is complete and `trials` is known, each row
+whose gate was evaluated and whose `last_close` has moved past the last decision stored for its
+version is written to `metric_snapshot`: the row as `metrics`, the `gate` object without its note
+as `gate_config`, `gate_passed`, `trials_at_the_time`, `n_decisions` (the version's journal rows on
+the settled markets in the period) and `n_trades` (`orders`), over `period` from 900 s before
+`first_close` to `last_close`. A decision is written once, however often the document is
+recomputed or the service restarted. This is the one thing the analysis writes; the route itself
+changes nothing.
 
 **Coverage, and what the page must do with it.** The per-market figures live in memory and are
 read back after every restart, 100 settled markets a minute, newest first. Until

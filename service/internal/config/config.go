@@ -32,6 +32,20 @@ type Config struct {
 	// a normal build logs that it was asked and ignores it. Dev only: the dev and production
 	// databases share one Postgres cluster, so stopping the server is not a test anyone may run.
 	V3Faults V3Faults
+	// Gate is what the operator sets of the promotion gate (analysis.GateSettings), from
+	// AC_GATE_MIN_EDGE (after-fee return per dollar staked worth finding), AC_GATE_POWER and
+	// AC_GATE_MAX_DRAWDOWN_CENTS. A variable that is unset or does not parse is 0 here, and
+	// cmd/assetcracker keeps the analysis package's default for that one setting. The defaults
+	// live there, not here, so that they are stated once.
+	Gate Gate
+}
+
+// Gate mirrors analysis.GateSettings. It is a type of this package so that config imports
+// nothing of ours.
+type Gate struct {
+	MinEdgePerDollar float64
+	Power            float64
+	MaxDrawdownCents int64
 }
 
 // V3Faults mirrors runner.Faults, which says what each field does. It is a type of this package
@@ -89,5 +103,8 @@ func Load() Config {
 			c.V3Faults.Ops = append(c.V3Faults.Ops, op)
 		}
 	}
+	c.Gate.MinEdgePerDollar, _ = strconv.ParseFloat(os.Getenv("AC_GATE_MIN_EDGE"), 64)
+	c.Gate.Power, _ = strconv.ParseFloat(os.Getenv("AC_GATE_POWER"), 64)
+	c.Gate.MaxDrawdownCents, _ = strconv.ParseInt(os.Getenv("AC_GATE_MAX_DRAWDOWN_CENTS"), 10, 64)
 	return c
 }

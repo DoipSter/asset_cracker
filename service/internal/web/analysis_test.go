@@ -82,6 +82,32 @@ func TestReadOrder(t *testing.T) {
 	}
 }
 
+// A decision is new when its last window is past the one stored for its version; a version with
+// nothing stored is new at any window. The order is kept.
+func TestNewDecisions(t *testing.T) {
+	snaps := []analysis.Snapshot{{VersionID: 1, LastClose: 36000}, {VersionID: 2, LastClose: 36000}, {VersionID: 3, LastClose: 35100}}
+	got := newDecisions(snaps, map[int64]int64{1: 36000, 3: 34200})
+	if len(got) != 2 || got[0].VersionID != 2 || got[1].VersionID != 3 {
+		t.Fatalf("got %+v", got)
+	}
+	if got := newDecisions(snaps, nil); len(got) != 3 {
+		t.Fatalf("nothing stored: %+v", got)
+	}
+	if got := newDecisions(nil, map[int64]int64{1: 1}); len(got) != 0 {
+		t.Fatalf("nothing decided: %+v", got)
+	}
+}
+
+func TestVersionIDs(t *testing.T) {
+	got := versionIDs([]analysis.Bucket{{ID: 1, VersionID: 12}, {ID: 2, VersionID: 3}, {ID: 3, VersionID: 12}, {ID: 4, VersionID: 7}})
+	if len(got) != 3 || got[0] != 3 || got[1] != 7 || got[2] != 12 {
+		t.Fatalf("got %v", got)
+	}
+	if got := versionIDs(nil); len(got) != 0 {
+		t.Fatalf("got %v", got)
+	}
+}
+
 // A request that finds a fresh document is served it without touching the database (db is nil
 // here, so any read would panic), and a stale-marked one is passed on as it is.
 func TestGetServesAFreshDocument(t *testing.T) {

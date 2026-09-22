@@ -53,6 +53,14 @@ read-only), the amber glow after a bet, and dragging a frameless window.
 | `AC_DATABASE_URL` | `postgres:///assetcracker?host=/var/run/postgresql` (unix socket, peer auth, no password) |
 | `AC_HTTP_ADDR` | `127.0.0.1:8377` |
 | `AC_USER_AGENT` | `asset-cracker/0.1` |
+| `AC_GATE_MIN_EDGE` | `0.02`: the after-fee return per dollar staked the promotion gate's sample floor is sized to find |
+| `AC_GATE_POWER` | `0.8`: the chance of finding it when it is there |
+| `AC_GATE_MAX_DRAWDOWN_CENTS` | `25000`: the deepest fall from peak the gate allows |
+
+The three gate settings are read by `cmd/assetcracker`; one that is unset or does not parse keeps
+its default, and a set that cannot be applied (a power of 1, a negative edge) is refused whole with
+a warning, so a mistyped variable never makes a looser gate. The rule they set is described in
+`docs/api-home.md` under "The promotion gate".
 
 ## Working on it
 

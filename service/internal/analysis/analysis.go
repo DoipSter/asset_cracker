@@ -75,12 +75,20 @@ type Market struct {
 	Result string // "yes" or "no"
 }
 
-// BandSum is one market's scored rows in one band: how many, and the summed squared errors of
-// the model's probability and of the market's mid against the result.
+// BandSum is one market's scored rows in one band: how many, the summed squared errors of the
+// model's probability and of the market's mid against the result (Brier), and the summed log
+// losses of the same two probabilities (-ln of the probability given to what happened, each
+// probability first clamped to [LogLossClamp, 1 - LogLossClamp] so that a 0 or a 1 is a large
+// finite number and never Inf).
 type BandSum struct {
-	N             int64
-	Model, Market float64
+	N                   int64
+	Model, Market       float64 // squared error
+	ModelLog, MarketLog float64 // log loss
 }
+
+// LogLossClamp is how far from 0 and 1 a probability is held before its log is taken. A
+// CONVENTION: a model that says 0 to something that happens is charged ln(1e6) = 13.8, not Inf.
+const LogLossClamp = 1e-6
 
 // Trade is one simulated order that filled something, as the ledger recorded it. Cost and payout
 // are the order's own figures (trade_order.detail.cost and .payout), both with their fee already
@@ -108,10 +116,14 @@ type Trade struct {
 	DepthPriced bool
 }
 
-// BucketRound is what one bucket made on one market, and how many bets it placed there.
+// BucketRound is what one bucket made on one market, how many bets it placed there, what those
+// bets cost it (fees inside: the money it put at risk), and how many orders filled (buys and
+// sales together).
 type BucketRound struct {
-	PnLCents int64
-	Bets     int
+	PnLCents    int64
+	Bets        int
+	StakedCents int64
+	Orders      int
 }
 
 // PricedSale is an early sale re-priced as if only the displayed size had filled.
@@ -128,9 +140,10 @@ type PricedSale struct {
 // market id.
 type MarketFacts struct {
 	Market
-	Score  [5]BandSum
-	Rounds map[int64]BucketRound // by bucket id
-	Sales  []PricedSale
+	Score     [5]BandSum
+	Rounds    map[int64]BucketRound // by bucket id
+	Sales     []PricedSale
+	Decisions map[int64]int64 // journal rows on this market, by strategy version id: metric_snapshot.n_decisions
 }
 
 // Holding is one bucket's contracts on one side of one market.
@@ -236,10 +249,12 @@ func Settle(m Market, trades []Trade, settled map[Holding]Paid) MarketFacts {
 			continue
 		}
 		r := f.Rounds[t.BucketID]
+		r.Orders++
 		if t.Sell {
 			r.PnLCents += t.PayoutCents
 		} else {
 			r.PnLCents -= t.CostCents
+			r.StakedCents += t.CostCents
 			r.Bets++
 		}
 		f.Rounds[t.BucketID] = r

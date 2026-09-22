@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/doipster/asset_cracker/service/internal/analysis"
 	"github.com/doipster/asset_cracker/service/internal/coinbase"
 	"github.com/doipster/asset_cracker/service/internal/config"
 	"github.com/doipster/asset_cracker/service/internal/health"
@@ -272,7 +273,9 @@ func run() error {
 		go func() { defer wg.Done(); recordCandles(ctx, db, cfg.UserAgent, products) }()
 	}
 
+	gate := gateSettings(cfg.Gate)
 	slog.Info("asset cracker service running", "version", version, "instruments", len(instruments), "ladders_recorded", len(ladders), "health", "http://"+cfg.HTTPAddr+"/healthz")
+	slog.Info("promotion gate", "min_edge_per_dollar", gate.MinEdgePerDollar, "power", gate.Power, "max_drawdown_cents", gate.MaxDrawdownCents)
 	// What the running service knows right now. The health check and the status page share it.
 	live := func(hctx context.Context) (map[string]any, bool) {
 		ok := db.Ping(hctx) == nil
@@ -455,11 +458,33 @@ func run() error {
 				}
 				return doc
 			}, src)
-			web.AnalysisRoutes(ctx, mux, db)
+			web.AnalysisRoutes(ctx, mux, db, gate)
 		})
 	stop()
 	wg.Wait()
 	return err
+}
+
+// gateSettings is the promotion gate's rule as this process applies it: the analysis package's
+// defaults, each replaced by the operator's setting where one was given. Settings that together
+// cannot be applied (analysis.GateSettings.Valid) are refused whole, with a warning, and the
+// defaults stand: a mistyped variable must not make a looser gate.
+func gateSettings(cfg config.Gate) analysis.GateSettings {
+	g := analysis.DefaultGate
+	if cfg.MinEdgePerDollar != 0 {
+		g.MinEdgePerDollar = cfg.MinEdgePerDollar
+	}
+	if cfg.Power != 0 {
+		g.Power = cfg.Power
+	}
+	if cfg.MaxDrawdownCents != 0 {
+		g.MaxDrawdownCents = cfg.MaxDrawdownCents
+	}
+	if !g.Valid() {
+		slog.Warn("promotion gate settings cannot be applied; the defaults stand", "given", fmt.Sprintf("%+v", cfg), "defaults", fmt.Sprintf("%+v", analysis.DefaultGate))
+		return analysis.DefaultGate
+	}
+	return g
 }
 
 // ledgerCapital is where the snapshots and the home page get the ledger's side of the balance

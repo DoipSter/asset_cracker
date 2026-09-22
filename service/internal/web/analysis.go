@@ -56,18 +56,27 @@ type analysisCache struct {
 	listed       bool            // the whole market table has been listed once
 	base         map[int64]int64 // ledger account -> balance up to checkpoint
 	checkpoint   int64
+	gate         analysis.GateSettings
+	// The gate decisions already stored, by strategy version: the close of the last window each
+	// covers. Read from metric_snapshot once, then kept up to date by what this process writes,
+	// so a decision is stored once however often the document is recomputed.
+	snapped      map[int64]int64
+	snappedKnown bool
 }
 
 func newAnalysisCache() *analysisCache {
-	return &analysisCache{markets: map[int64]analysis.Market{}, facts: map[int64]analysis.MarketFacts{}, unreconciled: map[int64]string{}, base: map[int64]int64{}, ctx: context.Background()}
+	return &analysisCache{markets: map[int64]analysis.Market{}, facts: map[int64]analysis.MarketFacts{}, unreconciled: map[int64]string{}, base: map[int64]int64{},
+		snapped: map[int64]int64{}, ctx: context.Background()}
 }
 
-// AnalysisRoutes mounts GET /api/analysis and starts the loop that keeps its document warm. It
-// reads and nothing else. ctx is the service's own context: the loop, and any refresh in
-// flight, end with it.
-func AnalysisRoutes(ctx context.Context, mux *http.ServeMux, db *store.Store) {
+// AnalysisRoutes mounts GET /api/analysis and starts the loop that keeps its document warm. The
+// route reads and nothing else. The refresh behind it writes ONE thing: each gate decision it
+// makes on a complete document goes to metric_snapshot, so the bar a version was judged against
+// is on record (analysis.Snapshots). ctx is the service's own context: the loop, and any refresh
+// in flight, end with it. gate is the operator's settings for the promotion rule.
+func AnalysisRoutes(ctx context.Context, mux *http.ServeMux, db *store.Store, gate analysis.GateSettings) {
 	c := newAnalysisCache()
-	c.ctx = ctx
+	c.ctx, c.gate = ctx, gate
 	mux.HandleFunc("GET /api/analysis", c.handle(db))
 	if db != nil {
 		go warm(ctx, analysisEvery, func() { c.refreshNow(db) })
@@ -213,6 +222,13 @@ func (c *analysisCache) compute(ctx context.Context, db *store.Store) (analysis.
 	if err := c.listSettled(ctx, db, now); err != nil {
 		return none, err
 	}
+	// The buckets come before the windows: a window's read counts every listed version's
+	// journal rows on it, so it needs their ids. A bucket seeded between here and the leaderboard
+	// is read next minute, as before.
+	buckets, accounts, err := db.AnalysisBuckets(ctx)
+	if err != nil {
+		return none, err
+	}
 
 	// Read the windows not yet read, whole windows at a time, newest first; the windows tried
 	// before and held back come after those, so that a round whose settlement is never written
@@ -229,12 +245,13 @@ func (c *analysisCache) compute(ctx context.Context, db *store.Store) (analysis.
 		if err != nil {
 			return none, err
 		}
+		all := versionIDs(buckets)
 		read := 0
 		for _, w := range windows {
 			if read >= analysisMarketsPerRefresh {
 				break
 			}
-			facts, unready, err := db.AnalysisWindow(ctx, versions, pending[w])
+			facts, unready, err := db.AnalysisWindow(ctx, versions, all, pending[w])
 			if err != nil {
 				return none, err
 			}
@@ -262,10 +279,6 @@ func (c *analysisCache) compute(ctx context.Context, db *store.Store) (analysis.
 	if err != nil {
 		return none, err
 	}
-	buckets, accounts, err := db.AnalysisBuckets(ctx)
-	if err != nil {
-		return none, err
-	}
 	unsettledSells, openCost, err := db.AnalysisUnsettled(ctx, now.Add(-analysisUnsettledFor))
 	if err != nil {
 		return none, err
@@ -282,11 +295,71 @@ func (c *analysisCache) compute(ctx context.Context, db *store.Store) (analysis.
 	}
 
 	in := analysis.Inputs{ComputedAt: float64(now.UnixMilli()) / 1000, Incomplete: incomplete, Buckets: buckets, BookCents: book,
-		UnsettledSells: unsettledSells, MarketsSettled: len(c.markets), Unreconciled: len(c.unreconciled), Trials: trials}
+		UnsettledSells: unsettledSells, MarketsSettled: len(c.markets), Unreconciled: len(c.unreconciled), Trials: trials, Gate: c.gate}
 	for _, f := range c.facts {
 		in.Facts = append(in.Facts, f)
 	}
-	return analysis.Build(in), nil
+	doc := analysis.Build(in)
+	c.storeDecisions(ctx, db, doc)
+	return doc, nil
+}
+
+// storeDecisions writes the gate decisions of a complete document that are new: a version's is
+// new when the last window it covers has moved past the last one stored for it. A failure here
+// is logged and does not fail the refresh (the document is still right; the record is behind by
+// a minute), and nothing is marked stored until the database says it is, so the next refresh
+// tries again. Which decisions exist is read from the table the first time, and then kept here.
+func (c *analysisCache) storeDecisions(ctx context.Context, db *store.Store, doc analysis.Document) {
+	snaps := analysis.Snapshots(doc)
+	if len(snaps) == 0 {
+		return
+	}
+	if !c.snappedKnown {
+		latest, err := db.MetricSnapshotLatest(ctx)
+		if err != nil {
+			slog.Warn("analysis: could not read which gate decisions are stored; none written this refresh", "err", err)
+			return
+		}
+		c.snapped, c.snappedKnown = latest, true
+	}
+	fresh := newDecisions(snaps, c.snapped)
+	if len(fresh) == 0 {
+		return
+	}
+	n, err := db.InsertMetricSnapshots(ctx, fresh)
+	if err != nil {
+		slog.Warn("analysis: gate decisions not stored; they will be tried again next refresh", "decisions", len(fresh), "err", err)
+		return
+	}
+	for _, s := range fresh {
+		c.snapped[s.VersionID] = s.LastClose
+	}
+	slog.Info("analysis: gate decisions stored", "written", n, "decided", len(fresh))
+}
+
+// newDecisions is the snapshots whose last window is past what is stored for their version.
+func newDecisions(snaps []analysis.Snapshot, stored map[int64]int64) []analysis.Snapshot {
+	var out []analysis.Snapshot
+	for _, s := range snaps {
+		if s.LastClose > stored[s.VersionID] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// versionIDs is the distinct strategy versions of some buckets, in order.
+func versionIDs(buckets []analysis.Bucket) []int64 {
+	seen := map[int64]bool{}
+	var out []int64
+	for _, b := range buckets {
+		if !seen[b.VersionID] {
+			seen[b.VersionID] = true
+			out = append(out, b.VersionID)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // readOrder is the order the pending windows (by closes) are read in: the ones never tried, newest

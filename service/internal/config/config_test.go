@@ -44,3 +44,20 @@ func TestFaultSettings(t *testing.T) {
 		t.Fatal("fault injection is on with AC_V3_FAIL_EVERY unset")
 	}
 }
+
+// The gate's settings are numbers or nothing: unset and unparseable both read 0, which the
+// binary treats as "keep the default for this one".
+func TestGateSettings(t *testing.T) {
+	t.Setenv("AC_GATE_MIN_EDGE", "0.05")
+	t.Setenv("AC_GATE_POWER", "0.9")
+	t.Setenv("AC_GATE_MAX_DRAWDOWN_CENTS", "10000")
+	if g := Load().Gate; g != (Gate{0.05, 0.9, 10000}) {
+		t.Fatalf("%+v", g)
+	}
+	t.Setenv("AC_GATE_MIN_EDGE", "")
+	t.Setenv("AC_GATE_POWER", "most")
+	t.Setenv("AC_GATE_MAX_DRAWDOWN_CENTS", "250.00")
+	if g := Load().Gate; g != (Gate{}) {
+		t.Fatalf("unset and unparseable are 0: %+v", g)
+	}
+}

@@ -48,7 +48,7 @@ connect as a role that does not own the tables. Not set up yet.
 | Trading | `trade_order` (`qty` is what was REQUESTED; `status` says `filled`, `partial`, `cancelled` or `rejected`; `client_order_id` is the third engine's own id for the order, unique, null for the first two engines), `fill` (one row per price level taken, each with its own ledger transfer; what an order filled is the sum of its fills), `settlement` |
 | People's input | `commentary`, `human_weight`, view `current_human_weight` |
 | Agents propose, people approve | `proposal` |
-| Scores and gate decisions | `metric_snapshot` |
+| Scores and gate decisions | `metric_snapshot` (written by the service's analysis refresh: one row per strategy version each time its promotion-gate decision covers a new settled window, with the row's figures as `metrics` and the rule it was judged by as `gate_config`; see `docs/api-home.md`, "The promotion gate") |
 | What everything was marked at, minute by minute | `value_snapshot` (append-only; not money, the ledger is) |
 
 The decision journal is two tables. `evaluation` holds what was known about a market at one

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/doipster/asset_cracker/service/internal/analysis"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Everything in this file READS, for GET /api/analysis. evaluation and decision grow by hundreds
@@ -160,7 +162,7 @@ func (s *Store) AnalysisBuckets(ctx context.Context) ([]analysis.Bucket, map[int
 }
 
 // AnalysisWindow reads the markets of one settled window: every market in `markets` must share
-// one closes_at. Three queries, each bounded to the window's own minutes.
+// one closes_at. Four queries, each bounded to the window's own minutes.
 //
 // It answers with the facts of the markets whose money is all there, and, by market id, why each
 // of the others is not ready. A round's result is committed before its settlement rows, in
@@ -169,7 +171,13 @@ func (s *Store) AnalysisBuckets(ctx context.Context) ([]analysis.Bucket, map[int
 // its settlement rows per bucket and side (analysis.Reconcile) before anything is made of it. A
 // market that is not ready must NOT be cached: the caller leaves its window out and asks again
 // on a later refresh. Nothing here waits or guesses how long the gap is.
-func (s *Store) AnalysisWindow(ctx context.Context, modelVersions []int64, markets []analysis.Market) (facts []analysis.MarketFacts, unready map[int64]string, err error) {
+//
+// modelVersions are the versions whose journal carries the model the scorecard scores;
+// versions is EVERY version whose journal rows are counted (metric_snapshot.n_decisions): the
+// versions of the buckets listed. Both are passed in so that each read of decision walks the
+// (strategy_version_id, at) index for a named version and a 21-minute range; there is no index
+// on at alone, and the month partition is millions of rows.
+func (s *Store) AnalysisWindow(ctx context.Context, modelVersions, versions []int64, markets []analysis.Market) (facts []analysis.MarketFacts, unready map[int64]string, err error) {
 	if len(markets) == 0 {
 		return nil, nil, nil
 	}
@@ -290,6 +298,9 @@ func (s *Store) AnalysisWindow(ctx context.Context, modelVersions []int64, marke
 	// that is not ready will be read again. One row per evaluation (a second of one market): the
 	// six originals journal the same model_prob for it, so the first is taken. decision is
 	// reached through (strategy_version_id, at), evaluation through (market_id, at).
+	// Beside the squared errors, the log losses: -ln of the probability given to what happened,
+	// the probability first held inside [LogLossClamp, 1 - LogLossClamp] so a 0 or a 1 is a large
+	// finite charge and never Inf (greatest/least do the clamping, numeric in, float8 out).
 	scores := map[int64]*[5]analysis.BandSum{}
 	if len(ready) > 0 {
 		band := "case"
@@ -297,6 +308,12 @@ func (s *Store) AnalysisWindow(ctx context.Context, modelVersions []int64, marke
 			band += fmt.Sprintf(" when tau >= %g then %d", b.MinTau, i)
 		}
 		band += fmt.Sprintf(" else %d end", len(analysis.Bands)-1)
+		clamp := func(p string) string {
+			return fmt.Sprintf("least(greatest(%s::float8, %g::float8), %g::float8)", p, analysis.LogLossClamp, 1-analysis.LogLossClamp)
+		}
+		logloss := func(p string) string { // y is 1 or 0, so this is -ln(p) when yes happened and -ln(1 - p) when no did
+			return fmt.Sprintf("-(y * ln(%s) + (1 - y) * ln(1 - %s))", clamp(p), clamp(p))
+		}
 		rows, err = s.pool.Query(ctx, `
 			with scored as (
 				select distinct on (d.evaluation_id) e.market_id, d.model_prob as p, d.market_prob as q,
@@ -309,7 +326,8 @@ func (s *Store) AnalysisWindow(ctx context.Context, modelVersions []int64, marke
 				   and e.at >= $2 and e.at < $3 and e.market_id = any($4)
 				   and d.model_prob is not null and d.market_prob is not null
 				 order by d.evaluation_id, d.id)
-			select market_id, `+band+` as band, count(*), sum((p - y) * (p - y))::float8, sum((q - y) * (q - y))::float8
+			select market_id, `+band+` as band, count(*), sum((p - y) * (p - y))::float8, sum((q - y) * (q - y))::float8,
+			       sum(`+logloss("p")+`)::float8, sum(`+logloss("q")+`)::float8
 			  from scored group by 1, 2`, modelVersions, from, to, ready)
 		if err != nil {
 			return nil, nil, fmt.Errorf("scorecard sums: %w", err)
@@ -318,7 +336,7 @@ func (s *Store) AnalysisWindow(ctx context.Context, modelVersions []int64, marke
 			var market int64
 			var b int
 			var sum analysis.BandSum
-			if err := rows.Scan(&market, &b, &sum.N, &sum.Model, &sum.Market); err != nil {
+			if err := rows.Scan(&market, &b, &sum.N, &sum.Model, &sum.Market, &sum.ModelLog, &sum.MarketLog); err != nil {
 				rows.Close()
 				return nil, nil, err
 			}
@@ -335,6 +353,38 @@ func (s *Store) AnalysisWindow(ctx context.Context, modelVersions []int64, marke
 		}
 	}
 
+	// 4. How many journal rows each version wrote on each ready market: metric_snapshot's
+	// n_decisions, added up over a version's windows by the analysis. The same join as 3, for
+	// every listed version, counting rows and reading no probability.
+	decisions := map[int64]map[int64]int64{} // market -> version -> rows
+	if len(ready) > 0 && len(versions) > 0 {
+		rows, err = s.pool.Query(ctx, `
+			select e.market_id, d.strategy_version_id, count(*)
+			  from decision d
+			  join evaluation e on e.id = d.evaluation_id and e.at = d.at
+			 where d.strategy_version_id = any($1) and d.at >= $2 and d.at < $3
+			   and e.at >= $2 and e.at < $3 and e.market_id = any($4)
+			 group by 1, 2`, versions, from, to, ready)
+		if err != nil {
+			return nil, nil, fmt.Errorf("decision counts: %w", err)
+		}
+		for rows.Next() {
+			var market, version, n int64
+			if err := rows.Scan(&market, &version, &n); err != nil {
+				rows.Close()
+				return nil, nil, err
+			}
+			if decisions[market] == nil {
+				decisions[market] = map[int64]int64{}
+			}
+			decisions[market][version] = n
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, nil, fmt.Errorf("decision counts: %w", err)
+		}
+	}
+
 	facts = make([]analysis.MarketFacts, 0, len(ready))
 	for _, m := range markets {
 		if _, held := unready[m.ID]; held {
@@ -344,9 +394,82 @@ func (s *Store) AnalysisWindow(ctx context.Context, modelVersions []int64, marke
 		if sc := scores[m.ID]; sc != nil {
 			f.Score = *sc
 		}
+		f.Decisions = decisions[m.ID]
 		facts = append(facts, f)
 	}
 	return facts, unready, nil
+}
+
+// dbq is what the metric_snapshot statements need of a connection: the pool, or a transaction
+// (the database test runs them inside one it rolls back).
+type dbq interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// MetricSnapshotLatest is, for every strategy version with a stored sim gate decision, the close
+// (unix seconds) of the last window that decision covered: upper(period). The analysis stores a
+// new decision only when a version's last window has moved past this, so a restart cannot write
+// the same decision twice.
+func (s *Store) MetricSnapshotLatest(ctx context.Context) (map[int64]int64, error) {
+	return metricSnapshotLatest(ctx, s.pool)
+}
+
+func metricSnapshotLatest(ctx context.Context, q dbq) (map[int64]int64, error) {
+	rows, err := q.Query(ctx, `select strategy_version_id, extract(epoch from max(upper(period)))::bigint
+	                            from metric_snapshot where mode = 'sim' and bucket_id is null group by 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int64{}
+	for rows.Next() {
+		var version, closes int64
+		if err := rows.Scan(&version, &closes); err != nil {
+			return nil, err
+		}
+		out[version] = closes
+	}
+	return out, rows.Err()
+}
+
+// InsertMetricSnapshots stores gate decisions, one row each, in one transaction. A decision is a
+// version's, on sim, over the period from 900 s before its first window's close (when that round
+// opened) to its last window's close, both ends included. A row that is already there for the
+// same version and last close is not written again: the check is part of the insert, so a
+// refresh that stored its rows and then lost the connection cannot double them on its retry.
+// Returns how many rows were written.
+func (s *Store) InsertMetricSnapshots(ctx context.Context, snaps []analysis.Snapshot) (int, error) {
+	if len(snaps) == 0 {
+		return 0, nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	written, err := insertMetricSnapshots(ctx, tx, snaps)
+	if err != nil {
+		return 0, err
+	}
+	return written, tx.Commit(ctx)
+}
+
+func insertMetricSnapshots(ctx context.Context, q dbq, snaps []analysis.Snapshot) (int, error) {
+	written := 0
+	for _, sn := range snaps {
+		tag, err := q.Exec(ctx, `
+			insert into metric_snapshot (strategy_version_id, bucket_id, mode, period, n_decisions, n_trades, trials_at_the_time, metrics, gate_config, gate_passed)
+			select $1, null, 'sim', tstzrange(to_timestamp($2), to_timestamp($3), '[]'), $4, $5, $6, $7, $8, $9
+			 where not exists (select 1 from metric_snapshot
+			                    where strategy_version_id = $1 and mode = 'sim' and bucket_id is null and upper(period) = to_timestamp($3))`,
+			sn.VersionID, float64(sn.FirstClose-900), float64(sn.LastClose), sn.Decisions, sn.Orders, sn.Trials, sn.Metrics, sn.GateConfig, sn.GatePassed)
+		if err != nil {
+			return 0, fmt.Errorf("metric_snapshot for version %d: %w", sn.VersionID, err)
+		}
+		written += int(tag.RowsAffected())
+	}
+	return written, nil
 }
 
 // AnalysisUnsettled is what is still in play, by bucket: early sales in rounds with no result

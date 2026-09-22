@@ -278,9 +278,18 @@ tick tables by time and set a retention policy.
    The unit of inference is the 15-minute window, not the bet. A verdict needs 30 windows and a
    |t| corrected for the number of versions tried (Bonferroni over the measured row count of
    `strategy_version`); both are stated conventions, carried in the JSON. A round is only
-   counted once its payouts reconcile with what each bucket held. Not yet: log loss, bootstrap
-   intervals, drawdown, a power calculation for the sample floor, the gate as configuration,
-   gate decisions stored in `metric_snapshot`.
+   counted once its payouts reconcile with what each bucket held.
+   **Gate built 2026-09-21** (`analysis/gate.go`, `docs/api-home.md` "The promotion gate"): log
+   loss beside Brier on every scorecard row; per version, return per dollar staked with a
+   bootstrap standard error from resampling windows (1,000 draws, fixed seed), a lower bound at
+   the leaderboard's own corrected threshold, drawdown walked window by window, and a sample
+   floor from a power calculation sized to `min_edge_per_dollar` at `power`. The gate is four
+   checks (windows, edge, drawdown, calibration), its settings from `AC_GATE_*`, the rest
+   convention or measured; every decision on a complete document is stored in
+   `metric_snapshot` with the configuration it was made under. Run against the Pi's dev database
+   on 2026-09-21 (131 settled markets, 29 windows, 20 trials): every version's gate evaluated,
+   none passed, on too few windows and no positive lower bound. Not yet: a bench that the gate
+   feeds, and calibration for any model but the second engine's.
 6. API and the Flutter client. **Started 2026-09-21**: the home page's read-only API
    (`docs/api-home.md`: `api/home`, `api/asset`, `api/buckets`, `api/analysis`) and the
    once-a-minute `value_snapshot` history behind "earned over a range" (migration 0010). The

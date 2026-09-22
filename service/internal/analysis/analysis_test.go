@@ -179,7 +179,9 @@ func TestSettle(t *testing.T) {
 		t.Fatalf("this market's money is all there: %+v", bad)
 	}
 	f := Settle(Market{ID: 5, Coin: "BTC", Closes: 900, Result: "yes"}, trades, settled)
-	if f.Rounds[1] != (BucketRound{900, 2}) || f.Rounds[2] != (BucketRound{-93, 1}) || f.Rounds[3] != (BucketRound{195, 2}) || len(f.Sales) != 1 || !f.Sales[0].WithoutDepth {
+	// staked is what the BUYS cost (385 + 115 = 500 for bucket 1); orders count the sale too
+	if f.Rounds[1] != (BucketRound{PnLCents: 900, Bets: 2, StakedCents: 500, Orders: 3}) || f.Rounds[2] != (BucketRound{PnLCents: -93, Bets: 1, StakedCents: 93, Orders: 1}) ||
+		f.Rounds[3] != (BucketRound{PnLCents: 195, Bets: 2, StakedCents: 405, Orders: 2}) || len(f.Sales) != 1 || !f.Sales[0].WithoutDepth {
 		t.Fatalf("got %+v", f)
 	}
 }
@@ -300,7 +302,8 @@ func TestReconcilePartialAndCancelled(t *testing.T) {
 func TestSettlePartialAndCancelled(t *testing.T) {
 	settled := map[Holding]Paid{{31, "yes"}: {100, 10000}}
 	f := Settle(Market{ID: 7, Coin: "DOGE", Closes: 900, Result: "yes"}, partialOrders(), settled)
-	if len(f.Rounds) != 2 || f.Rounds[31] != (BucketRound{9319, 1}) || f.Rounds[32] != (BucketRound{110, 2}) {
+	// staked: 1231 for bucket 31 (the cancelled buy cost nothing); 900 + 610 for bucket 32. Orders: the fills, 3 and 4.
+	if len(f.Rounds) != 2 || f.Rounds[31] != (BucketRound{PnLCents: 9319, Bets: 1, StakedCents: 1231, Orders: 3}) || f.Rounds[32] != (BucketRound{PnLCents: 110, Bets: 2, StakedCents: 1510, Orders: 4}) {
 		t.Fatalf("got %+v", f.Rounds)
 	}
 	// a bucket whose only order was cancelled placed no bet and has no row
@@ -361,7 +364,7 @@ func TestMoneyMissing(t *testing.T) {
 
 func score(id int64, coin string, closes int64, band int, n int64, model, market float64) MarketFacts {
 	f := MarketFacts{Market: Market{ID: id, Coin: coin, Closes: closes, Result: "yes"}}
-	f.Score[band] = BandSum{n, model, market}
+	f.Score[band] = BandSum{N: n, Model: model, Market: market}
 	return f
 }
 
@@ -407,8 +410,10 @@ func TestScorecardVerdictNeedsThirtyWindows(t *testing.T) {
 	}
 }
 
+// round1 is one market with one bucket's result on it. The stake is 1000 cents a bet unless a
+// test sets it: every test that reads return_per_dollar says what it staked.
 func round1(id, closes, bucket, pnl int64, bets int) MarketFacts {
-	return MarketFacts{Market: Market{ID: id, Coin: "BTC", Closes: closes}, Rounds: map[int64]BucketRound{bucket: {pnl, bets}}}
+	return MarketFacts{Market: Market{ID: id, Coin: "BTC", Closes: closes}, Rounds: map[int64]BucketRound{bucket: {PnLCents: pnl, Bets: bets, StakedCents: 1000 * int64(bets), Orders: bets}}}
 }
 
 // Scalper v2 ran out once: bucket 1 (frozen, replaced) lost 100000 in window 900; its second life,
@@ -472,7 +477,7 @@ func steady(bucket int64) []MarketFacts {
 	var facts []MarketFacts
 	for i := range 40 {
 		f := round1(int64(i+1), int64(900*(i+1)), bucket, int64(100+200*(i%2)), 1)
-		f.Score[2] = BandSum{10, 2.0 + 0.1 + 0.2*float64(i%2), 2.0} // and a model worse by 0.01 or 0.03: t = 12.49 too
+		f.Score[2] = BandSum{N: 10, Model: 2.0 + 0.1 + 0.2*float64(i%2), Market: 2.0} // and a model worse by 0.01 or 0.03: t = 12.49 too
 		facts = append(facts, f)
 	}
 	return facts
@@ -527,8 +532,8 @@ func TestVerdictsAreCorrectedForTheNumberOfRows(t *testing.T) {
 		for i := range 40 {
 			v := m + 1000*float64(1-2*(i%2))
 			f := round1(int64(i+1), int64(900*(i+1)), bucket, 0, 1)
-			f.Rounds[bucket] = BucketRound{int64(math.Round(v * 1000)), 1} // in thousandths, so whole cents lose nothing
-			f.Score[2] = BandSum{1000, 2000 + v, 2000}
+			f.Rounds[bucket] = BucketRound{PnLCents: int64(math.Round(v * 1000)), Bets: 1, StakedCents: 1000, Orders: 1} // in thousandths, so whole cents lose nothing
+			f.Score[2] = BandSum{N: 1000, Model: 2000 + v, Market: 2000}
 			facts = append(facts, f)
 		}
 		return facts
@@ -574,7 +579,7 @@ func TestVerdictIsDecidedOnThePublishedT(t *testing.T) {
 	m := 1.996 * 1000 / math.Sqrt(39)
 	for i := range 40 {
 		f := MarketFacts{Market: Market{ID: int64(i + 1), Coin: "BTC", Closes: int64(900 * (i + 1))}}
-		f.Score[2] = BandSum{1000, 2000 + m + 1000*float64(1-2*(i%2)), 2000}
+		f.Score[2] = BandSum{N: 1000, Model: 2000 + m + 1000*float64(1-2*(i%2)), Market: 2000}
 		facts = append(facts, f)
 	}
 	if o := Build(Inputs{Facts: facts}).Scorecard.Overall; o.T != 2 || o.Verdict != "model worse" {
@@ -616,13 +621,15 @@ func TestABetOpenIsNotASale(t *testing.T) {
 // an array, no null, and nothing json.Marshal refuses (it refuses NaN and Inf).
 func TestDocumentIsAlwaysCleanJSON(t *testing.T) {
 	one := score(1, "BTC", 900, 1, 3, 0.4, 0.2)
-	one.Rounds = map[int64]BucketRound{1: {0, 1}}
+	one.Rounds = map[int64]BucketRound{1: {PnLCents: 0, Bets: 1, StakedCents: 100, Orders: 1}}
 	value := []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v1", World: "real"}}
 	for name, in := range map[string]Inputs{"empty": {}, "one window": {Facts: []MarketFacts{one}, Buckets: value},
 		"partial, nothing read yet": {Buckets: value, MarketsSettled: 3360, Trials: 18},
 		"partial":                   {Facts: steady(1), Buckets: value, MarketsSettled: 3360, Unreconciled: 5, Trials: 18},
 		"absurd counts":             {Facts: steady(1), Buckets: value, MarketsSettled: 40, Unreconciled: -3, Trials: math.MaxInt64},
-		"no trial count":            {Facts: steady(1), Buckets: value, MarketsSettled: 40, Trials: -1}} {
+		"no trial count":            {Facts: steady(1), Buckets: value, MarketsSettled: 40, Trials: -1},
+		"whole, gate decided":       {Facts: gated(1), Buckets: value, MarketsSettled: 40, Trials: 18},
+		"absurd settings":           {Facts: gated(1), Buckets: value, MarketsSettled: 40, Trials: 18, Gate: GateSettings{math.Inf(1), math.NaN(), -1}}} {
 		raw, err := json.Marshal(Build(in))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
