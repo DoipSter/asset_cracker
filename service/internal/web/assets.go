@@ -14,13 +14,11 @@ import (
 	"github.com/doipster/asset_cracker/service/internal/store"
 )
 
-// The assets page (GET /assets): search the catalogue of what the venues list (migration 0018),
-// and switch recording of an item on or off. It writes one thing, the Record switch, which adds or
-// deactivates a RECORD-ONLY instrument: no strategy, engine, analysis or home-page asset ever sees
-// it. Everything recorded stays when it is switched off.
-
-//go:embed assets.html
-var cataloguePage []byte
+// The assets dialog on the home page: search the catalogue of what the venues list (migration
+// 0018), and switch recording of an item on or off. It writes one thing, the Record switch, which
+// adds, activates or deactivates an instrument: no strategy or engine ever sees a switched-on
+// one; a spot product is listed on the home page with its live price. Everything recorded stays
+// when it is switched off. GET /assets, the page this once was, sends the reader to the dialog.
 
 // catalogueStore is the database half of the assets page. *store.Store satisfies it.
 type catalogueStore interface {
@@ -55,10 +53,8 @@ var catalogueFrequencies = map[string]bool{
 
 // CatalogueRoutes mounts the assets page and its API on mux.
 func CatalogueRoutes(mux *http.ServeMux, db catalogueStore, c Catalogue) {
-	mux.HandleFunc("GET /assets", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write(cataloguePage)
+	mux.HandleFunc("GET /assets", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/#assets", http.StatusFound) // the dialog on the home page
 	})
 
 	mux.HandleFunc("GET /api/catalogue", func(w http.ResponseWriter, r *http.Request) {
@@ -139,17 +135,27 @@ func CatalogueRoutes(mux *http.ServeMux, db catalogueStore, c Catalogue) {
 			catalogueErr(w, http.StatusInternalServerError, "The switch was not saved.")
 			return
 		}
+		// When it takes effect. A switched-on row is the supervisor's: now, if this process has
+		// one. A seeded row's recorders were started with the process: a spot product's price
+		// feed and its place on the home page follow the table within a minute ("soon"); a
+		// series' poller runs until the next start.
 		effective := "unchanged"
 		if res.Changed {
-			effective = "next-start"
-			if c.Changed != nil {
+			switch {
+			case res.Seeded && res.Kind == "spot":
+				effective = "soon"
+			case res.Seeded:
+				effective = "next-start"
+			case c.Changed != nil:
 				c.Changed()
 				effective = "now"
+			default:
+				effective = "next-start"
 			}
-			slog.Info("assets page: recording switched", "source", body.Source, "code", body.Code, "record", res.Record, "selected", res.Selected)
+			slog.Info("assets page: recording switched", "source", body.Source, "code", body.Code, "record", res.Record, "seeded", res.Seeded, "selected", res.Selected, "effective", effective)
 		}
 		writeJSON(w, map[string]any{"instrument_id": res.InstrumentID, "record": res.Record, "changed": res.Changed,
-			"selected": res.Selected, "max": c.Max, "effective": effective})
+			"selected": res.Selected, "max": c.Max, "effective": effective, "seeded": res.Seeded})
 	})
 }
 
@@ -179,9 +185,10 @@ func catalogueDoc(hits []store.CatalogueHit, summary store.CatalogueSummary, rec
 		"results": hits, "limit": catalogue.SearchLimit, "catalogue": summary,
 		"recording": list, "selected": selected, "max": c.Max,
 		"supervised": c.Running != nil,
-		"note": "Switched-on instruments are recorded only: no strategy, engine, analysis or home-page asset uses them. " +
-			"A Coinbase product gets daily, hourly and minute candles only; the live trade stream keeps its fixed products. " +
-			"Switching off keeps everything recorded.",
+		"note": "Recording only: no strategy or engine uses a switched-on instrument. A Coinbase product is listed on the home page " +
+			"with its live price and gets daily, hourly and minute candles; its prints are not recorded. Every row is yours to switch " +
+			"except what the live engine trades or prices from, which says so. Switching off keeps everything recorded; a seeded " +
+			"series stops at the next start of the service, a seeded product within a minute.",
 	}
 }
 

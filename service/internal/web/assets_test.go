@@ -141,24 +141,48 @@ func TestCatalogueSwitch(t *testing.T) {
 	}
 }
 
-// Everything the page shows from the API goes in through textContent, and every URL it asks is
-// relative, so the page works behind the SSH tunnel at any path.
-func TestAssetsPage(t *testing.T) {
+// The assets page became a dialog on the home page: its old address sends the reader there, and
+// the home page carries the dialog, its search and its switch, all through relative URLs.
+func TestAssetsPageIsTheHomeDialog(t *testing.T) {
 	changed := 0
 	rec := httptest.NewRecorder()
 	catalogueServer(&catalogueFake{}, &changed).ServeHTTP(rec, httptest.NewRequest("GET", "/assets", nil))
-	if rec.Code != 200 || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") {
-		t.Fatalf("status %d, type %q", rec.Code, rec.Header().Get("Content-Type"))
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/#assets" {
+		t.Fatalf("status %d, location %q", rec.Code, rec.Header().Get("Location"))
 	}
-	page := rec.Body.String()
-	for _, banned := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", `fetch("/`, `href="/`} {
-		if strings.Contains(page, banned) {
-			t.Errorf("the page uses %s", banned)
+	page := string(homePage)
+	for _, want := range []string{`id="dlg-assets"`, `api/catalogue`, `api/controls/asset`, `role="switch"`, `"asset-off":"asset-on"`, `act==="asset-on"`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the home page lacks %s", want)
 		}
 	}
-	for _, want := range []string{`fetch("api/catalogue`, `fetch("api/controls/asset"`, `name="viewport"`, `role="switch"`, "textContent"} {
-		if !strings.Contains(page, want) && !(want == `role="switch"` && strings.Contains(page, `"role","switch"`)) {
-			t.Errorf("the page lacks %s", want)
+	if strings.Contains(page, `fetch("/`) || strings.Contains(page, `href="/`) {
+		t.Error("the home page must ask by relative URL: it is read through an SSH tunnel at any path")
+	}
+}
+
+// A seeded row's switch says when it takes effect: a spot product soon (the feed and the rail
+// follow the table), a series at the next start.
+func TestSeededSwitchSaysWhen(t *testing.T) {
+	post := func(f *catalogueFake, body string) *httptest.ResponseRecorder {
+		changed := 0
+		rec := httptest.NewRecorder()
+		catalogueServer(f, &changed).ServeHTTP(rec, httptest.NewRequest("POST", "/api/controls/asset", strings.NewReader(body)))
+		if changed != 0 {
+			t.Error("a seeded row is not the supervisor's")
 		}
+		return rec
+	}
+	f := &catalogueFake{result: store.AssetResult{InstrumentID: 4, Changed: true, Seeded: true, Kind: "spot"}}
+	if rec := post(f, `{"source":"coinbase","code":"DOGE-USD","record":false}`); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"effective":"soon"`) {
+		t.Errorf("seeded spot: %d %s", rec.Code, rec.Body)
+	}
+	f = &catalogueFake{result: store.AssetResult{InstrumentID: 5, Changed: true, Seeded: true, Kind: "binary_ladder"}}
+	if rec := post(f, `{"source":"kalshi","code":"KXBTCD","record":false}`); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"effective":"next-start"`) {
+		t.Errorf("seeded ladder: %d %s", rec.Code, rec.Body)
+	}
+	f = &catalogueFake{err: catalogue.Refused{Why: "BTC-USD cannot be switched off: the live engine prices KXBTC15M from this product"}}
+	if rec := post(f, `{"source":"coinbase","code":"BTC-USD","record":false}`); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "prices KXBTC15M") {
+		t.Errorf("depended: %d %s", rec.Code, rec.Body)
 	}
 }

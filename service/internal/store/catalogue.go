@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -71,9 +72,51 @@ type CatalogueHit struct {
 	Recordable bool      `json:"recordable"`
 	WhyNot     string    `json:"why_not,omitempty"`
 	LastSeen   time.Time `json:"last_seen"`
-	Recorded   bool      `json:"recorded"` // an active instrument records it
-	Selected   bool      `json:"selected"` // that instrument was switched on here, so it can be switched off
-	Seeded     bool      `json:"seeded"`   // that instrument came from a migration: not switchable here
+	Recorded   bool      `json:"recorded"`           // an active instrument records it
+	Selected   bool      `json:"selected"`           // that instrument was switched on here
+	Seeded     bool      `json:"seeded"`             // that instrument came from a migration; switchable unless Depended
+	Depended   string    `json:"depended,omitempty"` // why the live engine needs it, when it does: not switchable off
+}
+
+// engineDependencies is what the live engine needs from the instrument table right now: every
+// 15-minute series it trades (kalshi binary_contract, active, seeded, trade not false) and the
+// Coinbase product each of those prices from. Keyed "source/code", valued with why. Switching
+// one of these off would take the engine's own inputs away from under it, so the assets page
+// refuses; everything else seeded is the owner's to switch.
+func engineDependencies(ctx context.Context, q Querier) (map[string]string, error) {
+	rows, err := q.Query(ctx, `
+		select i.symbol, coalesce(i.spec->>'price_from', '')
+		  from instrument i join source s on s.id = i.source_id
+		 where s.code = 'kalshi' and i.kind = 'binary_contract' and i.active
+		   and coalesce((i.spec->>'trade')::boolean, true)
+		   and not (i.spec @> '{"selected": true}'::jsonb)
+		 order by i.symbol`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var symbol, priceFrom string
+		if err := rows.Scan(&symbol, &priceFrom); err != nil {
+			return nil, err
+		}
+		out["kalshi/"+symbol] = "the live engine trades this series"
+		if product, ok := strings.CutPrefix(priceFrom, "coinbase:"); ok && product != "" {
+			key := "coinbase/" + product
+			if prev, has := out[key]; has {
+				out[key] = prev + " and " + symbol
+			} else {
+				out[key] = "the live engine prices " + symbol + " from this product"
+			}
+		}
+	}
+	return out, rows.Err()
+}
+
+// EngineDependencies is engineDependencies on the pool.
+func (s *Store) EngineDependencies(ctx context.Context) (map[string]string, error) {
+	return engineDependencies(ctx, s.pool)
 }
 
 const sqlSearchCatalogue = `
@@ -107,7 +150,17 @@ func (s *Store) SearchCatalogue(ctx context.Context, q, source, frequency string
 		h.Selected, h.Seeded = exists && selected, exists && !selected
 		out = append(out, h)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	deps, err := engineDependencies(ctx, s.pool)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Depended = deps[out[i].Source+"/"+out[i].Code]
+	}
+	return out, nil
 }
 
 // CatalogueSummary is how big the catalogue is and when it was last refreshed.
@@ -133,7 +186,8 @@ type Recorded struct {
 	Kind      string `json:"kind"`
 	Title     string `json:"title"`
 	Frequency string `json:"frequency"`
-	Selected  bool   `json:"selected"` // switched on from the assets page
+	Selected  bool   `json:"selected"`           // switched on from the assets page
+	Depended  string `json:"depended,omitempty"` // why the live engine needs it; such a row cannot be switched off
 }
 
 // RecordedInstruments lists the active instruments: the seeded ones, then the selected ones.
@@ -157,7 +211,17 @@ func (s *Store) RecordedInstruments(ctx context.Context) ([]Recorded, error) {
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	deps, err := engineDependencies(ctx, s.pool)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Depended = deps[out[i].Source+"/"+out[i].Symbol]
+	}
+	return out, nil
 }
 
 // SelectedInstruments are the active instruments switched on from the assets page: the ones the
@@ -204,6 +268,7 @@ type AssetState struct {
 	Seeded   bool     // that row came from a migration: its spec has no "selected"
 	Active   bool     // that row is active
 	Kind     string   // that row's kind
+	Depended string   // why the live engine needs it, when it does (engineDependencies)
 	Selected int      // instruments selected and active now
 	Coinbase []string // the catalogue's Coinbase product codes, for telling a Kalshi series' coin
 }
@@ -219,10 +284,12 @@ type AssetPlan struct {
 
 // AssetResult is what the switch did.
 type AssetResult struct {
-	InstrumentID int64 `json:"instrument_id"`
-	Record       bool  `json:"record"`
-	Changed      bool  `json:"changed"`
-	Selected     int   `json:"selected"` // instruments selected and active after it
+	InstrumentID int64  `json:"instrument_id"`
+	Record       bool   `json:"record"`
+	Changed      bool   `json:"changed"`
+	Selected     int    `json:"selected"` // instruments selected and active after it
+	Seeded       bool   `json:"seeded"`   // the row is a migration's: the start-up recorders follow it at the next start
+	Kind         string `json:"kind"`
 }
 
 // SetAssetSelection switches recording of a catalogue item on or off as decide says, and journals
@@ -266,11 +333,16 @@ func (s *Store) SetAssetSelection(ctx context.Context, c AssetChange, decide fun
 	}
 	if id != nil {
 		st.Exists, st.Active, st.Seeded, st.Kind = true, *active, !*selected, *kind
-		out.InstrumentID = *id
+		out.InstrumentID, out.Seeded, out.Kind = *id, st.Seeded, st.Kind
 	}
 	if err := tx.QueryRow(ctx, `select count(*) from instrument where active and spec @> '{"selected": true}'::jsonb`).Scan(&st.Selected); err != nil {
 		return out, err
 	}
+	deps, err := engineDependencies(ctx, tx)
+	if err != nil {
+		return out, err
+	}
+	st.Depended = deps[c.Source+"/"+c.Code]
 	rows, err := tx.Query(ctx, `select code from catalogue_item where source = 'coinbase'`)
 	if err != nil {
 		return out, err
@@ -299,17 +371,19 @@ func (s *Store) SetAssetSelection(ctx context.Context, c AssetChange, decide fun
 		}
 		out.Selected++
 	case "activate", "deactivate":
-		if !st.Exists || st.Seeded {
-			return out, fmt.Errorf("%s: no selected instrument to %s", c.Code, plan.Action)
+		if !st.Exists {
+			return out, fmt.Errorf("%s: no instrument to %s", c.Code, plan.Action)
 		}
 		on := plan.Action == "activate"
 		if _, err := tx.Exec(ctx, `update instrument set active = $2 where id = $1`, out.InstrumentID, on); err != nil {
 			return out, err
 		}
-		if on {
-			out.Selected++
-		} else {
-			out.Selected--
+		if !st.Seeded { // a seeded row does not count toward the selected limit either way
+			if on {
+				out.Selected++
+			} else {
+				out.Selected--
+			}
 		}
 	default:
 		return out, fmt.Errorf("unknown action %q", plan.Action)

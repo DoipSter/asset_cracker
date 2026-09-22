@@ -385,6 +385,7 @@ type State struct {
 	Seeded   bool   // that row came from a migration (no "selected" in its spec)
 	Active   bool   // that row is active
 	Kind     string // that row's kind
+	Depended string // why the live engine needs it, when it does: such a row is not switched off
 	Selected int    // instruments selected and active now, this one included if it is
 }
 
@@ -400,9 +401,22 @@ const (
 )
 
 // Decide is what switching an item on (record) or off does. max is the most selected at once.
+//
+// A seeded row (a migration's) is the owner's to switch like any other, with one exception: what
+// the live engine depends on right now (State.Depended) is refused, with the reason, because
+// switching it off would take the engine's own series or price feed away from under it. A seeded
+// row counts toward no limit, and switching it back on needs no catalogue rule: the row exists.
 func Decide(it Item, st State, record bool, max int) (Action, error) {
 	if st.Seeded {
-		return Nothing, Refused{it.Code + " is recorded by the service's own configuration (a migration) and cannot be switched here"}
+		switch {
+		case !record && st.Depended != "":
+			return Nothing, Refused{it.Code + " cannot be switched off: " + st.Depended}
+		case !record && st.Active:
+			return Deactivate, nil
+		case record && !st.Active:
+			return Activate, nil
+		}
+		return Nothing, nil
 	}
 	if !record {
 		if st.Exists && st.Active {
@@ -442,7 +456,7 @@ func Rules(max int) func(store.AssetState) (store.AssetPlan, error) {
 		r := st.Item
 		it := Item{Source: r.Source, Code: r.Code, Title: r.Title, Category: r.Category, Frequency: r.Frequency,
 			What: r.What, Recorder: r.Recorder, WhyNot: r.WhyNot, Checked: r.Checked, Raw: r.Raw}
-		action, err := Decide(it, State{Exists: st.Exists, Seeded: st.Seeded, Active: st.Active, Kind: st.Kind, Selected: st.Selected}, st.Record, max)
+		action, err := Decide(it, State{Exists: st.Exists, Seeded: st.Seeded, Active: st.Active, Kind: st.Kind, Depended: st.Depended, Selected: st.Selected}, st.Record, max)
 		if err != nil {
 			return store.AssetPlan{}, err
 		}

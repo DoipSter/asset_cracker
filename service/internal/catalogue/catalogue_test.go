@@ -246,8 +246,11 @@ func TestDecideAndTheLimit(t *testing.T) {
 		{"off", round, State{Exists: true, Active: true, Kind: "binary_contract", Selected: 10}, false, Deactivate, ""},
 		{"off, already off", round, State{Exists: true, Kind: "binary_contract"}, false, Nothing, ""},
 		{"off, never on", round, State{}, false, Nothing, ""},
-		{"seeded, on", round, State{Exists: true, Active: true, Seeded: true, Kind: "binary_contract"}, true, Nothing, "service's own configuration"},
-		{"seeded, off", round, State{Exists: true, Active: true, Seeded: true, Kind: "binary_contract"}, false, Nothing, "service's own configuration"},
+		{"seeded, on already", round, State{Exists: true, Active: true, Seeded: true, Kind: "binary_contract"}, true, Nothing, ""},
+		{"seeded, off: the owner's to switch", round, State{Exists: true, Active: true, Seeded: true, Kind: "binary_contract"}, false, Deactivate, ""},
+		{"seeded, back on, over the selected limit: seeded rows do not count", round, State{Exists: true, Seeded: true, Kind: "binary_contract", Selected: 10}, true, Activate, ""},
+		{"seeded, the engine trades it: off refused", round, State{Exists: true, Active: true, Seeded: true, Kind: "binary_contract", Depended: "the live engine trades this series"}, false, Nothing, "cannot be switched off: the live engine trades this series"},
+		{"seeded, the engine prices from it: off refused", Item{Code: "BTC-USD", Recorder: RecorderCandles}, State{Exists: true, Active: true, Seeded: true, Kind: "spot", Depended: "the live engine prices KXBTC15M from this product"}, false, Nothing, "prices KXBTC15M from this product"},
 		{"not recordable", no, State{}, true, Nothing, "not recordable yet: open markets are strike type"},
 		{"not recordable any more, still on, off", no, State{Exists: true, Active: true, Kind: "binary_ladder"}, false, Deactivate, ""},
 		{"kind changed", round, State{Exists: true, Kind: "binary_ladder"}, true, Nothing, "was recorded as binary_ladder"},
@@ -321,7 +324,10 @@ func TestRules(t *testing.T) {
 	if plan, err := rules(store.AssetState{Item: item, Record: true, Exists: true, Kind: "binary_contract", Selected: 1}); err != nil || plan.Action != "activate" {
 		t.Errorf("on again: %+v, %v", plan, err)
 	}
-	if _, err := rules(store.AssetState{Item: item, Record: false, Exists: true, Active: true, Seeded: true, Kind: "binary_contract"}); err == nil {
-		t.Error("a seeded series was switched off")
+	if plan, err := rules(store.AssetState{Item: item, Record: false, Exists: true, Active: true, Seeded: true, Kind: "binary_contract"}); err != nil || plan.Action != "deactivate" {
+		t.Errorf("a seeded series the engine does not trade is the owner's to switch off: %+v, %v", plan, err)
+	}
+	if _, err := rules(store.AssetState{Item: item, Record: false, Exists: true, Active: true, Seeded: true, Kind: "binary_contract", Depended: "the live engine trades this series"}); err == nil {
+		t.Error("a series the engine trades was switched off")
 	}
 }
