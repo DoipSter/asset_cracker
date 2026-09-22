@@ -16,8 +16,13 @@ import (
 // quoted in the brief; not probed].
 const MaxPerRequest = 300
 
-// Granularities are the candle lengths recorded: daily and hourly.
-var Granularities = []time.Duration{24 * time.Hour, time.Hour}
+// Granularities are the candle lengths recorded: daily, hourly and one minute, the finest Coinbase
+// serves. Every other length (5, 10, 15, 30 minutes, 6 hours) is built from the minutes exactly:
+// first open, highest high, lowest low, last close, summed volume. Coinbase serves 60, 300, 900,
+// 3600, 21600 and 86400 seconds and refuses 600 and 1800 [READ: its API, 2026-09-21].
+// Coarsest first: each round brings every product's daily and hourly candles up to date before
+// it spends its time on minutes, of which the first load is about 5,300 requests a product.
+var Granularities = []time.Duration{24 * time.Hour, time.Hour, time.Minute}
 
 // Settle is how long after a candle's end it is first treated as complete. [ASSUMPTION, not
 // measured: how late Coinbase can still change a finished candle is unknown.] It is checked, not

@@ -55,11 +55,11 @@ func candleRound(ctx context.Context, db *store.Store, fetch candles.Fetch, name
 			slog.Error("candles: a panic was stopped; the next hour tries again", "panic", p)
 		}
 	}()
-	ctx, cancel := context.WithTimeout(ctx, 45*time.Minute) // [CONVENTION] the first round loads about 460 requests a second apart
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Minute) // [CONVENTION] a round cut short resumes next hour: the minutes' first load takes several
 	defer cancel()
 	var total candles.Counts
-	for _, p := range names {
-		for _, g := range candles.Granularities {
+	for _, g := range candles.Granularities { // coarsest first, for every product, then the next length
+		for _, p := range names {
 			gs := int(g / time.Second)
 			latest, stored, err := db.LatestCandle(ctx, products[p], gs)
 			if err != nil {
