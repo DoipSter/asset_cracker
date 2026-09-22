@@ -17,7 +17,9 @@ import (
 //
 // It also leaves out, from both, every instrument switched on from the assets page (spec
 // "selected": true, migration 0018). The supervisor in assets.go records those, and nothing else
-// does: no poller here, no runner, no engine, no trade stream, no health check, no home page.
+// does: no poller here, no runner, no engine, no health check. A switched-on spot product IS
+// listed on the home page and followed by the trade stream for its live price (tracked.go); its
+// prints are not written to price_tick.
 func splitLadders(all []store.Instrument) (rest, ladders []store.Instrument) {
 	for _, in := range all {
 		switch {

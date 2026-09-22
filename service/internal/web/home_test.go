@@ -216,6 +216,53 @@ func TestHomeBeforeAnythingExists(t *testing.T) {
 	}
 }
 
+// The list is whatever Sources.Assets answers, and a coin with a product but no Kalshi series
+// is listed with a price and no round; /api/asset knows it too, and charts it from candles.
+func TestHomeListsTheTrackedAssets(t *testing.T) {
+	src := testSources(nil, store.Capital{})
+	src.Assets = func() []Asset { return []Asset{Style("BTC", "BTC-USD"), Style("AMP", "AMP-USD")} }
+	priced := map[string]bool{}
+	src.Price = func(product string) (float64, float64, bool) { priced[product] = true; return 0.0042, 0.5, true }
+	now := time.Unix(1_790_000_000, 0)
+	w, _ := loadWindow(context.Background(), fakeHistory{}, 24*time.Hour, now)
+	raw, _ := json.Marshal(homeDoc(src, "24H", w, now, nil))
+	var got struct {
+		Assets []struct {
+			Coin   string
+			Sign   string
+			Price  *float64
+			Series bool
+			Round  *struct{ Ticker string }
+		}
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Assets) != 2 || got.Assets[0].Coin != "BTC" || got.Assets[1].Coin != "AMP" {
+		t.Fatalf("assets %+v", got.Assets)
+	}
+	btc, amp := got.Assets[0], got.Assets[1]
+	if !btc.Series || btc.Round == nil || btc.Sign != "₿" {
+		t.Errorf("BTC has a series and a round: %+v", btc)
+	}
+	if amp.Series || amp.Round != nil || amp.Price == nil || amp.Sign != "" || !priced["AMP-USD"] {
+		t.Errorf("AMP is priced from its product and has no round: %+v", amp)
+	}
+	if f, ok := src.feed("AMP"); !ok || f.Product != "AMP-USD" || f.Series != "" {
+		t.Errorf("AMP's feed is its product alone: %+v %v", f, ok)
+	}
+	if _, ok := src.asset("SOL"); ok {
+		t.Error("a coin the table does not track is not listed")
+	}
+	mux := http.NewServeMux()
+	homeRoutes(mux, nil, "test", src, Control{})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/asset?coin=SOL&range=1H", nil))
+	if rec.Code != 400 {
+		t.Errorf("an untracked coin: %d", rec.Code)
+	}
+}
+
 func TestHomeAddsUp(t *testing.T) {
 	v := int64(620)
 	books := []runner.Book{{Engine: "v1", Series: "KXBTC15M", Halted: "engine says 1 cents, ledger says 2",

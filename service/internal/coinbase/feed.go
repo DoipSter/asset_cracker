@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -62,12 +63,19 @@ type message struct {
 	Message   string `json:"message"`
 }
 
-// Stream connects, subscribes to the trade stream for products, and calls onTrade for every
-// print until ctx ends. It reconnects by itself, backing off up to 30 seconds.
+// resubscribeEvery is how often a live connection asks products() again and subscribes to what
+// was added since (and unsubscribes from what was dropped). An asset switched on from the page
+// gets a live price within about this long.
+const resubscribeEvery = 20 * time.Second
+
+// Stream connects, subscribes to the trade stream for products(), and calls onTrade for every
+// print until ctx ends. It reconnects by itself, backing off up to 30 seconds, and while
+// connected it follows products(): a product added to the answer is subscribed to, one removed
+// is unsubscribed from, without a reconnection.
 //
 // The "matches" channel is the raw trade stream. "ticker" carries the same prices but was
 // measured to arrive up to ~150 ms later, unevenly (see the Python app's notes).
-func Stream(ctx context.Context, userAgent string, products []string, latest *Latest, onTrade func(Trade)) {
+func Stream(ctx context.Context, userAgent string, products func() []string, latest *Latest, onTrade func(Trade)) {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		started := time.Now()
@@ -88,7 +96,7 @@ func Stream(ctx context.Context, userAgent string, products []string, latest *La
 	}
 }
 
-func run(ctx context.Context, userAgent string, products []string, latest *Latest, onTrade func(Trade)) error {
+func run(ctx context.Context, userAgent string, products func() []string, latest *Latest, onTrade func(Trade)) error {
 	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	conn, _, err := websocket.Dial(dialCtx, feedURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{"User-Agent": []string{userAgent}},
@@ -100,13 +108,17 @@ func run(ctx context.Context, userAgent string, products []string, latest *Lates
 	defer conn.CloseNow()
 	conn.SetReadLimit(1 << 20)
 
-	sub, _ := json.Marshal(map[string]any{
-		"type": "subscribe", "product_ids": products, "channels": []string{"matches"},
-	})
-	if err := conn.Write(ctx, websocket.MessageText, sub); err != nil {
-		return fmt.Errorf("subscribe: %w", err)
+	want := products()
+	if err := subscribe(ctx, conn, "subscribe", want); err != nil {
+		return err
 	}
-	slog.Info("coinbase feed connected", "products", products)
+	slog.Info("coinbase feed connected", "products", want)
+
+	// Follow products() for as long as this connection lives. Write is safe to call from here
+	// while the loop below reads; a failed write ends the connection through the read loop.
+	followCtx, stopFollowing := context.WithCancel(ctx)
+	defer stopFollowing()
+	go follow(followCtx, conn, products, want)
 
 	for {
 		readCtx, cancel := context.WithTimeout(ctx, silence)
@@ -138,5 +150,73 @@ func run(ctx context.Context, userAgent string, products []string, latest *Lates
 		case "error":
 			return fmt.Errorf("feed error: %s", m.Message)
 		}
+	}
+}
+
+// subscriptionDiff is what to subscribe to and what to drop to make current equal want. Both
+// answers are sorted, so the messages and the log read the same every time.
+func subscriptionDiff(current map[string]bool, want []string) (add, drop []string) {
+	wanted := map[string]bool{}
+	for _, p := range want {
+		wanted[p] = true
+		if !current[p] {
+			add = append(add, p)
+		}
+	}
+	for p := range current {
+		if !wanted[p] {
+			drop = append(drop, p)
+		}
+	}
+	sort.Strings(add)
+	sort.Strings(drop)
+	return add, drop
+}
+
+func subscribe(ctx context.Context, conn *websocket.Conn, kind string, products []string) error {
+	if len(products) == 0 {
+		return nil
+	}
+	msg, _ := json.Marshal(map[string]any{"type": kind, "product_ids": products, "channels": []string{"matches"}})
+	if err := conn.Write(ctx, websocket.MessageText, msg); err != nil {
+		return fmt.Errorf("%s: %w", kind, err)
+	}
+	return nil
+}
+
+// follow diffs products() against what is subscribed every resubscribeEvery and sends the
+// difference, until ctx ends (the connection is gone or the service is stopping).
+func follow(ctx context.Context, conn *websocket.Conn, products func() []string, have []string) {
+	t := time.NewTicker(resubscribeEvery)
+	defer t.Stop()
+	current := map[string]bool{}
+	for _, p := range have {
+		current[p] = true
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		add, drop := subscriptionDiff(current, products())
+		if len(add) == 0 && len(drop) == 0 {
+			continue
+		}
+		if err := subscribe(ctx, conn, "subscribe", add); err != nil {
+			slog.Warn("coinbase feed could not add products; the reconnection will", "products", add, "err", err)
+			return
+		}
+		if err := subscribe(ctx, conn, "unsubscribe", drop); err != nil {
+			slog.Warn("coinbase feed could not drop products; the reconnection will", "products", drop, "err", err)
+			return
+		}
+		for _, p := range add {
+			current[p] = true
+		}
+		for _, p := range drop {
+			delete(current, p)
+		}
+		slog.Info("coinbase feed follows the tracked assets", "added", add, "dropped", drop)
 	}
 }

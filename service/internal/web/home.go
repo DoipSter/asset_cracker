@@ -23,19 +23,55 @@ import (
 // range is compared with, the value chart, what each coin realised) is looked up at most once a
 // minute per range and kept.
 
-// Asset is one of the five coins the home page always lists, in this order. Signs, colours and
-// precision are doipster's (ASSETS in asset_cracker.py), the same table the widget carries.
+// Asset is one coin the home page lists: what is tracked in the instrument table, not a fixed
+// five. Product is its Coinbase spot product, where the live price comes from; a coin with no
+// product is listed without a price. Signs, colours and precision for the coins doipster's
+// widget knew are in Styles (ASSETS in asset_cracker.py); any other coin gets Style's defaults.
 type Asset struct {
 	Coin, Name, Sign, Colour string
 	Decimals                 int
+	Product                  string
 }
 
-var assets = []Asset{
-	{"BTC", "Bitcoin", "₿", "#F7931A", 2},
-	{"ETH", "Ethereum", "Ξ", "#8FA2F2", 2},
-	{"SOL", "Solana", "≡", "#14F195", 4},
-	{"XRP", "XRP", "✕", "#4FC3F7", 4},
-	{"DOGE", "Dogecoin", "Ð", "#E3C044", 6},
+// Styles is presentation for the coins the widget carried, keyed by coin. It decides nothing
+// about which coins are listed; Sources.Assets does.
+var Styles = map[string]Asset{
+	"BTC":  {Coin: "BTC", Name: "Bitcoin", Sign: "₿", Colour: "#F7931A", Decimals: 2},
+	"ETH":  {Coin: "ETH", Name: "Ethereum", Sign: "Ξ", Colour: "#8FA2F2", Decimals: 2},
+	"SOL":  {Coin: "SOL", Name: "Solana", Sign: "≡", Colour: "#14F195", Decimals: 4},
+	"XRP":  {Coin: "XRP", Name: "XRP", Sign: "✕", Colour: "#4FC3F7", Decimals: 4},
+	"DOGE": {Coin: "DOGE", Name: "Dogecoin", Sign: "Ð", Colour: "#E3C044", Decimals: 6},
+}
+
+// palette colours a coin Styles does not know, by a stable hash of its code, so the same coin is
+// the same colour on every load.
+var palette = []string{"#C084FC", "#F472B6", "#34D399", "#FBBF24", "#60A5FA", "#FB7185", "#A3E635", "#F97316"}
+
+// Style fills in a coin's presentation: the widget's where it had one, defaults otherwise.
+func Style(coin, product string) Asset {
+	if s, ok := Styles[coin]; ok {
+		s.Product = product
+		return s
+	}
+	h := 0
+	for _, r := range coin {
+		h = h*31 + int(r)
+	}
+	if h < 0 {
+		h = -h
+	}
+	return Asset{Coin: coin, Name: coin, Sign: "", Colour: palette[h%len(palette)], Decimals: 4, Product: product}
+}
+
+// widgetAssets is the list a Sources with no Assets func answers with: the five the widget knew,
+// for tests and for a build without the instrument table behind it. The service always sets
+// Assets from the table (app.trackedAssets).
+func widgetAssets() []Asset {
+	out := make([]Asset, 0, 5)
+	for _, c := range []string{"BTC", "ETH", "SOL", "XRP", "DOGE"} {
+		out = append(out, Style(c, ""))
+	}
+	return out
 }
 
 // Feed says where one coin's price and rounds come from. RoundSeconds is the series' configured
@@ -53,9 +89,14 @@ type Sources struct {
 	// Books is the live engine's book and the ledger's side of the balance sheet, read together.
 	Books   func() ([]runner.Book, store.Capital, bool)
 	Markers func(coin string, since float64) []runner.Marker
-	Feeds   []Feed
-	Price   func(product string) (price, ageSeconds float64, ok bool)
-	Round   func(series string) (kalshi.Status, bool)
+	// Assets is what the page lists, in order: the tracked coins from the instrument table,
+	// asked each time (the list changes when an asset is switched on). Nil lists the widget's five.
+	Assets func() []Asset
+	// Feeds are the coins with a Kalshi series: rounds, quotes and the 15-minute chart. A coin
+	// with a product but no series is priced from the trade stream and charted from candles.
+	Feeds []Feed
+	Price func(product string) (price, ageSeconds float64, ok bool)
+	Round func(series string) (kalshi.Status, bool)
 	// Recording says how the once-a-minute value snapshots are going. Nil means nobody is
 	// writing them (a test, or a build without the writer).
 	Recording func() Recording
@@ -89,11 +130,34 @@ func recordingError(r Recording, now time.Time) string {
 	return msg
 }
 
+// assets is the list the page shows right now.
+func (s Sources) assets() []Asset {
+	if s.Assets == nil {
+		return widgetAssets()
+	}
+	return s.Assets()
+}
+
+// asset finds one listed coin.
+func (s Sources) asset(coin string) (Asset, bool) {
+	for _, a := range s.assets() {
+		if a.Coin == coin {
+			return a, true
+		}
+	}
+	return Asset{}, false
+}
+
+// feed is where a coin's price and rounds come from: its Kalshi feed if it has one, else the
+// spot product alone (a price and candles, no rounds).
 func (s Sources) feed(coin string) (Feed, bool) {
 	for _, f := range s.Feeds {
 		if f.Coin == coin {
 			return f, true
 		}
+	}
+	if a, ok := s.asset(coin); ok && a.Product != "" {
+		return Feed{Coin: coin, Product: a.Product}, true
 	}
 	return Feed{}, false
 }
@@ -101,8 +165,9 @@ func (s Sources) feed(coin string) (Feed, bool) {
 // Valuation marks the books to market right now, and gives back what it was made from.
 func (s Sources) Valuation() (runner.Valuation, []runner.Book, store.Capital, bool) {
 	books, capital, ok := s.Books()
-	coins := make([]string, len(assets))
-	for i, a := range assets {
+	list := s.assets()
+	coins := make([]string, len(list))
+	for i, a := range list {
 		coins[i] = a.Coin
 	}
 	return runner.Value(books, capital, coins), books, capital, ok
@@ -406,11 +471,11 @@ func homeDoc(src Sources, key string, w window, now time.Time, changes map[strin
 		byCoin[c.Key] = c
 	}
 	list := []map[string]any{}
-	for _, a := range assets {
+	for _, a := range src.assets() {
 		cost, value, open, unmarked := stake(byCoin[a.Coin])
 		row := map[string]any{"coin": a.Coin, "name": a.Name, "sign": a.Sign, "colour": a.Colour, "decimals": a.Decimals,
 			"price": nil, "price_age_s": nil, "change_pct": changes[a.Coin], "stake_cents": cost, "stake_value_cents": value,
-			"open_bets": open, "unmarked_bets": unmarked, "earned_cents": nil, "round": nil}
+			"open_bets": open, "unmarked_bets": unmarked, "earned_cents": nil, "round": nil, "series": false}
 		if w.realised != nil || (!w.have && historyKnown) {
 			row["earned_cents"] = w.realised[a.Coin]
 		}
@@ -418,7 +483,8 @@ func homeDoc(src Sources, key string, w window, now time.Time, changes map[strin
 			if p, age, ok := src.Price(f.Product); ok {
 				row["price"], row["price_age_s"] = p, age
 			}
-			if st, ok := src.Round(f.Series); ok && st.Ticker != "" {
+			row["series"] = f.Series != ""
+			if st, ok := src.Round(f.Series); f.Series != "" && ok && st.Ticker != "" {
 				row["round"] = map[string]any{"ticker": st.Ticker, "strike": st.Strike, "closes": unixf(st.Closes),
 					"yes_bid": atof(st.Quotes.YesBid), "yes_ask": atof(st.Quotes.YesAsk)}
 			}
@@ -477,7 +543,11 @@ func (c *changes) get(userAgent string, src Sources, key string) map[string]*flo
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, f := range src.Feeds {
+	for _, a := range src.assets() {
+		f, ok := src.feed(a.Coin)
+		if !ok || f.Product == "" {
+			continue
+		}
 		k := f.Product + key
 		if first, ok := c.first[k]; ok && first > 0 && !changeTooOld(time.Since(c.firstAt[k]), spec[0]) {
 			if p, _, ok := src.Price(f.Product); ok {
@@ -527,17 +597,13 @@ func homeRoutes(mux *http.ServeMux, db *store.Store, userAgent string, src Sourc
 
 	mux.HandleFunc("GET /api/asset", func(w http.ResponseWriter, r *http.Request) {
 		coin := strings.ToUpper(r.URL.Query().Get("coin"))
-		var asset *Asset
-		for i := range assets {
-			if assets[i].Coin == coin {
-				asset = &assets[i]
-			}
-		}
+		a, listed := src.asset(coin)
 		key, _, ok := parseRange(r.URL.Query().Get("range"), "15M", assetRanges)
-		if asset == nil || !ok {
-			http.Error(w, "coin must be one of BTC, ETH, SOL, XRP, DOGE and range one of 15M, 1H, 24H, 7D", http.StatusBadRequest)
+		if !listed || !ok {
+			http.Error(w, "coin must be one the home page lists and range one of 15M, 1H, 24H, 7D", http.StatusBadRequest)
 			return
 		}
+		asset := &a
 		ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 		defer cancel()
 		feed, fed := src.feed(coin)
@@ -546,7 +612,7 @@ func homeRoutes(mux *http.ServeMux, db *store.Store, userAgent string, src Sourc
 		since := unixf(time.Now().Add(-assetRanges[key]))
 		switch {
 		case !fed:
-		case key == "15M":
+		case key == "15M" && feed.Series != "":
 			st, ok := src.Round(feed.Series)
 			if !ok || st.Ticker == "" {
 				break

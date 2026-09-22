@@ -19,7 +19,10 @@ import (
 )
 
 // ranges are the chart spans the Python app offers: candle size in seconds, and how many.
-var ranges = map[string][2]int{"1H": {60, 60}, "24H": {300, 288}, "7D": {3600, 168}}
+// ranges are the Coinbase candle sizes and counts behind each chart span. 15M is for a coin with
+// no Kalshi series: its quarter hour is fifteen one-minute candles, where a series coin's is the
+// open round from recorded quotes.
+var ranges = map[string][2]int{"15M": {60, 15}, "1H": {60, 60}, "24H": {300, 288}, "7D": {3600, 168}}
 
 type history struct {
 	Closes    []float64 `json:"closes"`

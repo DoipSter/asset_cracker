@@ -228,7 +228,7 @@ func CoinbaseItem(p Product) Item {
 		title = p.ID
 	}
 	return Item{Source: Coinbase, Code: p.ID, Title: title, Category: "Spot", Frequency: "continuous",
-		What:     "Coinbase spot product: daily, hourly and minute candles (not the live trade stream)",
+		What:     "Coinbase spot product: daily, hourly and minute candles recorded; listed on the home page with its live price, whose prints are not recorded",
 		Recorder: RecorderCandles, Checked: true, Raw: p.Raw}
 }
 

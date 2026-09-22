@@ -117,17 +117,18 @@ func Run(version string) error {
 	wg.Add(1)
 	go func() { defer wg.Done(); run3.Run(ctx) }()
 
+	// The tracked assets: what the home page lists and the trade stream follows, from the
+	// instrument table, seeded and switched-on alike. Prints are RECORDED (price_tick) only
+	// for the seeded products in `products`; a switched-on coin's prints give it a live price
+	// and nothing else, as the assets page says (its candles are recorded by the supervisor).
+	assets := newTracked(db, all)
 	var ticksWritten atomic.Int64
-	if len(products) > 0 {
+	if len(assets.Products()) > 0 {
 		trades := make(chan coinbase.Trade, 4096)
-		names := make([]string, 0, len(products))
-		for p := range products {
-			names = append(names, p)
-		}
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			coinbase.Stream(ctx, cfg.UserAgent, names, latest, func(t coinbase.Trade) {
+			coinbase.Stream(ctx, cfg.UserAgent, assets.Products, latest, func(t coinbase.Trade) {
 				if run3 != nil {
 					safely("observe", func() { run3.Observe(t) })
 				}
@@ -226,7 +227,7 @@ func Run(version string) error {
 		}, ok
 	}
 
-	src := web.Sources{Release: version}
+	src := web.Sources{Release: version, Assets: assets.Assets}
 	capital, dropCapital := ledgerCapital(db, run3.BucketIDs) // asked each time: a reload changes the held set
 	src.Books = func() ([]runner.Book, store.Capital, bool) {
 		cap, ok := capital()
