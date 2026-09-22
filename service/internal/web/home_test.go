@@ -248,6 +248,18 @@ func TestHomeListsTheTrackedAssets(t *testing.T) {
 	if amp.Series || amp.Round != nil || amp.Price == nil || amp.Sign != "" || !priced["AMP-USD"] {
 		t.Errorf("AMP is priced from its product and has no round: %+v", amp)
 	}
+	var withDecimals struct {
+		Assets []struct{ Decimals int }
+	}
+	_ = json.Unmarshal(raw, &withDecimals)
+	if withDecimals.Assets[0].Decimals != 2 || withDecimals.Assets[1].Decimals != 7 {
+		t.Errorf("BTC keeps the widget's 2 decimals; AMP at $0.0042 shows 7: %+v", withDecimals.Assets)
+	}
+	for price, want := range map[float64]int{85367.67: 2, 2.5: 4, 0.099: 5, 0.00048: 7, 0.00001: 8} {
+		if got := decimalsFor(price); got != want {
+			t.Errorf("decimalsFor(%v) = %d, want %d", price, got, want)
+		}
+	}
 	if f, ok := src.feed("AMP"); !ok || f.Product != "AMP-USD" || f.Series != "" {
 		t.Errorf("AMP's feed is its product alone: %+v %v", f, ok)
 	}

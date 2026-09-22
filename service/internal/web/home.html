@@ -349,6 +349,8 @@ function coins(){return assets().map(function(a){return a.coin})}
 function assetOf(c){var a=assets();for(var i=0;i<a.length;i++)if(a[i].coin===c)return a[i];return null}
 /* ASSUMPTION (the contract does not define it): an engine belongs to a coin when its name contains the ticker, e.g. KXETH15M. */
 var STALE_S=30; /* the engines stop using a price this old (main.go sink.price). 5 s flickered: DOGE was measured 4.9 s between trades on a quiet night */
+var STALE_THIN_S=300; /* a coin with no series is only watched, and a thin one prints once a minute: silence is its market, not a dead feed, until five minutes */
+function isStale(a){var pa=num(a.price_age_s);return pa!=null&&pa>(a.series===false?STALE_THIN_S:STALE_S)}
 function haltedNames(){return arr((S.home||{}).halted).filter(function(n){return str(n)})}
 /* the server names a halted engine "v1 KXBTC15M: why" or "v2: why"; only the head before the colon is matched; an engine whose name carries no coin (v2) trades every coin */
 function haltedFor(c){var t=String(c).toUpperCase(),all=coins().map(function(x){return String(x).toUpperCase()});return haltedNames().filter(function(n){var head=n.split(":")[0].toUpperCase(),named=all.some(function(x){return head.indexOf(x)>=0});return named?head.indexOf(t)>=0:true})}
@@ -450,7 +452,7 @@ var railSig=null;
 function renderRail(){var list=assets(),sig=list.map(function(a){return a.coin}).join("|"),el=$("rail");
   if(sig!==railSig){el.innerHTML='<span class="k">Assets</span>'+list.map(function(){return'<button type="button"><span class="l1"></span><span class="px f"></span><span class="sp"></span><span class="st"></span></button>'}).join("");railSig=sig}
   var bs=el.querySelectorAll("button"),asOf=num((S.home||{}).as_of);
-  list.forEach(function(a,i){var b=bs[i];if(!b)return;var c=a.coin,ch=num(a.change_pct),pa=num(a.price_age_s),stale=pa!=null&&pa>STALE_S,halt=haltedFor(c).length>0,ob=num(a.open_bets);
+  list.forEach(function(a,i){var b=bs[i];if(!b)return;var c=a.coin,ch=num(a.change_pct),pa=num(a.price_age_s),stale=isStale(a),halt=haltedFor(c).length>0,ob=num(a.open_bets);
     b.setAttribute("data-v",c);b.setAttribute("aria-pressed",String(c===S.coin));b.setAttribute("aria-label",(str(a.name)||c)+(halt?", engine halted":"")+(stale?", price is stale":""));
     var pts=cleanPts(S.sparks[c]);if(pts.length&&asOf!=null&&num(a.price)!=null&&!stale&&asOf>pts[pts.length-1][0])pts=pts.concat([[asOf,a.price]]);var sp=sparkPath(pts,100,15);
     setHTML(b.children[0],'<span class="sg" style="color:'+legible(a.colour)+'">'+esc(str(a.sign))+'</span><span class="tk">'+esc(c)+'</span><span class="ch f '+cls(ch)+'">'+pct(ch)+"</span>");
@@ -461,7 +463,7 @@ function renderRail(){var list=assets(),sig=list.map(function(a){return a.coin})
 /* ---------- the box ---------- */
 function initials(names){var m={},by={};names.forEach(function(n){var k=(n||"?")[0];(by[k]=by[k]||[]).push(n)});
   Object.keys(by).forEach(function(k){by[k].forEach(function(n){m[n]=by[k].length>1?(n||"?").slice(0,2):k})});return m}
-function renderBoxHead(){var a=assetOf(S.coin)||{},d=S.asset||{},dec=num(d.decimals)!=null?d.decimals:a.decimals,pa=priceAge(a),stale=num(a.price_age_s)!=null&&a.price_age_s>STALE_S,hl=haltedFor(S.coin);
+function renderBoxHead(){var a=assetOf(S.coin)||{},d=S.asset||{},dec=num(a.decimals)!=null?a.decimals:d.decimals,pa=priceAge(a),stale=isStale(a),hl=haltedFor(S.coin);
   /* the change shown here is measured on the chart's own points, so it always matches the range chips under it */
   var pts=cleanPts(d.points),chg=null,lab="";
   if(pts.length>1&&pts[0][1]){chg=(pts[pts.length-1][1]-pts[0][1])/pts[0][1]*100;

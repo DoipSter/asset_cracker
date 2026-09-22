@@ -63,6 +63,23 @@ func Style(coin, product string) Asset {
 	return Asset{Coin: coin, Name: coin, Sign: "", Colour: palette[h%len(palette)], Decimals: 4, Product: product}
 }
 
+// decimalsFor is the precision a price is shown at when nothing says otherwise: four
+// significant figures or so, so 85,367.67 shows cents and 0.0004811 shows the digits that move.
+func decimalsFor(price float64) int {
+	switch {
+	case price >= 100:
+		return 2
+	case price >= 1:
+		return 4
+	case price >= 0.01:
+		return 5
+	case price >= 0.0001:
+		return 7
+	default:
+		return 8
+	}
+}
+
 // widgetAssets is the list a Sources with no Assets func answers with: the five the widget knew,
 // for tests and for a build without the instrument table behind it. The service always sets
 // Assets from the table (app.trackedAssets).
@@ -482,6 +499,9 @@ func homeDoc(src Sources, key string, w window, now time.Time, changes map[strin
 		if f, ok := src.feed(a.Coin); ok {
 			if p, age, ok := src.Price(f.Product); ok {
 				row["price"], row["price_age_s"] = p, age
+				if _, styled := Styles[a.Coin]; !styled {
+					row["decimals"] = decimalsFor(p) // a coin the widget did not know: precision from its price
+				}
 			}
 			row["series"] = f.Series != ""
 			if st, ok := src.Round(f.Series); f.Series != "" && ok && st.Ticker != "" {
@@ -679,7 +699,15 @@ func homeRoutes(mux *http.ServeMux, db *store.Store, userAgent string, src Sourc
 			markers = append(markers, map[string]any{"t": m.T, "price": m.Price, "side": m.Side, "strategy": m.Strategy,
 				"engine": m.Engine, "world": m.World, "kind": m.Kind})
 		}
-		writeJSON(w, map[string]any{"simulated": true, "coin": coin, "range": key, "decimals": asset.Decimals, "points": points, "round": round,
+		decimals := asset.Decimals
+		if _, styled := Styles[coin]; !styled && fed {
+			if p, _, ok := src.Price(feed.Product); ok {
+				decimals = decimalsFor(p)
+			} else if len(points) > 0 {
+				decimals = decimalsFor(points[len(points)-1][1])
+			}
+		}
+		writeJSON(w, map[string]any{"simulated": true, "coin": coin, "range": key, "decimals": decimals, "points": points, "round": round,
 			"stake_cents": cost, "stake_value_cents": value, "unmarked_bets": unmarked, "positions": positions,
 			"markers": markers, "markers_truncated": truncated})
 	})
