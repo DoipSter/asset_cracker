@@ -31,6 +31,7 @@ replaced. No version-3 strategy exists until `cmd/measure3` has measured its num
 | `internal/pyfloat` | CPython's float rounding, repr and floor division, where Go differs |
 | `cmd/replay` | v1 parity gate |
 | `cmd/replay2` | v2 parity gate |
+| `cmd/measure3` | The v3 measurement protocol, executed: `train` walks to TRAIN's 480th window and freezes lambda and the staleness costs; `test` is the one look at TEST; `emit-migration` writes the version rows. Read-only, as `assetcracker_ro` over the SSH tunnel; refuses a protocol text other than the one it embeds |
 | `internal/web` | The status page, and the buckets-page controls (orders, version-3 approval, allocation, sim reset) |
 | `internal/health` | `GET /healthz` on localhost: prices, rounds, counts; 503 if anything is stale |
 | `internal/readsurface` | The agents' read-only door: the MCP tools of `assetcracker mcp`. Windowed, capped, paged reads of candles, prints, the book and markets, and in-database summaries (returns, vol profile, momentum grid, features, stored analyses). Every call in a READ ONLY transaction with a timeout. `docs/mcp-read-surface.md` |

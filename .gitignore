@@ -12,6 +12,10 @@ kalshi_bankruptcies*.log
 kalshi_bankrupt_*.md
 kalshi_sessions*.csv
 
+# measure3's figures on an incomplete TRAIN: printed, freeze nothing, and change every run.
+# runs.jsonl, frozen-params.json and the result files ARE committed (the protocol says so).
+research/v3/train-progress.json
+
 # Scraped market data: caches of public APIs, not source. Each has a script that rebuilds
 # it, named in research/README.md, so nothing here is lost by not committing it.
 research/week_data.json
