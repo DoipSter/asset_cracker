@@ -12,16 +12,16 @@ import (
 	"github.com/doipster/asset_cracker/service/internal/engine"
 )
 
-// emitMigration writes db/migrations/0020_kalshi15m_v3_versions.sql from frozen-params.json and
-// test-result.json (section 7; the plan's "migration 0013", renumbered because 0013 to 0019 are
-// taken by history). It refuses unless R1 and R2 both passed, and it refuses whenever
+// emitMigration writes db/migrations/0021_kalshi15m_v3_versions.sql from frozen-params.json and
+// test-result.json (section 7; the plan's "migration 0013", renumbered because 0013 to 0020 are
+// taken by history; 0020 is the owner's convention versions, separate trials under their own names). It refuses unless R1 and R2 both passed, and it refuses whenever
 // engine.Scalper or engine.Value refuses the params: every number must carry its provenance and
 // the four measured ones must be measured. There is no flag that relaxes that.
 //
 // drift_tol: the third amendment (2026-09-22) registers it as the fact 0, because the reference
 // engine it was to be measured against is stopped and the drift gate is open. engine.Validate
 // accepts exactly that and nothing looser.
-const migrationName = "0020_kalshi15m_v3_versions.sql"
+const migrationName = "0021_kalshi15m_v3_versions.sql"
 
 func emitMigration(r repo) error {
 	var frozen frozenParams

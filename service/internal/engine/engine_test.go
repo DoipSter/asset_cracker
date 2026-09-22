@@ -644,9 +644,45 @@ func TestParamsRefuseWhatIsNotMeasured(t *testing.T) {
 			t.Error("a provenance that disagrees with its field must be refused")
 		}
 	}
+	// A convention version: the owner's numbers, labelled, under a name that says so. It may not
+	// call anything measured, and the plain Scalper/Value constructors still refuse conventions.
+	conv := func(v float64) Provenance {
+		return Provenance{Kind: KindConvention, Value: v, Note: "the owner's choice, 2026-09-22"}
+	}
+	gateOpen := Provenance{Kind: KindFact, Value: 0, Note: "no reference engine runs beside the third; the drift gate is open and the number decides nothing"}
+	c := Conventions{Lambda: conv(0.5), StaleCost: conv(0.0012), StaleCostSell: conv(0.0012), DriftTol: gateOpen}
+	for _, build := range []func(Conventions) (Params, error){ConventionScalper, ConventionValue} {
+		p, err := build(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(p.Name, ConventionSuffix) || p.Basis != BasisConvention || p.Lambda != 0.5 || p.ProtocolSHA != "" {
+			t.Errorf("convention version: %+v", p)
+		}
+		q := p
+		q.Name = strings.TrimSuffix(q.Name, ConventionSuffix)
+		if err := q.Validate(); err == nil {
+			t.Error("a convention version without the label in its name must be refused")
+		}
+		q = p
+		q.Provenance = map[string]Provenance{}
+		for k, v := range p.Provenance {
+			q.Provenance[k] = v
+		}
+		q.Provenance["lambda"] = Provenance{Kind: KindMeasured, Value: 0.5, Note: "x"}
+		if err := q.Validate(); err == nil {
+			t.Error("a convention version calling lambda measured must be refused")
+		}
+	}
+	if _, err := ConventionScalper(Conventions{Lambda: conv(0), StaleCost: conv(0.0012), StaleCostSell: conv(0.0012), DriftTol: gateOpen}); err == nil {
+		t.Error("lambda 0 is refused for a convention too: R1's rule")
+	}
+	if _, err := ConventionScalper(Conventions{Lambda: conv(0.5), StaleCost: conv(0.0012), StaleCostSell: conv(0.0012), DriftTol: conv(0.05)}); err == nil {
+		t.Error("drift_tol must be the fact 0 in a convention version")
+	}
+
 	// The third amendment (2026-09-22): drift_tol as a fact of exactly 0 is accepted; as a fact
 	// of any other value, or as a convention, it is not; and the amendment loosens no other field.
-	gateOpen := Provenance{Kind: KindFact, Value: 0, Note: "no reference engine runs beside the third; the drift gate is open and the number decides nothing"}
 	if _, err := Scalper(Measured{Lambda: shaped(0.2), StaleCost: shaped(0.007), StaleCostSell: shaped(0.006), DriftTol: gateOpen, ProtocolSHA: "a", ResultSHA: "b"}); err != nil {
 		t.Errorf("drift_tol as the fact 0 must be accepted: %v", err)
 	}

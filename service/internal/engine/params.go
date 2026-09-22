@@ -41,6 +41,11 @@ type Provenance struct {
 type Params struct {
 	Name  string `json:"name"`
 	Blurb string `json:"blurb"`
+	// Basis says where the four numbers of Measured come from: "measured" (the protocol's
+	// result; the default, and the empty string reads as it) or "convention" (the owner chose
+	// them to run the fund before the measurement was complete; 2026-09-22). A convention
+	// version must say so in its name, so a page never shows it as a measured one.
+	Basis string `json:"basis,omitempty"`
 
 	// Lambda is the weight on the model in p = mid + Lambda * (p_model - mid). One number for
 	// every version, because it is a property of the model, not of a strategy. [MEASURED, M1]
@@ -161,6 +166,35 @@ func Value(m Measured) (Params, error) { p := value(m); return p, p.Validate() }
 func PlumbingScalper(m Measured) (Params, error) { p := scalper(m); return p, p.ValidatePlumbing() }
 func PlumbingValue(m Measured) (Params, error)   { p := value(m); return p, p.ValidatePlumbing() }
 
+// BasisConvention marks a version whose four numbers the owner chose (Conventions).
+const BasisConvention = "convention"
+
+// ConventionSuffix is what a convention version's name must end with.
+const ConventionSuffix = " (conventions)"
+
+// Conventions are the four numbers as the owner chose them, each of kind "convention" with a
+// note saying why, for a version that runs the fund BEFORE the protocol's measurement is
+// complete (the owner's decision of 2026-09-22 00:48 PT). Such a version is its own trial: it is
+// registered under its own name, "Scalper (conventions)", so that the measured Scalper v3 keeps
+// its slot, and the trials count moves for both. Nothing about it is a measurement, and its
+// params say so in every field.
+type Conventions struct {
+	Lambda, StaleCost, StaleCostSell Provenance // kind "convention"
+	DriftTol                         Provenance // kind "fact", 0: the gate is open (third amendment)
+}
+
+// ConventionScalper is Scalper with the owner's four numbers; ConventionValue likewise.
+func ConventionScalper(c Conventions) (Params, error) { return convention(scalper, c) }
+func ConventionValue(c Conventions) (Params, error)   { return convention(value, c) }
+
+func convention(build func(Measured) Params, c Conventions) (Params, error) {
+	p := build(Measured{Lambda: c.Lambda, StaleCost: c.StaleCost, StaleCostSell: c.StaleCostSell, DriftTol: c.DriftTol})
+	p.Basis = BasisConvention
+	p.Name += ConventionSuffix
+	p.Blurb = strings.Replace(p.Blurb, "the measured weight", "the owner's weight", 1) + "; the four numbers are the owner's conventions, not the protocol's measurement"
+	return p, p.Validate()
+}
+
 // Validate refuses a version that may not be registered: a numeric field without provenance, a
 // provenance that disagrees with its field, a placeholder anywhere, or one of the four measured
 // numbers not marked measured and tied to a protocol and a result.
@@ -249,21 +283,43 @@ func (p Params) validate(plumbing bool) error {
 			fail("provenance for %s, which is not a numeric field", key)
 		}
 	}
-	for _, key := range measuredFields {
-		pr, has := p.Provenance[key]
-		if !has || pr.Kind == KindMeasured || pr.Kind == KindPlaceholder {
-			continue
+	switch p.Basis {
+	case "", "measured":
+		for _, key := range measuredFields {
+			pr, has := p.Provenance[key]
+			if !has || pr.Kind == KindMeasured || pr.Kind == KindPlaceholder {
+				continue
+			}
+			// The protocol's third amendment (2026-09-22): drift_tol has no reference engine to be
+			// measured against, so it is a fact, 0, and the gate it fed is open. That one field, and
+			// only as a fact of exactly 0; the other three stay measured.
+			if key == "drift_tol" && pr.Kind == KindFact && pr.Value == 0 {
+				continue
+			}
+			fail("%s must be measured; it is labelled %q", key, pr.Kind)
 		}
-		// The protocol's third amendment (2026-09-22): drift_tol has no reference engine to be
-		// measured against, so it is a fact, 0, and the gate it fed is open. That one field, and
-		// only as a fact of exactly 0; the other three stay measured.
-		if key == "drift_tol" && pr.Kind == KindFact && pr.Value == 0 {
-			continue
+		if usesMeasured && (p.ProtocolSHA == "" || p.ResultSHA == "") {
+			fail("measured numbers need the protocol's and the result's sha")
 		}
-		fail("%s must be measured; it is labelled %q", key, pr.Kind)
-	}
-	if usesMeasured && (p.ProtocolSHA == "" || p.ResultSHA == "") {
-		fail("measured numbers need the protocol's and the result's sha")
+	case BasisConvention:
+		// The owner's numbers: each of the three is a convention that says so, drift_tol is the
+		// fact 0, nothing is called measured, and the name carries the label.
+		if !strings.HasSuffix(p.Name, ConventionSuffix) {
+			fail("a convention version's name must end with %q", ConventionSuffix)
+		}
+		if usesMeasured {
+			fail("a convention version may not call any number measured")
+		}
+		for _, key := range []string{"lambda", "stale_cost", "stale_cost_sell"} {
+			if pr, has := p.Provenance[key]; has && pr.Kind != KindConvention && pr.Kind != KindPlaceholder {
+				fail("%s must be a convention in a convention version; it is labelled %q", key, pr.Kind)
+			}
+		}
+		if pr := p.Provenance["drift_tol"]; !(pr.Kind == KindFact && pr.Value == 0) && pr.Kind != KindPlaceholder {
+			fail("drift_tol must be the fact 0 (the gate is open); it is %q %v", pr.Kind, pr.Value)
+		}
+	default:
+		fail("basis %q is neither measured nor convention", p.Basis)
 	}
 
 	// Ranges. Written as !(ok) so that a NaN fails.
