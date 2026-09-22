@@ -794,7 +794,7 @@ func TestFixedBucketSet(t *testing.T) {
 			}
 		}
 	})
-	t.Run("a status change while running changes nothing until the restart", func(t *testing.T) {
+	t.Run("a status change while running changes nothing until a reload", func(t *testing.T) {
 		g := newRig(t)
 		g.s.addVersion("Value", "draft", plumbing(t, "Value"))
 		r := g.start(true)
@@ -817,13 +817,13 @@ func TestFixedBucketSet(t *testing.T) {
 			t.Fatalf("the held set moved from %v to %v", ids, r.BucketIDs())
 		}
 		notes, _ := r.Snapshot(context.Background())["restart_notes"].([]string)
-		if len(notes) != 1 || notes[0] != "Value: approved, waiting for restart" {
+		if len(notes) != 1 || notes[0] != "Value: approved, waiting for a reload" {
 			t.Fatalf("restart notes %v", notes)
 		}
 		g.s.setStatus("Scalper", "retired")
 		g.advance(notesFor3) // the status page reuses its read of the statuses for this long
 		notes, _ = r.Snapshot(context.Background())["restart_notes"].([]string)
-		if len(notes) != 2 || notes[1] != "Scalper: no longer tradable: settle-only after restart" {
+		if len(notes) != 2 || notes[1] != "Scalper: no longer tradable: settle-only after a reload" {
 			t.Fatalf("restart notes %v", notes)
 		}
 	})
@@ -1035,14 +1035,17 @@ func TestObserveOnlyAndFailedStarts(t *testing.T) {
 			t.Fatalf("mode %v", got)
 		}
 	})
-	t.Run("absent", func(t *testing.T) {
+	t.Run("orders off and nothing held is an empty engine, not an absent one", func(t *testing.T) {
 		g := newRig(t)
 		r, err := NewRunner3(context.Background(), g.s, rigCoins, g.options(false))
-		if r != nil || err != nil {
-			t.Fatalf("AC_V3 off and no bucket: got %v, %v; want no runner and no error", r, err)
+		if r == nil || err != nil {
+			t.Fatalf("orders off and no bucket: got %v, %v; want an observe-only runner the page can reload", r, err)
 		}
-		if len(g.s.setupNames) != 1 || len(g.s.setupNames[0]) != 0 || len(g.s.created) != 0 {
-			t.Fatalf("names %v, created %v", g.s.setupNames, g.s.created)
+		if len(g.s.setupNames) != 1 || len(g.s.setupNames[0]) != 0 || len(g.s.created) != 0 || len(r.BucketIDs()) != 0 {
+			t.Fatalf("names %v, created %v, held %v", g.s.setupNames, g.s.created, r.BucketIDs())
+		}
+		if got := r.Snapshot(context.Background())["mode"]; got != "observe-only" {
+			t.Fatalf("mode %v", got)
 		}
 	})
 	for _, op := range []string{"HeldBuckets", "EnsureSimSetup", "TradableVersions"} {
@@ -1503,7 +1506,7 @@ func TestRestartNotesSayWhy(t *testing.T) {
 			t.Fatal(err)
 		}
 		n := notes(r)
-		if len(n) != 1 || !strings.HasPrefix(n[0], "Scalper: refused at start: it is a dev plumbing version") || strings.Contains(n[0], "waiting for restart") {
+		if len(n) != 1 || !strings.HasPrefix(n[0], "Scalper: refused at the last load: it is a dev plumbing version") || strings.Contains(n[0], "waiting for a reload") {
 			t.Fatalf("restart notes %v", n)
 		}
 	})
@@ -1532,7 +1535,7 @@ func TestRestartNotesSayWhy(t *testing.T) {
 		r := g.start(true)
 		g.s.setStatus("Value", "probation")
 		n := notes(r)
-		if len(n) != 1 || !strings.HasPrefix(n[0], "Value: approved, but the next start will refuse it: ") {
+		if len(n) != 1 || !strings.HasPrefix(n[0], "Value: approved, but the next load will refuse it: ") {
 			t.Fatalf("restart notes %v", n)
 		}
 	})

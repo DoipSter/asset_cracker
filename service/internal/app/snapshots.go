@@ -14,9 +14,10 @@ import (
 	"github.com/doipster/asset_cracker/service/internal/web"
 )
 
-// ledgerCapital is the ledger's side of the balance sheet, read at most once a minute. held is
-// the ids of the buckets the live engine holds.
-func ledgerCapital(db *store.Store, held []int64) func() (store.Capital, bool) {
+// ledgerCapital is the ledger's side of the balance sheet, read at most once a minute. held
+// answers with the ids of the buckets the live engine holds at that moment: a reload on the
+// buckets page changes them while the service runs.
+func ledgerCapital(db *store.Store, held func() []int64) func() (store.Capital, bool) {
 	var (
 		mu   sync.Mutex
 		last store.Capital
@@ -29,7 +30,7 @@ func ledgerCapital(db *store.Store, held []int64) func() (store.Capital, bool) {
 		if time.Since(at) > time.Minute {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			c, err := db.ReadCapital(ctx, held)
+			c, err := db.ReadCapital(ctx, held())
 			if at, good = time.Now(), err == nil; good {
 				last = c
 			} else {

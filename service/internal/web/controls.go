@@ -12,6 +12,12 @@ import (
 	"github.com/doipster/asset_cracker/service/internal/store"
 )
 
+// resetBudget is how long the reset request may take in the database. The page waits as long.
+const resetBudget = 5 * time.Minute
+
+// reloadBudget is the engine's start-up budget: the seeding, the reads and the rebuild.
+const reloadBudget = 30 * time.Second
+
 // Control is how the buckets page reaches the running engine. A nil func means there is
 // no engine in this process: the saved switch still applies at the next start.
 type Control struct {
@@ -21,6 +27,24 @@ type Control struct {
 	Hold    func()                                  // stop writes before a reset
 	Release func()                                  // drop the deleted books from memory
 	Abort   func()                                  // the reset did not happen; rebuild
+	// Reload is a start without a process start: seed the approved versions, read what is
+	// held, rebuild. It runs after a reset and after every approval or retirement made here.
+	// held is how many buckets the engine now holds, ordering how many of them may order.
+	Reload func(ctx context.Context) (held, ordering int, err error)
+}
+
+// reload runs the engine's reload and reports it for the page. With no engine in this process
+// there is nothing to reload: the next start reads the database.
+func (c Control) reload(ctx context.Context) map[string]any {
+	if c.Reload == nil {
+		return map[string]any{"reloaded": false, "effective": "next-start"}
+	}
+	held, ordering, err := c.Reload(ctx)
+	if err != nil {
+		slog.Error("controls: reload", "err", err)
+		return map[string]any{"reloaded": false, "effective": "heal", "held": held, "ordering": ordering}
+	}
+	return map[string]any{"reloaded": true, "effective": "now", "held": held, "ordering": ordering}
 }
 
 func (c Control) status() (placing bool, effective string) {
@@ -167,7 +191,16 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 			writeErr(w, http.StatusInternalServerError, "The version was not updated.")
 			return
 		}
-		writeJSON(w, map[string]any{"id": body.ID, "status": body.Status})
+		// The status is saved. Now the engine loads it: an approval seeds its bucket and it
+		// trades on the next look; a retirement leaves its bucket held and settle-only.
+		rctx, rcancel := context.WithTimeout(r.Context(), reloadBudget)
+		defer rcancel()
+		out := ctl.reload(rctx)
+		out["id"], out["status"] = body.ID, body.Status
+		if list != nil {
+			list.drop()
+		}
+		writeJSON(w, out)
 	})
 
 	mux.HandleFunc("POST /api/controls/policy", func(w http.ResponseWriter, r *http.Request) {
@@ -225,11 +258,14 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 				ctl.abort()
 			}
 		}()
-		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		// The record held 1.76 million decisions when the first reset timed out at a minute.
+		// The function now truncates the journal, but the budget is generous all the same.
+		ctx, cancel := context.WithTimeout(r.Context(), resetBudget)
 		defer cancel()
+		started := time.Now()
 		counts, err := db.ResetSim(ctx)
 		if err != nil {
-			slog.Error("controls: reset refused or failed", "err", err)
+			slog.Error("controls: reset refused or failed", "err", err, "after", time.Since(started).Round(time.Millisecond))
 			writeErr(w, http.StatusInternalServerError, "The sim books were not reset.")
 			return
 		}
@@ -238,8 +274,21 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 		if list != nil {
 			list.drop()
 		}
-		slog.Info("sim books reset from the buckets page", "buckets", counts.Buckets, "orders", counts.Orders, "transfers", counts.Transfers)
-		writeJSON(w, counts)
+		slog.Info("sim books reset from the buckets page", "buckets", counts.Buckets, "orders", counts.Orders, "transfers", counts.Transfers,
+			"db_ms", counts.TookMS, "took", time.Since(started).Round(time.Millisecond))
+		// The books are empty. The start: every approved version is seeded and the engine is
+		// rebuilt over the new buckets. With no approved version-3 row nothing is seeded, and
+		// the page says so.
+		rctx, rcancel := context.WithTimeout(r.Context(), reloadBudget)
+		defer rcancel()
+		out := map[string]any{"cleared": counts}
+		for k, v := range ctl.reload(rctx) {
+			out[k] = v
+		}
+		if list != nil {
+			list.drop()
+		}
+		writeJSON(w, out)
 	})
 }
 

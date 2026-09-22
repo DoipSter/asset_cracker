@@ -33,6 +33,12 @@ type Store3 interface {
 	RecordSettlements(ctx context.Context, setup store.SimSetup, marketID int64, at time.Time, rows []store.SettlementRow) error
 	CloseBucket(ctx context.Context, setup store.SimSetup, b store.SimBucket, reason string, restake bool, life int, seedCents int64) (store.SimBucket, error)
 
+	// The sustainment allocation (platform brief, section 6): the mark a bucket last reached,
+	// the rates in force, and the skim itself, which is one ledger transfer out of the bucket.
+	HighWaterMark(ctx context.Context, bucketID int64) (cents int64, ok bool, err error)
+	CurrentSkimPolicy(ctx context.Context) (store.SkimPolicy, error)
+	RecordSkim(ctx context.Context, setup store.SimSetup, k store.Skim) error
+
 	SaveEngineState(ctx context.Context, series string, state any) error
 	LoadEngineState(ctx context.Context, series string, into any) (bool, error)
 }

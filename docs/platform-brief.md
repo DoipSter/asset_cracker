@@ -146,8 +146,15 @@ high is recorded in `bucket_skim` whether or not anything was taken. **Every rat
 zero**: a tax rate is a fact about its owner, not something to guess. A restart is funded from
 replenishment first; only the shortfall is brought in from outside, as its own recorded deposit.
 
-Still to decide: whether the twins are skimmed like the originals (today they are, so a pair
-stays comparable); the rates themselves.
+Still to decide: the rates themselves. (The twins question closed with version 2; the live
+engine has no anti-world.)
+
+**Bucket lifecycle in the live engine, as of 2026-09-22:** approval on the buckets page seeds
+a $1,000 bucket from replenishment at once (`Runner3.Reload`, no process start); a bucket that
+loses its last bet with less than the floor left is closed at that settlement, reaped into
+replenishment, frozen, not replaced. The reset on the buckets page empties every simulated
+book and starts again from the approved versions. Not built: circuit breakers on drawdown or a
+run of losses, and a bench that hands a freed slot to a different strategy.
 
 The earlier sketch of these flows, kept for the parts not built yet:
 
@@ -241,8 +248,9 @@ Set up on 2026-09-20: Brad reserved 10.0.0.172 on his router. `create-deploy-use
 commands, including `sudo bash`, are refused). `setup.sh`, run as `acdeploy`, installed
 PostgreSQL 17.11 and created `assetcracker` (owner role `assetcracker`, for the service) and
 `assetcracker_dev` (owner role `acdeploy`). Verified: Postgres listens on 127.0.0.1 and ::1
-only, the memory settings and UTC took effect, and `acdeploy` cannot connect to the real
-database. Both databases use the `en_US.UTF-8` locale (Brad generated it on the Pi; the
+only, the memory settings and UTC took effect. On that day `acdeploy` could not connect to
+the real database; it now connects only to read, and the read takes the `assetcracker_ro` role
+(`docs/deployment.md`). Both databases use the `en_US.UTF-8` locale (Brad generated it on the Pi; the
 empty databases were recreated with it). Reach the dev database from the Mac with
 `ssh -L 5433:/var/run/postgresql/.s.PGSQL.5432 acdeploy@rpi-v5-1.local`.
 

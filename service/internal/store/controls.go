@@ -149,15 +149,19 @@ func (s *Store) SetSimPolicy(ctx context.Context, winnings, replenish, tax, fees
 	return nil
 }
 
-// ResetCounts is what reset_sim removed.
+// ResetCounts is what reset_sim removed. Decisions is the row count only from the first
+// version of the function (0017); since 0019 the journal is truncated whole and
+// DecisionsTruncated says so.
 type ResetCounts struct {
-	Fills       int64 `json:"fills"`
-	Settlements int64 `json:"settlements"`
-	Orders      int64 `json:"orders"`
-	Decisions   int64 `json:"decisions"`
-	Buckets     int64 `json:"buckets"`
-	Transfers   int64 `json:"transfers"`
-	Snapshots   int64 `json:"snapshots"`
+	Fills              int64 `json:"fills"`
+	Settlements        int64 `json:"settlements"`
+	Orders             int64 `json:"orders"`
+	Decisions          int64 `json:"decisions"`
+	DecisionsTruncated bool  `json:"decisions_truncated"`
+	Buckets            int64 `json:"buckets"`
+	Transfers          int64 `json:"transfers"`
+	Snapshots          int64 `json:"snapshots"`
+	TookMS             int64 `json:"took_ms"`
 }
 
 // ResetSim empties the simulated books. The confirmation the function requires is

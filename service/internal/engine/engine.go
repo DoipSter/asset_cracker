@@ -23,7 +23,7 @@ type Market struct {
 type posKey struct{ Ticker, Side string }
 
 // Account is one version's bucket: one balance shared across every coin. CashCents IS the ledger
-// balance: it changes only in Fold and ApplySettlement, by the figures the store booked.
+// balance: it changes only in Fold, ApplySettlement and Withdraw, by the figures the store booked.
 type Account struct {
 	Params    Params
 	BucketID  int64
@@ -64,6 +64,21 @@ func (a *Account) Open() []Position {
 		return out[i].Side < out[j].Side
 	})
 	return out
+}
+
+// Withdraw lowers the cash by the sustainment allocation the store has booked out of the bucket
+// (platform brief, section 6). Like Fold and ApplySettlement it is applied only AFTER the ledger
+// has the transfer. It refuses more than the account holds in cash: the allocation is a share
+// of a gain that is already cash, never of what is committed to an open bet.
+func (a *Account) Withdraw(cents int64) error {
+	if cents < 0 {
+		return fmt.Errorf("withdraw %d cents from bucket %d: negative", cents, a.BucketID)
+	}
+	if cents > a.CashCents {
+		return fmt.Errorf("withdraw %d cents from bucket %d, which has %d", cents, a.BucketID, a.CashCents)
+	}
+	a.CashCents -= cents
+	return nil
 }
 
 // RanOut reports an account with less than the floor in cash and nothing open. An open position

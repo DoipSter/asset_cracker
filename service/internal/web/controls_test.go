@@ -84,20 +84,44 @@ func TestResetRequiresTheWords(t *testing.T) {
 	}
 }
 
-func TestResetHoldsThenReleases(t *testing.T) {
+func TestResetHoldsThenReleasesThenReloads(t *testing.T) {
 	f := &fakeControls{reset: store.ResetCounts{Buckets: 24, Orders: 12, Transfers: 40}}
 	var steps []string
 	mux := controlsMux(f, Control{
 		Hold:    func() { steps = append(steps, "hold") },
 		Release: func() { steps = append(steps, "release") },
 		Abort:   func() { steps = append(steps, "abort") },
+		Reload:  func(context.Context) (int, int, error) { steps = append(steps, "reload"); return 2, 2, nil },
 	})
 	rec := postJSON(mux, "/api/controls/reset", `{"confirm":" reset sim "}`)
-	if rec.Code != 200 || strings.Join(steps, ",") != "hold,release" || strings.Join(f.steps, ",") != "reset" {
+	if rec.Code != 200 || strings.Join(steps, ",") != "hold,release,reload" || strings.Join(f.steps, ",") != "reset" {
 		t.Fatalf("code %d engine %v db %v body %s", rec.Code, steps, f.steps, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"buckets":24`) {
-		t.Fatalf("body %s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, `"buckets":24`) || !strings.Contains(body, `"reloaded":true`) || !strings.Contains(body, `"held":2`) {
+		t.Fatalf("body %s", body)
+	}
+}
+
+// With no engine in the process the reset still empties the books; the next start seeds.
+func TestResetWithoutAnEngine(t *testing.T) {
+	f := &fakeControls{reset: store.ResetCounts{Buckets: 1}}
+	rec := postJSON(controlsMux(f, Control{}), "/api/controls/reset", `{"confirm":"reset sim"}`)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"effective":"next-start"`) {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A reload that fails after the wipe is not a failed reset: the books are empty, the engine
+// heals on its own, and the page is told.
+func TestResetReportsAReloadThatDidNotFinish(t *testing.T) {
+	f := &fakeControls{reset: store.ResetCounts{Buckets: 3}}
+	mux := controlsMux(f, Control{
+		Reload: func(context.Context) (int, int, error) { return 0, 0, errors.New("the ledger could not be read") },
+	})
+	rec := postJSON(mux, "/api/controls/reset", `{"confirm":"reset sim"}`)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"effective":"heal"`) || !strings.Contains(rec.Body.String(), `"buckets":3`) {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -118,10 +142,12 @@ func TestResetFailureLetsTheEngineRebuild(t *testing.T) {
 func TestOrdersVersionAndPolicy(t *testing.T) {
 	f := &fakeControls{}
 	applied := ""
+	reloads := 0
 	mux := controlsMux(f, Control{
 		EnvOn:  true,
 		Apply:  func(on bool) string { applied = map[bool]string{true: "on", false: "off"}[on]; return "now" },
 		Status: func() (bool, string) { return false, "now" },
+		Reload: func(context.Context) (int, int, error) { reloads++; return 1, 1, nil },
 	})
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/controls", nil))
@@ -133,16 +159,16 @@ func TestOrdersVersionAndPolicy(t *testing.T) {
 		t.Fatalf("orders %d saved %v applied %s", rec.Code, f.ordersSaved, applied)
 	}
 	rec = postJSON(mux, "/api/controls/version", `{"id":7,"status":"probation"}`)
-	if rec.Code != 200 || f.statusSaved != "probation" {
-		t.Fatalf("approve %d %s", rec.Code, rec.Body.String())
+	if rec.Code != 200 || f.statusSaved != "probation" || reloads != 1 || !strings.Contains(rec.Body.String(), `"ordering":1`) {
+		t.Fatalf("approve %d reloads %d %s", rec.Code, reloads, rec.Body.String())
 	}
 	rec = postJSON(mux, "/api/controls/version", `{"id":7,"status":"draft"}`)
-	if rec.Code != 400 {
-		t.Fatalf("draft %d", rec.Code)
+	if rec.Code != 400 || reloads != 1 {
+		t.Fatalf("draft %d reloads %d", rec.Code, reloads)
 	}
 	rec = postJSON(mux, "/api/controls/version", `{"id":9,"status":"retired"}`)
-	if rec.Code != 404 {
-		t.Fatalf("missing %d %s", rec.Code, rec.Body.String())
+	if rec.Code != 404 || reloads != 1 {
+		t.Fatalf("missing %d reloads %d %s", rec.Code, reloads, rec.Body.String())
 	}
 	rec = postJSON(mux, "/api/controls/policy", `{"winnings_bps":10001,"replenish_bps":0,"tax_bps":0,"fees_bps":0}`)
 	if rec.Code != 400 || f.policySaved {

@@ -107,17 +107,15 @@ func Run(version string) error {
 	} else if set {
 		ordersOn = saved
 	}
+	// One runner, always: with nothing held it is observe-only, and the buckets page can
+	// reload it into a trial without a process start.
 	run3, err := runner.NewRunner3(ctx, runner.WrapStore3(db, faults), coins, runner.Options3{On: ordersOn, DatabaseName: cfg.DatabaseName()})
 	if err != nil {
 		return err
 	}
-	held := []int64{}
-	if run3 != nil {
-		held = run3.BucketIDs()
-		run3.Seed(ctx, client, cfg.UserAgent)
-		wg.Add(1)
-		go func() { defer wg.Done(); run3.Run(ctx) }()
-	}
+	run3.Seed(ctx, client, cfg.UserAgent)
+	wg.Add(1)
+	go func() { defer wg.Done(); run3.Run(ctx) }()
 
 	var ticksWritten atomic.Int64
 	if len(products) > 0 {
@@ -229,21 +227,16 @@ func Run(version string) error {
 	}
 
 	src := web.Sources{Release: version}
-	capital := ledgerCapital(db, held)
+	capital := ledgerCapital(db, run3.BucketIDs) // asked each time: a reload changes the held set
 	src.Books = func() ([]runner.Book, store.Capital, bool) {
 		cap, ok := capital()
-		if run3 == nil {
-			return nil, cap, ok
-		}
 		book := runner.Book{Engine: "v3", Halted: "a panic escaped the engine's Book"}
 		safely("book", func() { book = run3.Book() })
 		return []runner.Book{book}, cap, ok
 	}
 	src.Markers = func(coin string, since float64) []runner.Marker {
 		var out []runner.Marker
-		if run3 != nil {
-			safely("markers", func() { out = run3.Markers(coin, since) })
-		}
+		safely("markers", func() { out = run3.Markers(coin, since) })
 		return out
 	}
 	for _, in := range instruments {
@@ -327,42 +320,20 @@ func Run(version string) error {
 		func(mux *http.ServeMux) {
 			web.Routes(mux, db, cfg.UserAgent, func() map[string]any {
 				doc, _ := live(context.Background())
-				if run3 != nil {
-					sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-					doc["engine"] = run3.Snapshot(sctx)
-					cancel()
-				} else {
-					doc["engine"] = map[string]any{"state": "absent", "on": ordersOn, "reason": "no tradable series"}
-				}
+				sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				doc["engine"] = run3.Snapshot(sctx)
+				cancel()
 				return doc
 			}, src, web.Control{
-				EnvOn: cfg.V3,
-				Status: func() (bool, string) {
-					if run3 == nil {
-						return false, "next-start"
-					}
-					return run3.OrdersStatus()
-				},
-				Apply: func(on bool) string {
-					if run3 == nil {
-						return "next-start"
-					}
-					return run3.SetOrders(on)
-				},
-				Hold: func() {
-					if run3 != nil {
-						run3.HoldForReset()
-					}
-				},
-				Release: func() {
-					if run3 != nil {
-						run3.ReleaseAfterReset()
-					}
-				},
-				Abort: func() {
-					if run3 != nil {
-						run3.AbortReset()
-					}
+				EnvOn:   cfg.V3,
+				Status:  run3.OrdersStatus,
+				Apply:   run3.SetOrders,
+				Hold:    run3.HoldForReset,
+				Release: run3.ReleaseAfterReset,
+				Abort:   run3.AbortReset,
+				Reload: func(rctx context.Context) (int, int, error) {
+					report, err := run3.Reload(rctx)
+					return report.Held, report.MayOrder, err
 				},
 			})
 			web.AnalysisRoutes(ctx, mux, db, gate)

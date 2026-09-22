@@ -4,9 +4,16 @@ The Asset Cracker service, in Go. See `docs/platform-brief.md` for where it is g
 
 **Today it records market data and runs one live engine (integer cents, paper broker) in simulation.**
 v1 and v2 are frozen archives, imported only by `cmd/replay` and `cmd/replay2`. There is no order
-code and there are no credentials. The pages are served on localhost. The buckets page can turn
-new orders on or off, approve or retire a version-3 strategy, set the allocation rates, and reset
-the simulated books. Every ledger account is `sim`.
+code and there are no credentials. The pages are served on localhost. Every ledger account is `sim`.
+
+The buckets page is the operator's desk for the paper fund: turn new orders on or off; approve or
+retire a version-3 strategy, which seeds a fresh $1,000 bucket or holds one settle-only at once,
+without a process start (`Runner3.Reload`); set the four sustainment allocation rates, taken at
+settlement from a bucket's gain above its high-water mark; and reset the simulated books, which
+empties them and starts again from the approved versions. A bucket that loses its last bet with
+less than the floor left is closed at that settlement: reaped into replenishment, frozen, not
+replaced. No version-3 strategy exists until `cmd/measure3` has measured its numbers
+(`docs/v3-measurement-protocol.md`), so the fund runs empty until then.
 
 | Package | |
 |---|---|
@@ -14,7 +21,7 @@ the simulated books. Every ledger account is `sim`.
 | `internal/app` | Start ingest, one runner, HTTP |
 | `internal/engine` | The live kalshi15m engine: pure `Decide` / `Fold`, integer cents |
 | `internal/broker` | Paper fills from the recorded book |
-| `internal/runner` | The live runner (Runner3) |
+| `internal/runner` | The live runner (Runner3): load and reload of the held set, steps, settlements, the sustainment allocation, the run-out close |
 | `internal/config` | Settings from the environment, with defaults that suit the Pi |
 | `internal/store` | Postgres access (pgx). Imports none of our packages |
 | `internal/analysis` | Promotion-gate figures; maps store reads into facts |
@@ -56,11 +63,11 @@ amber glow after a bet, and dragging a frameless window.
 
     assetcracker mcp       # the read surface on stdin/stdout; nothing else runs
 
-The repository's `.cursor/mcp.json` runs that over SSH against the dev database on the Pi, so
-Cursor's agent can call `instruments`, `candles`, `bars`, `book`, `markets`, `returns_summary`,
-`vol_profile`, `momentum_grid`, `features` and `analysis_results` directly. It needs the dev
-build from `deploy/pi/deploy.sh`. What each tool returns, and what it deliberately cannot do, is
-in `docs/mcp-read-surface.md`.
+The repository's `.cursor/mcp.json` runs that over SSH against the record (`assetcracker`) on
+the Pi, as `assetcracker_ro`, so Cursor's agent can call `instruments`, `candles`, `bars`,
+`book`, `markets`, `returns_summary`, `vol_profile`, `momentum_grid`, `features` and
+`analysis_results` directly. It uses the release binary. What each tool returns, and what it
+deliberately cannot do, is in `docs/mcp-read-surface.md`.
 
 ## Settings
 
@@ -85,12 +92,9 @@ a warning, so a mistyped variable never makes a looser gate. The rule they set i
     tools/guard-frozen.sh      # frozen v1/v2 archives must not change unless AC_ALLOW_LEGACY=1
     deploy/pi/deploy.sh        # test, cross-compile for linux/arm64, copy to /opt/assetcracker
 
-Run it by hand on the Pi against the dev database, as `acdeploy`:
-
-    AC_DATABASE_URL='postgres:///assetcracker_dev?host=/var/run/postgresql' /opt/assetcracker/assetcracker
-
-There is no systemd unit yet. Installing one needs an admin on the Pi, and the real database
-needs its roles sorted first (the service should not own the tables: see `db/README.md`).
+The running service is the systemd unit on the Pi, database `assetcracker`. It refuses to start
+against a scratch database (`*_dev`): that database rehearses migrations and constraint tests
+and is not a second market. See `docs/deployment.md`.
 
 ## The strategy port and its parity gate
 

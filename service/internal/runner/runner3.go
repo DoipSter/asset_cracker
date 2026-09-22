@@ -35,8 +35,10 @@ import (
 //     Memory can be BEHIND it (a write timed out and committed anyway), and then the engine is
 //     SUSPENDED: it writes nothing at all, settlements included, until a rebuild from the
 //     database has succeeded. There is no permanent halt.
-//   - Which buckets the engine holds is decided ONCE, in NewRunner3, and never changes while the
-//     service runs.
+//   - Which buckets the engine holds is decided by ONE function, load: at start, and again at
+//     each Reload (the buckets page's reset and its version approvals). Between two loads the
+//     held set shrinks only when a bucket that ran out is closed. Every reader that runs without
+//     r.mu copies the held set under r.mu first.
 //   - "Is held" and "may order" are separate. A held bucket is valued and SETTLED whatever AC_V3
 //     or its version's status says; those gate new orders only.
 
@@ -91,8 +93,9 @@ const (
 	stateSuspended = "suspended"
 )
 
-// bucket3 is one held bucket and what was decided about it at start. Immutable once NewRunner3
-// has returned, so the rebuild may read it outside the lock.
+// bucket3 is one held bucket and what was decided about it by the load that brought it in. A
+// bucket3 value is never changed; the SLICE holding them is replaced under r.mu by a Reload or
+// shortened by a close, so a reader working outside the lock copies the slice under r.mu first.
 type bucket3 struct {
 	store.HeldBucket
 	params   k3.Params
@@ -132,17 +135,16 @@ type Runner3 struct {
 	opts    Options3
 	coins   map[string]Coin3 // by coin
 	model   *k3.Model        // its own mutex; never touched under a database call
-	buckets []bucket3        // fixed after NewRunner3
-	ids     []int64          // their ids, fixed likewise
+	buckets []bucket3        // the held set: replaced by a load, shortened by a close; under mu
+	ids     []int64          // their ids; under mu likewise
 
-	// What NewRunner3 decided about the approved versions, kept so that /api/status can say why a
-	// version is not trading instead of guessing. Fixed once NewRunner3 has returned, so they are
-	// read without a lock, like buckets.
-	refused map[int64]string // version id -> why vet refused it at this start
-	seeded  map[int64]bool   // version ids whose names were handed to EnsureSimSetup at this start
+	// What the last load decided about the approved versions, kept so that /api/status can say
+	// why a version is not trading instead of guessing. Replaced whole by a load; under mu.
+	refused map[int64]string // version id -> why vet refused it at the last load
+	seeded  map[int64]bool   // version ids whose names were handed to EnsureSimSetup at the last load
 
-	plumbing   bool // the engine is built with NewPlumbingEngine: dev only
-	feePerFill bool
+	plumbing   bool // the engine is built with NewPlumbingEngine: dev only; under mu
+	feePerFill bool // under mu
 
 	// ordersLive is the buckets-page switch for NEW orders. It starts as opts.On and can
 	// change while the process runs. Off makes the next look send nothing. On resumes
@@ -178,6 +180,7 @@ type Runner3 struct {
 	entryPrice map[string]float64 // bucket|ticker|side -> the coin's price at the first buy; lost on restart
 	lastSweep  time.Time
 	rebuilt    rebuildReport
+	hwm        map[int64]int64 // bucket id -> the allocator's high-water mark, in cents
 
 	// panicNote carries a recovered panic from an entry point that may not wait on mu to the next
 	// holder of mu, which suspends v3 with it. Book() shows it at once.
@@ -236,51 +239,44 @@ func (o Options3) vet(raw json.RawMessage) (p k3.Params, plumbing bool, err erro
 	return p, true, nil
 }
 
-// NewRunner3 decides, once, what the third engine holds and what may order, and rebuilds its
-// memory from the database. main calls it BEFORE NewRunner2 and hands BucketIDs() to it, so that
-// the second engine's first capital read already counts a freshly seeded v3 bucket as held.
-//
-// It returns (nil, nil) when there is nothing for a third engine to be: AC_V3 off and no v3
-// bucket. The service then behaves exactly as it did before this file existed (EnsureSimSetup
-// was still called, with no names, which creates no bucket and moves no money).
-//
-// It returns an error, and the service does not start, only when it cannot FIND OUT what it
-// holds (plan 5.4, D19): a v3 bucket that may hold a bet must not run unheld. A database that
-// cannot answer these reads will not let NewRunner2 start either.
-//
-// A first rebuild that fails is not an error: the runner is returned SUSPENDED with its bucket
-// ids known, Run heals it, and nothing is swept or closed at this start. A PANIC in the first
-// rebuild, the start-up sweep or the close is treated exactly the same way (firstRebuild): the
-// same rows that at run time would merely suspend v3 must not crash the process at every start
-// and so keep v1 and v2 down in a restart loop, with AC_V3 off too (a held bucket is rebuilt
-// whatever AC_V3 says).
-func NewRunner3(ctx context.Context, db Store3, coins []Coin3, opts Options3) (*Runner3, error) {
-	r := &Runner3{db: db, opts: opts, coins: map[string]Coin3{}, views: map[string]seenView{}, quotes: map[string]seenQuotes{},
-		last: map[string]string{}, lastAt: map[string]float64{}, entryPrice: map[string]float64{},
-		refused: map[int64]string{}, seeded: map[int64]bool{}, writeBudget: writeBudget3,
-		state: stateSuspended, reason: "starting: memory has not been rebuilt from the database yet"}
-	r.ordersLive.Store(opts.On)
-	r.since = r.now()
+// loaded3 is what one load decided: the held set and everything that was read about it. It is
+// built outside r.mu and swapped in whole under it (applyLocked).
+type loaded3 struct {
+	setup      store.SimSetup
+	buckets    []bucket3
+	ids        []int64
+	refused    map[int64]string
+	seeded     map[int64]bool
+	plumbing   bool
+	feePerFill bool
+	driftTol   float64
+	hwm        map[int64]int64 // bucket id -> high-water mark in cents (allocator)
+}
 
-	// 1. The names to seed: the approved versions, and only with AC_V3 on. Each is vetted BEFORE
-	//    EnsureSimSetup, because that function seeds $1,000 into a bucket for any name it is given.
+// load is steps 1 and 2 of a start: vet the approved versions, seed a bucket for each (once),
+// and read every held bucket. NewRunner3 runs it first; Reload runs it again while the service
+// runs. It creates nothing but the buckets EnsureSimSetup seeds for the names it is handed.
+func (o Options3) load(ctx context.Context, db Store3, on bool) (*loaded3, error) {
+	l := &loaded3{refused: map[int64]string{}, seeded: map[int64]bool{}, hwm: map[int64]int64{}}
+
+	// 1. The names to seed: the approved versions, and only with new orders on. Each is vetted
+	//    BEFORE EnsureSimSetup, because that function seeds $1,000 into a bucket for any name it is given.
 	ordering := map[int64]bool{} // strategy_version.id -> may order
 	plumb := map[int64]bool{}
-	refused := r.refused
 	var names []string
-	if opts.On {
+	if on {
 		versions, err := db.TradableVersions(ctx, family3, version3)
 		if err != nil {
 			return nil, fmt.Errorf("v3 tradable versions: %w", err)
 		}
 		for _, v := range versions {
-			_, plumbing, err := opts.vet(v.Params)
+			_, plumbing, err := o.vet(v.Params)
 			if err != nil {
-				refused[v.ID] = err.Error()
+				l.refused[v.ID] = err.Error()
 				slog.Error("v3 will NOT trade this version", "strategy", v.Name, "version_id", v.ID, "why", err)
 				continue
 			}
-			ordering[v.ID], plumb[v.ID], r.seeded[v.ID] = true, plumbing, true
+			ordering[v.ID], plumb[v.ID], l.seeded[v.ID] = true, plumbing, true
 			names = append(names, v.Name)
 		}
 	}
@@ -290,16 +286,12 @@ func NewRunner3(ctx context.Context, db Store3, coins []Coin3, opts Options3) (*
 	if err != nil {
 		return nil, fmt.Errorf("v3 sim setup: %w", err)
 	}
-	r.setup = setup
+	l.setup = setup
 
 	// 2. What is held: every sim bucket of the family's version 3 that is not frozen.
 	held, err := db.HeldBuckets(ctx, family3, version3)
 	if err != nil {
 		return nil, fmt.Errorf("v3 held buckets: %w", err)
-	}
-	if !opts.On && len(held) == 0 {
-		slog.Info("v3 is absent: AC_V3 is off and no v3 bucket exists")
-		return nil, nil
 	}
 	// The model takes ONE drift tolerance (it is a property of the model, the same for every
 	// version): a real version's if there is one, else a plumbing version's, else 0, under which
@@ -308,12 +300,12 @@ func NewRunner3(ctx context.Context, db Store3, coins []Coin3, opts Options3) (*
 	for _, h := range held {
 		b := bucket3{HeldBucket: h}
 		switch {
-		case !opts.On:
-			b.whyNot = "AC_V3 is off: settle-only"
+		case !on:
+			b.whyNot = "new orders are off: settle-only"
 		case h.VersionStatus != "probation" && h.VersionStatus != "active":
 			b.whyNot = "its version is " + h.VersionStatus + ": settle-only"
 		case !ordering[h.VersionID]:
-			b.whyNot = "refused: " + refused[h.VersionID]
+			b.whyNot = "refused: " + l.refused[h.VersionID]
 		default:
 			b.mayOrder, b.plumbing = true, plumb[h.VersionID]
 		}
@@ -328,16 +320,70 @@ func NewRunner3(ctx context.Context, db Store3, coins []Coin3, opts Options3) (*
 			} else if !b.plumbing && realTol == nil {
 				realTol = &tol
 			}
-			r.plumbing = r.plumbing || b.plumbing
-			r.feePerFill = r.feePerFill || b.params.FeePerFill // one Paper serves every bucket: the pessimistic reading wins
+			l.plumbing = l.plumbing || b.plumbing
+			l.feePerFill = l.feePerFill || b.params.FeePerFill // one Paper serves every bucket: the pessimistic reading wins
 		}
-		r.buckets, r.ids = append(r.buckets, b), append(r.ids, h.ID)
+		// The allocator's mark: the bucket's last recorded high, else what it was seeded with.
+		mark, ok, err := db.HighWaterMark(ctx, h.ID)
+		if err != nil {
+			return nil, fmt.Errorf("v3 high-water mark of bucket %d: %w", h.ID, err)
+		}
+		if !ok {
+			mark = seed3Cents
+		}
+		l.hwm[h.ID] = mark
+		l.buckets, l.ids = append(l.buckets, b), append(l.ids, h.ID)
 	}
-	driftTol := 0.0
 	if realTol != nil {
-		driftTol = *realTol
+		l.driftTol = *realTol
 	} else if plumbTol != nil {
-		driftTol = *plumbTol
+		l.driftTol = *plumbTol
+	}
+	return l, nil
+}
+
+// applyLocked swaps a load in: the held set, what was decided about the versions, and an EMPTY
+// engine and Paper for the rebuild to fill. Everything that named a bucket or a round is
+// cleared; the model and the chart markers are kept. Callers hold r.mu and have suspended v3.
+func (r *Runner3) applyLocked(l *loaded3) {
+	r.setup = l.setup
+	r.buckets, r.ids = l.buckets, l.ids
+	r.refused, r.seeded = l.refused, l.seeded
+	r.plumbing, r.feePerFill = l.plumbing, l.feePerFill
+	r.hwm = l.hwm
+	r.engine, _ = k3.NewEngine()
+	r.paper = r.newPaper()
+	r.pendingIDs, r.probe = nil, nil
+	r.entryPrice = map[string]float64{}
+	r.quotes = map[string]seenQuotes{}
+	r.last = map[string]string{}
+	r.lastAt = map[string]float64{}
+	r.gen++
+}
+
+// NewRunner3 decides what the third engine holds and what may order (load), and rebuilds its
+// memory from the database. It always returns a runner: with nothing held and orders off the
+// engine is observe-only, and the buckets page can still reload it into a trial.
+//
+// It returns an error, and the service does not start, only when it cannot FIND OUT what it
+// holds (plan 5.4, D19): a v3 bucket that may hold a bet must not run unheld.
+//
+// A first rebuild that fails is not an error: the runner is returned SUSPENDED with its bucket
+// ids known, Run heals it, and nothing is swept or closed at this start. A PANIC in the first
+// rebuild, the start-up sweep or the close is treated exactly the same way (firstRebuild): the
+// same rows that at run time would merely suspend v3 must not crash the process at every start
+// and so keep it down in a restart loop (a held bucket is rebuilt whatever the switch says).
+func NewRunner3(ctx context.Context, db Store3, coins []Coin3, opts Options3) (*Runner3, error) {
+	r := &Runner3{db: db, opts: opts, coins: map[string]Coin3{}, views: map[string]seenView{}, quotes: map[string]seenQuotes{},
+		last: map[string]string{}, lastAt: map[string]float64{}, entryPrice: map[string]float64{},
+		refused: map[int64]string{}, seeded: map[int64]bool{}, hwm: map[int64]int64{}, writeBudget: writeBudget3,
+		state: stateSuspended, reason: "starting: memory has not been rebuilt from the database yet"}
+	r.ordersLive.Store(opts.On)
+	r.since = r.now()
+
+	l, err := opts.load(ctx, db, opts.On)
+	if err != nil {
+		return nil, err
 	}
 	var order []string
 	cal := map[string]k3.Calibration{}
@@ -345,7 +391,7 @@ func NewRunner3(ctx context.Context, db Store3, coins []Coin3, opts Options3) (*
 		order = append(order, c.Coin)
 		cal[c.Coin], r.coins[c.Coin] = c.Cal, c
 	}
-	if r.model, err = k3.NewModel(order, cal, driftTol); err != nil {
+	if r.model, err = k3.NewModel(order, cal, l.driftTol); err != nil {
 		return nil, fmt.Errorf("v3 model: %w", err)
 	}
 	var saved savedState3
@@ -356,9 +402,7 @@ func NewRunner3(ctx context.Context, db Store3, coins []Coin3, opts Options3) (*
 			r.model.SeedOffsets(coin, offsets)
 		}
 	}
-	// An empty engine and Paper, so that nothing is nil while v3 waits for its first rebuild.
-	r.engine, _ = k3.NewEngine()
-	r.paper = r.newPaper()
+	r.applyLocked(l) // nothing else can see r yet: no lock needed
 
 	// 3 to 5: the rebuild, the start-up sweep and the close, fenced against a panic.
 	sctx, cancel := context.WithTimeout(ctx, startBudget3)
@@ -366,6 +410,68 @@ func NewRunner3(ctx context.Context, db Store3, coins []Coin3, opts Options3) (*
 	r.firstRebuild(sctx)
 	slog.Info("v3 ready", "on", opts.On, "held", len(r.buckets), "may_order", r.mayOrderCount(), "plumbing", r.plumbing, "state", r.state)
 	return r, nil
+}
+
+// ReloadReport is what a Reload found: how many buckets are held and how many may order.
+type ReloadReport struct {
+	Held, MayOrder int
+}
+
+// Reload is a start without a process start: the buckets page calls it after the simulated
+// books were reset, and after a version was approved or retired. It suspends v3, runs load
+// again with the orders switch as it is now, swaps the held set in, and rebuilds, sweeps and
+// closes as NewRunner3 does. A version approved a moment ago is seeded and trades on the next
+// look; a version retired a moment ago holds its bucket settle-only.
+//
+// While it runs no rebuild can start from the old ids (healAfter is pushed an hour out, as the
+// reset does), Step and Settled see "suspended" and do nothing, and Book reports Halted, so the
+// value snapshots refuse the minute rather than write a book that is between two loads. If the
+// load fails the old held set stays and Tick heals it; if the rebuild fails the new set stays,
+// suspended, and Tick heals that. The model keeps its learned offsets and its drift tolerance
+// from the first load (the gate is open with no reference engine, so the number decides nothing).
+func (r *Runner3) Reload(ctx context.Context) (report ReloadReport, err error) {
+	defer func() {
+		if r.caught("reload", recover()) {
+			err = errors.New("a panic during the reload; v3 rebuilds from what it holds")
+		}
+	}()
+	r.mu.Lock()
+	r.absorbLocked()
+	r.suspendLocked("reloading the books")
+	r.healAfter = r.now().Add(time.Hour)
+	r.mu.Unlock()
+	done := false
+	defer func() {
+		if !done {
+			r.mu.Lock()
+			if r.state == stateSuspended {
+				r.healAfter = r.now()
+			}
+			r.mu.Unlock()
+		}
+		r.notesMu.Lock()
+		r.notes = nil
+		r.notesMu.Unlock()
+	}()
+	l, err := r.opts.load(ctx, r.db, r.ordersLive.Load())
+	if err != nil {
+		return report, fmt.Errorf("reload: %w", err)
+	}
+	r.mu.Lock()
+	r.applyLocked(l)
+	report = ReloadReport{Held: len(r.buckets), MayOrder: r.mayOrderCount()}
+	r.mu.Unlock()
+	if err := r.rebuild(ctx); err != nil {
+		return report, fmt.Errorf("reload: %w", err)
+	}
+	r.sweep(ctx)
+	r.closeExhausted(ctx)
+	r.mu.Lock()
+	report = ReloadReport{Held: len(r.buckets), MayOrder: r.mayOrderCount()}
+	done = r.state != stateSuspended
+	r.mu.Unlock()
+	slog.Info("v3 reloaded", "held", report.Held, "may_order", report.MayOrder, "on", r.ordersLive.Load())
+	return report, nil
 }
 
 // firstRebuild is steps 3 to 5 of NewRunner3. It recovers a panic with the same mechanism as
@@ -403,18 +509,27 @@ func (r *Runner3) mayOrderCount() int {
 }
 
 // closeExhausted reaps and freezes, without restaking, every bucket that has run out NOW: ledger
-// cash under the floor AND nothing open, after the rebuild and the start-up sweep. It runs only
-// inside NewRunner3, before anything else can see the runner, which is the one moment the held
-// set may still shrink. A close that fails leaves the bucket held, exhausted, until the next start.
+// cash under the floor AND nothing open, after the rebuild and the sweep. NewRunner3 and Reload
+// call it at the end of a load; settleLocked calls the locked half after every settlement, so
+// a bucket that loses its last bet is closed then and not at the next start (platform brief,
+// section 5: closed, never topped up; frozen, not deleted; not replaced until a different
+// strategy is waiting). A close that fails leaves the bucket held, exhausted, until the next try.
 func (r *Runner3) closeExhausted(ctx context.Context) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	defer r.fenceLocked("start-up close")
+	r.closeExhaustedLocked(ctx)
+}
+
+// closeExhaustedLocked is closeExhausted under a lock the caller holds. Never while suspended:
+// an account's cash is then not known to be the ledger's.
+func (r *Runner3) closeExhaustedLocked(ctx context.Context) {
 	if r.state == stateSuspended {
 		return
 	}
 	var keep []bucket3
 	var accounts []*k3.Account
+	var closed bool
 	for _, b := range r.buckets {
 		a := r.engine.Account(b.ID)
 		if a == nil || !a.RanOut() {
@@ -425,14 +540,19 @@ func (r *Runner3) closeExhausted(ctx context.Context) {
 			continue
 		}
 		reason := fmt.Sprintf("ran out: %d cents left and nothing open", a.CashCents)
-		if _, err := r.db.CloseBucket(ctx, r.setup, b.SimBucket, reason, false, 0, 0); err != nil {
+		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.writeBudget)
+		_, err := r.db.CloseBucket(wctx, r.setup, b.SimBucket, reason, false, 0, 0)
+		cancel()
+		if err != nil {
 			slog.Error("v3 could not close a bucket that ran out; it stays held and exhausted", "bucket", b.Name, "err", err)
 			keep, accounts = append(keep, b), append(accounts, a)
 			continue
 		}
+		closed = true
+		delete(r.hwm, b.ID)
 		slog.Warn("v3 bucket ran out: reaped, frozen, not replaced", "bucket", b.Name, "left_cents", a.CashCents)
 	}
-	if len(keep) == len(r.buckets) {
+	if !closed {
 		return
 	}
 	engine, err := r.newEngine(accounts)
@@ -454,8 +574,17 @@ func (r *Runner3) newEngine(accounts []*k3.Account) (*k3.Engine, error) {
 	return k3.NewEngine(accounts...)
 }
 
-// BucketIDs is the ids of the buckets v3 holds. Fixed once NewRunner3 has returned.
-func (r *Runner3) BucketIDs() []int64 { return append([]int64{}, r.ids...) }
+// BucketIDs is the ids of the buckets v3 holds right now. It waits on r.mu.
+func (r *Runner3) BucketIDs() []int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int64{}, r.ids...)
+}
+
+// heldLocked is a copy of the held set for a reader that goes on without the lock.
+func (r *Runner3) heldLocked() ([]int64, []bucket3) {
+	return append([]int64{}, r.ids...), append([]bucket3{}, r.buckets...)
+}
 
 // savedState3 is all the third engine saves: what the ledger cannot know.
 type savedState3 struct {
@@ -971,6 +1100,87 @@ func (r *Runner3) settleLocked(ctx context.Context, marketID int64, ticker, resu
 	r.gen++
 	r.forgetLocked(ticker)
 	r.noteEvents(events, 0, unix(r.now()))
+	// The lifecycle, after the money has moved: the allocation on any gain above high water,
+	// then the close of a bucket that has run out.
+	r.allocateLocked(ctx)
+	r.closeExhaustedLocked(ctx) // returns at once if the allocation suspended v3
+}
+
+// openCost is what an account has committed to open bets, at cost.
+func openCost(a *k3.Account) int64 {
+	var cents int64
+	for _, p := range a.Open() {
+		cents += p.CostCents
+	}
+	return cents
+}
+
+// allocateLocked is the sustainment allocation (platform brief, section 6), ported from the
+// second engine's runner: the newest policy's share of each bucket's gain above its high-water
+// mark, taken at settlement. Book value is cash plus open bets at cost, so money merely tied up
+// is not skimmed, and a bucket climbing back from a loss is not charged twice on the same
+// dollars. A bucket is skimmed only once every round that has CLOSED is settled for it: the coins
+// settle seconds apart, and a gain after the first can be a loss after the last. What is taken
+// leaves the account's cash AFTER the ledger has the transfer, never before; with every rate at
+// zero the new mark is still recorded and nothing moves. Callers hold r.mu.
+func (r *Runner3) allocateLocked(ctx context.Context) {
+	now := k3.UnixSeconds(r.now())
+	var due []*k3.Account
+	for _, a := range r.engine.Accounts {
+		pending := false
+		for _, p := range a.Open() {
+			if p.Close <= now {
+				pending = true
+				break
+			}
+		}
+		if pending || a.CashCents+openCost(a) <= r.hwm[a.BucketID] {
+			continue
+		}
+		due = append(due, a)
+	}
+	if len(due) == 0 {
+		return
+	}
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.writeBudget)
+	defer cancel()
+	policy, err := r.db.CurrentSkimPolicy(wctx)
+	if err != nil {
+		slog.Warn("v3 could not read the allocation rates; the allocation waits for the next settlement", "err", err)
+		return
+	}
+	for _, a := range due {
+		b := r.bucket(a.BucketID)
+		if b == nil {
+			continue
+		}
+		book, mark := a.CashCents+openCost(a), r.hwm[a.BucketID]
+		gain := book - mark
+		k := store.Skim{Bucket: b.SimBucket, Policy: policy, BookCents: book, HWMBefore: mark,
+			Winnings: gain * policy.Winnings / 10000, Replenish: gain * policy.Replenish / 10000, Tax: gain * policy.Tax / 10000, Fees: gain * policy.Fees / 10000}
+		if k.Taken() > a.CashCents {
+			continue // the gain is tied up in open bets: take it when it is cash
+		}
+		if err := r.db.RecordSkim(wctx, r.setup, k); err != nil {
+			if k.Taken() == 0 {
+				slog.Warn("v3 could not record a high-water mark; no money was in it", "bucket", b.Name, "err", err)
+				continue
+			}
+			// Money was in it and the outcome is not known: memory may now be behind the ledger.
+			// Suspend; the rebuild reads the cash and the mark from the ledger.
+			r.suspendLocked(fmt.Sprintf("recording the sustainment allocation from %s: %v", b.Name, err))
+			return
+		}
+		if err := a.Withdraw(k.Taken()); err != nil {
+			r.suspendLocked("after the sustainment allocation: " + err.Error())
+			return
+		}
+		r.hwm[a.BucketID] = book - k.Taken()
+		r.gen++
+		if k.Taken() > 0 {
+			slog.Info("sustainment allocation", "engine", "v3", "bucket", b.Name, "gain_cents", gain, "winnings", k.Winnings, "replenishment", k.Replenish, "tax", k.Tax, "fees", k.Fees)
+		}
+	}
 }
 
 func (r *Runner3) forgetLocked(ticker string) {
@@ -1148,17 +1358,15 @@ func (r *Runner3) sweep(ctx context.Context) {
 // is simply repeated next minute. A difference suspends, and the rebuild reads the truth: this
 // is what catches a commit that landed later than every other guard looked.
 func (r *Runner3) cashCheck(ctx context.Context) {
-	if len(r.ids) == 0 {
-		return
-	}
 	r.mu.Lock()
 	r.absorbLocked()
 	gen, suspended := r.gen, r.state == stateSuspended
+	ids, _ := r.heldLocked()
 	r.mu.Unlock()
-	if suspended {
+	if suspended || len(ids) == 0 {
 		return
 	}
-	ledger, err := r.db.BucketCash(ctx, r.ids)
+	ledger, err := r.db.BucketCash(ctx, ids)
 	if err != nil {
 		slog.Warn("v3 cash check could not read the ledger; it tries again next minute", "err", err)
 		return
@@ -1252,15 +1460,18 @@ func (r *Runner3) rebuild(ctx context.Context) (err error) {
 	started := r.now()
 	var gen uint64
 	var pending []string
+	var ids []int64
+	var buckets []bucket3
 	func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		defer r.fenceLocked("rebuild")
 		r.absorbLocked()
 		gen, pending = r.gen, append([]string{}, r.pendingIDs...)
+		ids, buckets = r.heldLocked() // a Reload that swaps the set meanwhile also moves gen
 	}()
 
-	got, err := r.read(ctx, pending)
+	got, err := r.read(ctx, pending, ids, buckets)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1291,33 +1502,33 @@ func (r *Runner3) rebuild(ctx context.Context) (err error) {
 	return err
 }
 
-// read is the rebuild's reads and its fold (plan 5.4, steps 1 to 7). It touches nothing of r
-// that can change.
-func (r *Runner3) read(ctx context.Context, pending []string) (*fresh, error) {
+// read is the rebuild's reads and its fold (plan 5.4, steps 1 to 7). It works on the copy of
+// the held set its caller took under r.mu, and touches nothing of r that can change.
+func (r *Runner3) read(ctx context.Context, pending []string, ids []int64, buckets []bucket3) (*fresh, error) {
 	out := &fresh{paper: r.newPaper()}
 	// 1. Cash: the ledger's sum IS CashCents. There is no saved cash to disagree with.
-	cash, err := r.db.BucketCash(ctx, r.ids)
+	cash, err := r.db.BucketCash(ctx, ids)
 	if err != nil {
 		return nil, fmt.Errorf("reading the buckets' cash: %w", err)
 	}
 	// 2. Fills: of markets with no result yet, and of lots that are NET open and never settled.
-	fills, err := r.db.BucketFills(ctx, r.ids)
+	fills, err := r.db.BucketFills(ctx, ids)
 	if err != nil {
 		return nil, fmt.Errorf("reading the fills: %w", err)
 	}
 	// The two reads are not one snapshot. If the cash moved between them (a late commit landing
 	// right now), the fills may or may not contain it: this attempt proves nothing. Try again.
-	again, err := r.db.BucketCash(ctx, r.ids)
+	again, err := r.db.BucketCash(ctx, ids)
 	if err != nil {
 		return nil, fmt.Errorf("reading the buckets' cash again: %w", err)
 	}
-	for _, id := range r.ids {
+	for _, id := range ids {
 		if cash[id] != again[id] {
 			return nil, fmt.Errorf("cash check: bucket %d's ledger cash moved from %d to %d cents while the rebuild was reading", id, cash[id], again[id])
 		}
 	}
-	accounts := make([]*k3.Account, 0, len(r.buckets))
-	for _, b := range r.buckets {
+	accounts := make([]*k3.Account, 0, len(buckets))
+	for _, b := range buckets {
 		accounts = append(accounts, k3.NewAccount(b.params, b.ID, cash[b.ID], b.mayOrder))
 	}
 	if out.engine, err = r.newEngine(accounts); err != nil {
@@ -1490,8 +1701,9 @@ func (r *Runner3) ReleaseAfterReset() {
 
 // Snapshot is the "v3" block of /api/status. It waits on r.mu (a status page may wait out a
 // write; a poller may not), and it asks the database, outside the lock, what the versions'
-// statuses are NOW, to compare them with what was loaded at start (restartNotes): a status
-// change takes effect at the next restart (D18).
+// statuses are NOW, to compare them with what the last load found (restartNotes): a status
+// change takes effect at the next load, which the buckets page runs after each of its own
+// approvals (Reload; D18 as amended).
 func (r *Runner3) Snapshot(ctx context.Context) map[string]any {
 	notes := r.restartNotes(ctx)
 	r.mu.Lock()
@@ -1548,20 +1760,21 @@ func (r *Runner3) Snapshot(ctx context.Context) map[string]any {
 	return doc
 }
 
-// restartNotes compares the versions' stored statuses with what the runner loaded at start, and
-// says, for each approved version that is not trading, WHY, from what NewRunner3 recorded rather
-// than by inference:
+// restartNotes compares the versions' stored statuses with what the last load found, and says,
+// for each approved version that is not trading, WHY, from what load recorded rather than by
+// inference:
 //
 //	"<name>: approved, but new orders are off"
-//	"<name>: refused at start: <why>: a restart alone will not change this"   vet said no at this start
-//	"<name>: its bucket ran out and is frozen: not traded, not replaced" seeded at this start, not held
-//	"<name>: approved, but the next start will refuse it: <why>"         approved while running; vet says no
-//	"<name>: approved, waiting for restart"                              approved while running; vet says yes
-//	"<strategy>: no longer tradable: settle-only after restart"          ordering now, no longer approved
+//	"<name>: refused at the last load: <why>: a reload alone will not change this"  vet said no
+//	"<name>: its bucket ran out and is frozen: not traded, not replaced"  seeded by the load, not held
+//	"<name>: approved, but the next load will refuse it: <why>"          approved since; vet says no
+//	"<name>: approved, waiting for a reload"                             approved since, outside the page; vet says yes
+//	"<strategy>: no longer tradable: settle-only after a reload"         ordering now, no longer approved
 //
-// A version seeded at this start with no bucket that may order can only have had its bucket
-// frozen (reaped at this start, or in an earlier one: EnsureSimSetup leaves a frozen bucket alone
-// and HeldBuckets skips it). A bucket whose close failed stays held and may order, so it is loaded.
+// The buckets page reloads after every approval it makes, so the last two are seen only when a
+// status was changed by hand in the database. A version seeded by a load with no bucket that may
+// order can only have had its bucket frozen (reaped by that load, or an earlier one: EnsureSimSetup
+// leaves a frozen bucket alone and HeldBuckets skips it). A bucket whose close failed stays held.
 func (r *Runner3) restartNotes(ctx context.Context) (notes []string) {
 	r.notesMu.Lock() // its own lock, held across this read: only status pages wait on it
 	defer r.notesMu.Unlock()
@@ -1578,7 +1791,11 @@ func (r *Runner3) restartNotes(ctx context.Context) (notes []string) {
 	}
 	now := map[int64]bool{}
 	loaded := map[int64]bool{}
-	for _, b := range r.buckets { // immutable: no lock needed
+	r.mu.Lock()
+	_, buckets := r.heldLocked()
+	refused, seeded := r.refused, r.seeded // replaced whole by a load, never written into
+	r.mu.Unlock()
+	for _, b := range buckets {
 		loaded[b.VersionID] = loaded[b.VersionID] || b.mayOrder
 	}
 	for _, v := range tradable {
@@ -1587,21 +1804,21 @@ func (r *Runner3) restartNotes(ctx context.Context) (notes []string) {
 		case loaded[v.ID]:
 		case !r.ordersLive.Load():
 			notes = append(notes, v.Name+": approved, but new orders are off")
-		case r.refused[v.ID] != "":
-			notes = append(notes, v.Name+": refused at start: "+r.refused[v.ID]+": a restart alone will not change this")
-		case r.seeded[v.ID]:
+		case refused[v.ID] != "":
+			notes = append(notes, v.Name+": refused at the last load: "+refused[v.ID]+": a reload alone will not change this")
+		case seeded[v.ID]:
 			notes = append(notes, v.Name+": its bucket ran out and is frozen: not traded, not replaced")
 		default:
 			if _, _, err := r.opts.vet(v.Params); err != nil {
-				notes = append(notes, v.Name+": approved, but the next start will refuse it: "+err.Error())
+				notes = append(notes, v.Name+": approved, but the next load will refuse it: "+err.Error())
 			} else {
-				notes = append(notes, v.Name+": approved, waiting for restart")
+				notes = append(notes, v.Name+": approved, waiting for a reload")
 			}
 		}
 	}
-	for _, b := range r.buckets {
+	for _, b := range buckets {
 		if b.mayOrder && !now[b.VersionID] {
-			notes = append(notes, b.Strategy+": no longer tradable: settle-only after restart")
+			notes = append(notes, b.Strategy+": no longer tradable: settle-only after a reload")
 		}
 	}
 	return notes

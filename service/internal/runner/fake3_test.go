@@ -12,8 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/doipster/asset_cracker/service/internal/coinbase"
-	"github.com/doipster/asset_cracker/service/internal/kalshi"
 	k3 "github.com/doipster/asset_cracker/service/internal/engine"
+	"github.com/doipster/asset_cracker/service/internal/kalshi"
 	"github.com/doipster/asset_cracker/service/internal/store"
 )
 
@@ -83,6 +83,8 @@ type fakeStore struct {
 	markets     map[int64]*fakeMarket
 	orders      []*fakeOrder
 	settlements []fakeSettlement
+	skims       []store.Skim // every recorded skim, in order; the newest hwm_after per bucket is the mark
+	policy      store.SkimPolicy
 	decisions   int
 	state       map[string][]byte
 	calls       map[string]int
@@ -97,7 +99,8 @@ type fakeStore struct {
 var fakeSetup = store.SimSetup{ActorID: 7, VenueLedgerID: 11, FeesLedgerID: 12, PoolLedgerID: 13, OwnersLedgerID: 14}
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{markets: map[int64]*fakeMarket{}, state: map[string][]byte{}, calls: map[string]int{}, on: map[string]func(int) behaviour{}, nextID: 1000}
+	return &fakeStore{markets: map[int64]*fakeMarket{}, state: map[string][]byte{}, calls: map[string]int{}, on: map[string]func(int) behaviour{}, nextID: 1000,
+		policy: store.SkimPolicy{ID: 1}} // every rate zero, as migration 0008 seeds it
 }
 
 func (s *fakeStore) id() int64 { s.nextID++; return s.nextID }
@@ -215,7 +218,27 @@ func (s *fakeStore) cash(b *fakeBucket) int64 {
 			c += x.row.PayoutCents
 		}
 	}
+	for _, k := range s.skims {
+		if k.Bucket.ID == b.ID {
+			c -= k.Taken()
+		}
+	}
 	return c
+}
+
+// wipe is reset_sim as the fake sees it: every sim bucket, order, settlement and skim goes;
+// the versions and the markets stay.
+func (s *fakeStore) wipe() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buckets, s.orders, s.settlements, s.skims, s.closed = nil, nil, nil, nil, nil
+}
+
+// setPolicy is the owner setting the four rates on the buckets page.
+func (s *fakeStore) setPolicy(winnings, replenish, tax, fees int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.policy = store.SkimPolicy{ID: int64(len(s.skims) + 2), Winnings: winnings, Replenish: replenish, Tax: tax, Fees: fees}
 }
 
 func (s *fakeStore) ledgerCash(bucketID int64) int64 {
@@ -566,6 +589,45 @@ func (s *fakeStore) CloseBucket(ctx context.Context, setup store.SimSetup, b sto
 	}
 	b.Frozen = true
 	return b, nil
+}
+
+func (s *fakeStore) HighWaterMark(ctx context.Context, bucketID int64) (int64, bool, error) {
+	if b := s.hook(ctx, "HighWaterMark"); b.err != nil {
+		return 0, false, b.err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.skims) - 1; i >= 0; i-- {
+		if k := s.skims[i]; k.Bucket.ID == bucketID {
+			return k.BookCents - k.Taken(), true, nil
+		}
+	}
+	return 0, false, nil
+}
+
+func (s *fakeStore) CurrentSkimPolicy(ctx context.Context) (store.SkimPolicy, error) {
+	if b := s.hook(ctx, "CurrentSkimPolicy"); b.err != nil {
+		return store.SkimPolicy{}, b.err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.policy, nil
+}
+
+func (s *fakeStore) RecordSkim(ctx context.Context, setup store.SimSetup, k store.Skim) error {
+	if b := s.hook(ctx, "RecordSkim"); b.err != nil {
+		return b.err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if setup.ActorID == 0 || setup.PoolLedgerID == 0 {
+		return errors.New("the fake foreign key: a skim needs the service actor and the pools")
+	}
+	if k.BookCents <= k.HWMBefore {
+		return errors.New("the fake check constraint: gain_cents > 0")
+	}
+	s.skims = append(s.skims, k)
+	return nil
 }
 
 func (s *fakeStore) SaveEngineState(ctx context.Context, series string, state any) error {
