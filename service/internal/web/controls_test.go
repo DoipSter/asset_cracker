@@ -111,10 +111,10 @@ func (f *fakeControls) ListPaydays(context.Context) ([]store.Payday, error) {
 }
 func (f *fakeControls) SchedulePayday(_ context.Context, amountCents int64, everyDays int, note string, now time.Time) (store.Payday, error) {
 	if amountCents <= 0 {
-		return store.Payday{}, store.PaydayRefused{"The amount must be above zero."}
+		return store.Payday{}, store.PaydayRefused{Why: "The amount must be above zero."}
 	}
 	if everyDays < 1 || everyDays > 366 {
-		return store.Payday{}, store.PaydayRefused{"The rhythm is a whole number of days, from 1 to 366."}
+		return store.Payday{}, store.PaydayRefused{Why: "The rhythm is a whole number of days, from 1 to 366."}
 	}
 	if f.bank.Name == "closed" {
 		return store.Payday{}, store.ErrNoOpenBank
