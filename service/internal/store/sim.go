@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -205,38 +206,99 @@ func (s *Store) CloseBucket(ctx context.Context, setup SimSetup, b SimBucket, re
 	next := b
 	next.Frozen, next.CashCents = true, 0
 	if restake {
-		base := b.Name
-		if i := strings.Index(base, " life "); i >= 0 {
-			base = base[:i]
-		}
-		next = SimBucket{Name: fmt.Sprintf("%s life %d", base, life), VersionID: b.VersionID, CashCents: seedCents}
-		if err := tx.QueryRow(ctx, `insert into ledger_account (kind, mode, name) values ('bucket', 'sim', $1) returning id`, next.Name+" cash").Scan(&next.LedgerAccountID); err != nil {
+		if next, err = seedLife(ctx, tx, setup, b, life, seedCents); err != nil {
 			return b, err
 		}
-		if err := tx.QueryRow(ctx, `insert into bucket (name, mode, venue_account_id, ledger_account_id, strategy_version_id, limits, tax_rate_bps)
-		                           values ($1, 'sim', $2, $3, $4, '{}', 0) returning id`, next.Name, setup.venueAccountID, next.LedgerAccountID, next.VersionID).Scan(&next.ID); err != nil {
-			return b, err
+	}
+	return next, tx.Commit(ctx)
+}
+
+// seedLife opens "<base> life N" for the same version as the frozen bucket `prev`, seeded from
+// the replenishment pool, and marks prev as replaced by it. Restarting a dead bucket is what the
+// pool is for; only what it cannot cover is brought in from outside, and that shortfall is
+// recorded as its own deposit. Inside the caller's transaction.
+func seedLife(ctx context.Context, tx pgx.Tx, setup SimSetup, prev SimBucket, life int, seedCents int64) (SimBucket, error) {
+	transfer := func(reason, memo string, from, to, cents int64) error {
+		var id int64
+		if err := tx.QueryRow(ctx, `insert into ledger_transfer (mode, reason, memo, created_by) values ('sim', $1, $2, $3) returning id`,
+			reason, memo, setup.ActorID).Scan(&id); err != nil {
+			return err
 		}
-		// Restarting a dead bucket is what the replenishment pool is for. Only what it cannot
-		// cover is brought in from outside, and that shortfall is recorded as its own deposit.
-		var inPool int64
-		if err := tx.QueryRow(ctx, `select coalesce(sum(amount_cents), 0) from ledger_entry where account_id = $1`, setup.PoolLedgerID).Scan(&inPool); err != nil {
-			return b, err
+		_, err := tx.Exec(ctx, `insert into ledger_entry (transfer_id, account_id, mode, amount_cents) values ($1, $2, 'sim', $3), ($1, $4, 'sim', $5)`,
+			id, from, -cents, to, cents)
+		return err
+	}
+	base := prev.Name
+	if i := strings.Index(base, " life "); i >= 0 {
+		base = base[:i]
+	}
+	next := SimBucket{Name: fmt.Sprintf("%s life %d", base, life), VersionID: prev.VersionID, CashCents: seedCents}
+	if err := tx.QueryRow(ctx, `insert into ledger_account (kind, mode, name) values ('bucket', 'sim', $1) returning id`, next.Name+" cash").Scan(&next.LedgerAccountID); err != nil {
+		return next, err
+	}
+	if err := tx.QueryRow(ctx, `insert into bucket (name, mode, venue_account_id, ledger_account_id, strategy_version_id, limits, tax_rate_bps)
+	                           values ($1, 'sim', $2, $3, $4, '{}', 0) returning id`, next.Name, setup.venueAccountID, next.LedgerAccountID, next.VersionID).Scan(&next.ID); err != nil {
+		return next, err
+	}
+	var inPool int64
+	if err := tx.QueryRow(ctx, `select coalesce(sum(amount_cents), 0) from ledger_entry where account_id = $1`, setup.PoolLedgerID).Scan(&inPool); err != nil {
+		return next, err
+	}
+	if short := seedCents - inPool; short > 0 {
+		if err := transfer("deposit", fmt.Sprintf("replenishment short by %d cents for %s", short, next.Name), setup.OwnersLedgerID, setup.PoolLedgerID, short); err != nil {
+			return next, err
 		}
-		if short := seedCents - inPool; short > 0 {
-			if err := transfer("deposit", fmt.Sprintf("replenishment short by %d cents for %s", short, next.Name), setup.OwnersLedgerID, setup.PoolLedgerID, short); err != nil {
-				return b, err
-			}
+	}
+	if err := transfer("seed", "seed "+next.Name+" from replenishment", setup.PoolLedgerID, next.LedgerAccountID, seedCents); err != nil {
+		return next, err
+	}
+	if _, err := tx.Exec(ctx, `insert into bucket_event (bucket_id, kind, detail, actor_id) values ($1, 'seeded', jsonb_build_object('note', $2::text), $3)`,
+		next.ID, fmt.Sprintf("replaces %s", prev.Name), setup.ActorID); err != nil {
+		return next, err
+	}
+	if _, err := tx.Exec(ctx, `update bucket set replaced_by_bucket_id = $2 where id = $1`, prev.ID, next.ID); err != nil {
+		return next, err
+	}
+	return next, nil
+}
+
+// ErrBucketHeld is a RestakeBucket of a version whose newest bucket is not frozen.
+var ErrBucketHeld = errors.New("that version's bucket is still held; reap it first")
+
+// ErrNoBucketEver is a RestakeBucket of a version that never had a bucket: approval seeds those.
+var ErrNoBucketEver = errors.New("that version has never had a bucket; approving it seeds one")
+
+// RestakeBucket opens the next life of a version whose newest bucket is frozen (reaped by hand,
+// or run out), seeded from the replenishment pool. It is how a version comes back after a Reap
+// without a restake. The bucket trades if the version is approved, else it is held settle-only.
+func (s *Store) RestakeBucket(ctx context.Context, setup SimSetup, versionID int64, seedCents int64) (SimBucket, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return SimBucket{}, err
+	}
+	defer tx.Rollback(ctx)
+	var prev SimBucket
+	err = tx.QueryRow(ctx, `select id, name, ledger_account_id, strategy_version_id, status = 'frozen' from bucket
+	                          where strategy_version_id = $1 and mode = 'sim' order by id desc limit 1`, versionID).
+		Scan(&prev.ID, &prev.Name, &prev.LedgerAccountID, &prev.VersionID, &prev.Frozen)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SimBucket{}, ErrNoBucketEver
+	}
+	if err != nil {
+		return SimBucket{}, err
+	}
+	if !prev.Frozen {
+		return SimBucket{}, ErrBucketHeld
+	}
+	life := 1
+	if i := strings.LastIndex(prev.Name, " life "); i >= 0 {
+		if n, err := strconv.Atoi(strings.TrimSpace(prev.Name[i+len(" life "):])); err == nil && n > 0 {
+			life = n
 		}
-		if err := transfer("seed", "seed "+next.Name+" from replenishment", setup.PoolLedgerID, next.LedgerAccountID, seedCents); err != nil {
-			return b, err
-		}
-		if err := event(next.ID, "seeded", fmt.Sprintf("replaces %s", b.Name)); err != nil {
-			return b, err
-		}
-		if _, err := tx.Exec(ctx, `update bucket set replaced_by_bucket_id = $2 where id = $1`, b.ID, next.ID); err != nil {
-			return b, err
-		}
+	}
+	next, err := seedLife(ctx, tx, setup, prev, life+1, seedCents)
+	if err != nil {
+		return SimBucket{}, err
 	}
 	return next, tx.Commit(ctx)
 }
@@ -441,14 +503,24 @@ func (s *Store) CurrentSkimPolicy(ctx context.Context) (SkimPolicy, error) {
 	return p, err
 }
 
-// HighWaterMark is a bucket's high-water mark after its last recorded high; ok is false if it
-// has never made one, in which case its mark is what it was seeded with.
-func (s *Store) HighWaterMark(ctx context.Context, bucketID int64) (cents int64, ok bool, err error) {
-	err = s.pool.QueryRow(ctx, `select hwm_after_cents from bucket_skim where bucket_id = $1 order by id desc limit 1`, bucketID).Scan(&cents)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, false, nil
-	}
-	return cents, err == nil, err
+// HighWaterMark is the allocator's mark for a bucket: its last recorded high (the mark after its
+// newest skim), else seedCents, LESS whatever has been moved out of it by hand since (every
+// transfer out that is not a fill, a fee, a settlement, the seed or the allocation itself).
+// Money the operator takes out is not a loss the strategy must earn back before its next gain
+// counts; the mark comes down with it.
+func (s *Store) HighWaterMark(ctx context.Context, bucketID int64, seedCents int64) (int64, error) {
+	var mark int64
+	err := s.pool.QueryRow(ctx, `
+		with last as (select at, hwm_after_cents from bucket_skim where bucket_id = $1 order by id desc limit 1),
+		     acct as (select ledger_account_id from bucket where id = $1),
+		     taken as (select coalesce(sum(-e.amount_cents), 0) as cents
+		                 from ledger_entry e
+		                 join ledger_transfer t on t.id = e.transfer_id
+		                where e.account_id = (select ledger_account_id from acct) and e.amount_cents < 0
+		                  and t.reason not in ('fill', 'fee', 'settlement', 'sustainment', 'seed')
+		                  and t.at > coalesce((select at from last), '-infinity'::timestamptz))
+		select coalesce((select hwm_after_cents from last), $2::bigint) - (select cents from taken)`, bucketID, seedCents).Scan(&mark)
+	return mark, err
 }
 
 // Skim is one bucket reaching a new high, and what was taken from the gain.

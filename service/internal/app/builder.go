@@ -32,6 +32,15 @@ func buildVersion(shape []byte) (web.Built, error) {
 	return web.Built{Name: p.Name, Blurb: p.Blurb, Params: params, Parent: parent, Control: s.Control}, nil
 }
 
+// shapeOf reads a registered version's params back into the builder's shape, for Remix.
+func shapeOf(params []byte) ([]byte, error) {
+	var p engine.Params
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("params: %w", err)
+	}
+	return json.Marshal(engine.ToShape(p))
+}
+
 var presetsJSON = func() func() []byte {
 	b, err := json.Marshal(engine.Presets())
 	if err != nil {

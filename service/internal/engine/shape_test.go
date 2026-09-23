@@ -9,6 +9,31 @@ import (
 
 // Every preset builds a version that validates, with the label in its name and its four numbers
 // as conventions; and the form's refusals are the engine's.
+// A version read back into the builder and registered again comes out the same, every number a
+// convention now; the name loses its label on the way in and regains it on the way out.
+func TestToShapeRoundTrip(t *testing.T) {
+	for _, pr := range Presets() {
+		p, err := FromShape(pr.Shape)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := ToShape(p)
+		if s.Name != strings.TrimSuffix(p.Name, ConventionSuffix) || s.Hypothesis != "" {
+			t.Fatalf("%s: shape %+v", pr.Key, s)
+		}
+		s.Hypothesis = "a remix"
+		q, err := FromShape(s)
+		if err != nil {
+			t.Fatalf("%s remixed: %v", pr.Key, err)
+		}
+		if q.Name != p.Name || q.Exit != p.Exit || q.Side != p.Side || q.TauMin != p.TauMin || q.TauMax != p.TauMax || q.BandMin != p.BandMin ||
+			q.MaxBets != p.MaxBets || q.Kappa != p.Kappa || q.WindowCapBps != p.WindowCapBps || q.MinVolRatio != p.MinVolRatio || q.Sizing != p.Sizing ||
+			q.BaseStakeCents != p.BaseStakeCents || q.TakeCapture != p.TakeCapture || q.MinHold != p.MinHold {
+			t.Fatalf("%s did not round-trip:\n%+v\n%+v", pr.Key, p, q)
+		}
+	}
+}
+
 func TestPresetsBuild(t *testing.T) {
 	seen := map[string]bool{}
 	for _, pr := range Presets() {

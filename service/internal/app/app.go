@@ -330,10 +330,23 @@ func Run(version string) error {
 				Version: version,
 				Build:   buildVersion,
 				Presets: presetsJSON,
-				EnvOn:   cfg.V3,
-				Status:  run3.OrdersStatus,
-				Apply:   run3.SetOrders,
-				Hold:    run3.HoldForReset,
+				Shape:   shapeOf,
+				Reap: func(rctx context.Context, versionID int64, restake bool) (web.Reaped, error) {
+					rep, err := run3.Reap(rctx, versionID, restake)
+					dropCapital() // a bucket closed or opened: the next snapshot reads the ledger
+					if err != nil {
+						var open runner.OpenPositions
+						if errors.As(err, &open) || errors.Is(err, runner.ErrNoHeldBucket) {
+							return web.Reaped{}, web.ReapRefused{Why: err.Error()}
+						}
+						return web.Reaped{}, err
+					}
+					return web.Reaped{Bucket: rep.Bucket, ReapedCents: rep.ReapedCents, Next: rep.Next, Held: rep.Held, Ordering: rep.MayOrder}, nil
+				},
+				EnvOn:  cfg.V3,
+				Status: run3.OrdersStatus,
+				Apply:  run3.SetOrders,
+				Hold:   run3.HoldForReset,
 				Release: func() {
 					run3.ReleaseAfterReset()
 					dropCapital() // the books are gone: the next snapshot reads the ledger, not last minute's figure

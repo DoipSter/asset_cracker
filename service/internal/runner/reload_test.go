@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -94,6 +96,76 @@ func TestReloadSeedsAnApprovalAndBenchesARetirement(t *testing.T) {
 	r.mu.Unlock()
 	if settleOnly != "its version is retired: settle-only" {
 		t.Fatalf("Scalper's bucket: %q", settleOnly)
+	}
+}
+
+// Reap by the operator's hand: refused while a bet is open; once it settles the bucket is reaped
+// into the pool and frozen; with restake a fresh life takes its place and trades if its version
+// is approved. A version without a bucket is refused by name.
+func TestReapAndRestake(t *testing.T) {
+	ctx := context.Background()
+	g := newRig(t)
+	r := g.start(true)
+	scalper := g.s.versions[0].ID
+	g.buy100()
+
+	if _, err := r.Reap(ctx, scalper, false); err == nil || !strings.Contains(err.Error(), "open position") {
+		t.Fatalf("a bucket with a bet on must not be reaped: %v", err)
+	}
+	if g.s.count("CloseBucket") != 0 || g.contracts(r) != 100 {
+		t.Fatalf("the refusal changed something: closes %d contracts %d", g.s.count("CloseBucket"), g.contracts(r))
+	}
+	g.wantState(stateRunning)
+
+	g.advance(10 * time.Minute)
+	g.s.setResult(mktA, "yes") // the record has the result: a rebuild after this settles the lot too
+	g.settle(mktA, "yes")
+	cash := g.s.ledgerCash(g.bucketID())
+	first := g.bucketID()
+
+	// Retired, then reaped: what it held goes to the pool, the bucket is frozen, nothing replaces it.
+	g.s.setStatus("Scalper", "retired")
+	if _, err := r.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := r.Reap(ctx, scalper, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.ReapedCents != cash || rep.Next != "" || rep.Held != 0 || len(r.BucketIDs()) != 0 || !g.s.buckets[0].Frozen || g.s.ledgerCash(first) != 0 {
+		t.Fatalf("reap: %+v held %v frozen %v cash %d (was %d)", rep, r.BucketIDs(), g.s.buckets[0].Frozen, g.s.ledgerCash(first), cash)
+	}
+	g.wantState(stateRunning)
+	if _, err := r.Reap(ctx, scalper, false); !errors.Is(err, ErrNoHeldBucket) {
+		t.Fatalf("a version without a bucket: %v", err)
+	}
+
+	// Approving again seeds nothing: the version has a bucket, frozen. Coming back is a restake:
+	// life 2 opens from the pool, and trades because the version is approved.
+	g.s.setStatus("Scalper", "probation")
+	if rep, err := r.Reload(ctx); err != nil || rep.Held != 0 {
+		t.Fatalf("re-approval alone: %+v %v", rep, err)
+	}
+	rep, err = r.Reap(ctx, scalper, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Bucket != "" || rep.ReapedCents != 0 || !strings.HasSuffix(rep.Next, " life 2") || rep.Held != 1 || rep.MayOrder != 1 {
+		t.Fatalf("restake with nothing held: %+v", rep)
+	}
+	if g.s.ledgerCash(g.bucketID()) != seed3Cents {
+		t.Fatalf("life 2 holds %d, want the seed", g.s.ledgerCash(g.bucketID()))
+	}
+	// Reap and restake while held and approved: life 3 replaces life 2 at once.
+	rep, err = r.Reap(ctx, scalper, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(rep.Bucket, " life 2") || rep.ReapedCents != seed3Cents || !strings.HasSuffix(rep.Next, " life 3") || rep.Held != 1 || rep.MayOrder != 1 {
+		t.Fatalf("reap and restake: %+v", rep)
+	}
+	if lifeOf(rep.Next) != 3 || lifeOf("Scalper v3") != 1 || lifeOf("x life 7") != 7 {
+		t.Fatalf("lifeOf: %d", lifeOf(rep.Next))
 	}
 }
 

@@ -14,6 +14,19 @@ empties them and starts again from the approved versions. A bucket that loses it
 less than the floor left is closed at that settlement: reaped into replenishment, frozen, not
 replaced.
 
+**The bucket's lifecycle by hand** (each version row): **Reap** closes the version's bucket once
+nothing is open, what it holds going to the common pool and the bucket frozen with its record
+(`Runner3.Reap`, refused while a bet is on); **Reap & restake** does that and seeds "`<name>
+life N`" from the pool at once (the owners cover a shortfall, recorded as its own deposit);
+**Restake** opens the next life of a version whose every bucket is frozen. Approving a retired
+version resumes its held bucket as it stands; a version whose bucket was reaped comes back by
+Restake, not by Approve. **Remix** fills the builder with a version's own numbers
+(`engine.ToShape`) so a variant starts from what traded. **Transfer** moves simulated money by
+hand: out of a bucket into a reserve or the pool, between the pools and reserves, to or from the
+owners; never into a bucket (the allocator would read it as a gain). Money taken out of a bucket
+by hand lowers its high-water mark by the same amount (`store.HighWaterMark`), so the strategy is
+not asked to earn it back before its next gain counts. Each is a ledger transfer with a memo.
+
 **The strategy builder** (buckets page, "New strategy") makes a version-3 row from a shape:
 the exit rule (`hold` or `ev`), a side filter (whichever the belief favours, the favourite only,
 the longshot only), time gates, price band, bets per round, the Kelly fraction and window cap, a

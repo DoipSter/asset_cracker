@@ -33,10 +33,11 @@ type Store3 interface {
 	RecordOrders(ctx context.Context, setup store.SimSetup, r store.StepRecord3) error
 	RecordSettlements(ctx context.Context, setup store.SimSetup, marketID int64, at time.Time, rows []store.SettlementRow) error
 	CloseBucket(ctx context.Context, setup store.SimSetup, b store.SimBucket, reason string, restake bool, life int, seedCents int64) (store.SimBucket, error)
+	RestakeBucket(ctx context.Context, setup store.SimSetup, versionID int64, seedCents int64) (store.SimBucket, error) // the next life of a version whose bucket is frozen
 
 	// The sustainment allocation (platform brief, section 6): the mark a bucket last reached,
 	// the rates in force, and the skim itself, which is one ledger transfer out of the bucket.
-	HighWaterMark(ctx context.Context, bucketID int64) (cents int64, ok bool, err error)
+	HighWaterMark(ctx context.Context, bucketID int64, seedCents int64) (int64, error) // the allocator's mark: last high, else the seed, less hand withdrawals
 	CurrentSkimPolicy(ctx context.Context) (store.SkimPolicy, error)
 	RecordSkim(ctx context.Context, setup store.SimSetup, k store.Skim) error
 

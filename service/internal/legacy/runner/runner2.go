@@ -92,12 +92,9 @@ func NewRunner2(ctx context.Context, db *store.Store, coins []Coin2, heldElsewhe
 		}
 	}
 	for name, b := range setup.Buckets { // a bucket's mark is its last recorded high, or what it was seeded with
-		mark, ok, err := db.HighWaterMark(ctx, b.ID)
+		mark, err := db.HighWaterMark(ctx, b.ID, cents(k2.StartBalance))
 		if err != nil {
 			return nil, fmt.Errorf("v2 high-water marks: %w", err)
-		}
-		if !ok {
-			mark = cents(k2.StartBalance)
 		}
 		r.hwm[name] = mark
 	}

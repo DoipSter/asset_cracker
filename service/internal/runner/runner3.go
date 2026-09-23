@@ -324,12 +324,9 @@ func (o Options3) load(ctx context.Context, db Store3, on bool) (*loaded3, error
 			l.feePerFill = l.feePerFill || b.params.FeePerFill // one Paper serves every bucket: the pessimistic reading wins
 		}
 		// The allocator's mark: the bucket's last recorded high, else what it was seeded with.
-		mark, ok, err := db.HighWaterMark(ctx, h.ID)
+		mark, err := db.HighWaterMark(ctx, h.ID, seed3Cents)
 		if err != nil {
 			return nil, fmt.Errorf("v3 high-water mark of bucket %d: %w", h.ID, err)
-		}
-		if !ok {
-			mark = seed3Cents
 		}
 		l.hwm[h.ID] = mark
 		l.buckets, l.ids = append(l.buckets, b), append(l.ids, h.ID)
@@ -429,15 +426,29 @@ type ReloadReport struct {
 // load fails the old held set stays and Tick heals it; if the rebuild fails the new set stays,
 // suspended, and Tick heals that. The model keeps its learned offsets and its drift tolerance
 // from the first load (the gate is open with no reference engine, so the number decides nothing).
-func (r *Runner3) Reload(ctx context.Context) (report ReloadReport, err error) {
+func (r *Runner3) Reload(ctx context.Context) (ReloadReport, error) {
+	return r.reload(ctx, "reloading the books", nil, nil)
+}
+
+// reload is Reload with two hooks for the operations that change the books between suspending
+// and loading. check runs under r.mu before v3 is suspended and may refuse (nothing has changed
+// then); between runs while v3 is suspended, before the load, and its writes are what the load
+// reads back. Either error leaves the old held set in place; Tick heals a suspension.
+func (r *Runner3) reload(ctx context.Context, why string, check func() error, between func(context.Context) error) (report ReloadReport, err error) {
 	defer func() {
 		if r.caught("reload", recover()) {
 			err = errors.New("a panic during the reload; v3 rebuilds from what it holds")
 		}
 	}()
 	r.mu.Lock()
+	if check != nil {
+		if err := check(); err != nil {
+			r.mu.Unlock()
+			return report, err
+		}
+	}
 	r.absorbLocked()
-	r.suspendLocked("reloading the books")
+	r.suspendLocked(why)
 	r.healAfter = r.now().Add(time.Hour)
 	r.mu.Unlock()
 	done := false
@@ -453,6 +464,11 @@ func (r *Runner3) Reload(ctx context.Context) (report ReloadReport, err error) {
 		r.notes = nil
 		r.notesMu.Unlock()
 	}()
+	if between != nil {
+		if err := between(ctx); err != nil {
+			return report, err
+		}
+	}
 	l, err := r.opts.load(ctx, r.db, r.ordersLive.Load())
 	if err != nil {
 		return report, fmt.Errorf("reload: %w", err)
@@ -472,6 +488,114 @@ func (r *Runner3) Reload(ctx context.Context) (report ReloadReport, err error) {
 	r.mu.Unlock()
 	slog.Info("v3 reloaded", "held", report.Held, "may_order", report.MayOrder, "on", r.ordersLive.Load())
 	return report, nil
+}
+
+// ReapReport is what a Reap did.
+type ReapReport struct {
+	Bucket      string // the bucket closed
+	ReapedCents int64  // what it held, now in the common pool
+	Next        string // the fresh bucket, when restaked; "" otherwise
+	Held        int    // buckets held after the reload
+	MayOrder    int    // of them, how many may order
+}
+
+// ErrNoHeldBucket is a Reap of a version that holds no bucket.
+var ErrNoHeldBucket = errors.New("that version holds no bucket")
+
+// OpenPositions is a Reap refused because the bucket still has a bet on.
+type OpenPositions struct {
+	Bucket string
+	Lots   int
+}
+
+func (e OpenPositions) Error() string {
+	return fmt.Sprintf("%s has %d open position(s); it is reaped once they settle", e.Bucket, e.Lots)
+}
+
+// Reap closes a version's held bucket by the operator's hand: what it holds is reaped into the
+// common pool and the bucket is frozen with its whole record; with restake, a fresh life is
+// seeded from the pool in its place ("<name> life N"), trading if its version is approved and
+// held settle-only if not. It is refused while the bucket has an open position, because
+// CloseBucket does not look for one and a settlement into a frozen bucket has nowhere to go.
+// With restake and NO held bucket (reaped earlier, or run out) it opens the next life alone.
+// The writes happen while v3 is suspended and the load that follows reads them back.
+func (r *Runner3) Reap(ctx context.Context, versionID int64, restake bool) (ReapReport, error) {
+	var target *bucket3
+	var life int
+	var cash int64
+	check := func() error {
+		if r.state == stateSuspended {
+			return errors.New("v3 is suspended and its cash is not known; try again after it heals")
+		}
+		for i := range r.buckets {
+			b := &r.buckets[i]
+			if b.VersionID != versionID {
+				continue
+			}
+			a := r.engine.Account(b.ID)
+			if a == nil {
+				return errors.New("the bucket has no account in the engine; try again after a reload")
+			}
+			if open := a.Open(); len(open) > 0 {
+				return OpenPositions{Bucket: b.Name, Lots: len(open)}
+			}
+			copy := *b
+			target, cash, life = &copy, a.CashCents, lifeOf(b.Name)+1
+			return nil
+		}
+		if !restake {
+			return ErrNoHeldBucket
+		}
+		return nil // nothing held: the restake opens the next life on its own
+	}
+	var next store.SimBucket
+	between := func(ctx context.Context) error {
+		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.writeBudget)
+		defer cancel()
+		var err error
+		if target == nil {
+			next, err = r.db.RestakeBucket(wctx, r.setup, versionID, seed3Cents)
+			if err != nil {
+				return fmt.Errorf("restaking version %d: %w", versionID, err)
+			}
+			return nil
+		}
+		reason := "reaped by the operator"
+		if restake {
+			reason = "reaped and restaked by the operator"
+		}
+		next, err = r.db.CloseBucket(wctx, r.setup, target.SimBucket, reason, restake, life, seed3Cents)
+		if err != nil {
+			return fmt.Errorf("closing %s: %w", target.Name, err)
+		}
+		return nil
+	}
+	rep, err := r.reload(ctx, "reaping a bucket", check, between)
+	if err != nil {
+		return ReapReport{}, err
+	}
+	out := ReapReport{Held: rep.Held, MayOrder: rep.MayOrder}
+	if target != nil {
+		out.Bucket, out.ReapedCents = target.Name, cash
+	}
+	if restake {
+		out.Next = next.Name
+	}
+	slog.Info("v3 bucket reaped or restaked by the operator", "bucket", out.Bucket, "reaped_cents", out.ReapedCents, "restaked_as", out.Next)
+	return out, nil
+}
+
+// lifeOf reads N from "<name> life N"; a first life has no suffix and is 1.
+func lifeOf(name string) int {
+	i := strings.LastIndex(name, " life ")
+	if i < 0 {
+		return 1
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(name[i+len(" life "):]))
+	if err != nil || n < 1 {
+		return 1
+	}
+	return n
 }
 
 // firstRebuild is steps 3 to 5 of NewRunner3. It recovers a panic with the same mechanism as

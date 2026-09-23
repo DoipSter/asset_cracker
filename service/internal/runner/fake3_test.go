@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -577,18 +578,58 @@ func (s *fakeStore) CloseBucket(ctx context.Context, setup store.SimSetup, b sto
 	if setup.ActorID == 0 || setup.PoolLedgerID == 0 {
 		return b, errors.New("the fake foreign key: closing a bucket needs the service actor and the pool")
 	}
-	if restake {
-		return b, errors.New("v3 never restakes")
-	}
+	var closed *fakeBucket
 	for _, fb := range s.buckets {
 		if fb.ID == b.ID {
 			fb.reaped += s.cash(fb)
 			fb.Frozen = true
 			s.closed = append(s.closed, fb.Name)
+			closed = fb
 		}
 	}
 	b.Frozen = true
-	return b, nil
+	if !restake {
+		return b, nil
+	}
+	if closed == nil {
+		return b, errors.New("restake of a bucket the fake does not hold")
+	}
+	return s.seedLife(closed, life, seedCents), nil
+}
+
+// seedLife is the store's: "<base> life N", the same version, a fresh seed from the pool.
+func (s *fakeStore) seedLife(prev *fakeBucket, life int, seedCents int64) store.SimBucket {
+	base := prev.Name
+	if i := strings.Index(base, " life "); i >= 0 {
+		base = base[:i]
+	}
+	next := &fakeBucket{SimBucket: store.SimBucket{ID: s.id(), Name: fmt.Sprintf("%s life %d", base, life), LedgerAccountID: s.id(), VersionID: prev.VersionID}, strategy: prev.strategy, seed: seedCents}
+	s.buckets = append(s.buckets, next)
+	s.created = append(s.created, "bucket "+next.Name, "seed "+next.Name)
+	sb := next.SimBucket
+	sb.CashCents = seedCents
+	return sb
+}
+
+func (s *fakeStore) RestakeBucket(ctx context.Context, setup store.SimSetup, versionID int64, seedCents int64) (store.SimBucket, error) {
+	if hb := s.hook(ctx, "RestakeBucket"); hb.err != nil {
+		return store.SimBucket{}, hb.err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var prev *fakeBucket
+	for _, fb := range s.buckets { // appended in order: the last is the newest
+		if fb.VersionID == versionID {
+			prev = fb
+		}
+	}
+	if prev == nil {
+		return store.SimBucket{}, store.ErrNoBucketEver
+	}
+	if !prev.Frozen {
+		return store.SimBucket{}, store.ErrBucketHeld
+	}
+	return s.seedLife(prev, lifeOf(prev.Name)+1, seedCents), nil
 }
 
 func (s *fakeStore) SettledStreak(ctx context.Context, bucketID int64) (int, error) {
@@ -611,18 +652,18 @@ func (s *fakeStore) SettledStreak(ctx context.Context, bucketID int64) (int, err
 	return n, nil
 }
 
-func (s *fakeStore) HighWaterMark(ctx context.Context, bucketID int64) (int64, bool, error) {
+func (s *fakeStore) HighWaterMark(ctx context.Context, bucketID int64, seedCents int64) (int64, error) {
 	if b := s.hook(ctx, "HighWaterMark"); b.err != nil {
-		return 0, false, b.err
+		return 0, b.err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := len(s.skims) - 1; i >= 0; i-- {
 		if k := s.skims[i]; k.Bucket.ID == bucketID {
-			return k.BookCents - k.Taken(), true, nil
+			return k.BookCents - k.Taken(), nil
 		}
 	}
-	return 0, false, nil
+	return seedCents, nil
 }
 
 func (s *fakeStore) CurrentSkimPolicy(ctx context.Context) (store.SkimPolicy, error) {

@@ -62,7 +62,27 @@ type Control struct {
 	// this package does not import it, so app hands them in. Nil means the page has no builder.
 	Build   func(shape []byte) (Built, error)
 	Presets func() []byte
+	// Shape reads a registered version's params back into the builder's shape (engine.ToShape
+	// as JSON), for the Remix button. Nil means no remix.
+	Shape func(params []byte) ([]byte, error)
+	// Reap closes a version's held bucket by the operator's hand, into the common pool; with
+	// restake, or with nothing held, a fresh life is seeded in its place. Nil means no engine.
+	Reap func(ctx context.Context, versionID int64, restake bool) (Reaped, error)
 }
+
+// Reaped is what a Reap did, for the page.
+type Reaped struct {
+	Bucket      string `json:"bucket,omitempty"`
+	ReapedCents int64  `json:"reaped_cents"`
+	Next        string `json:"next,omitempty"`
+	Held        int    `json:"held"`
+	Ordering    int    `json:"ordering"`
+}
+
+// ReapRefused is a Reap the engine would not do; its text is shown on the page.
+type ReapRefused struct{ Why string }
+
+func (e ReapRefused) Error() string { return e.Why }
 
 // Built is a version the engine has built and validated from a shape.
 type Built struct {
@@ -133,6 +153,15 @@ type controlStore interface {
 	SetSimPolicy(ctx context.Context, winnings, replenish, tax, fees int, note string) error
 	CurrentSkimPolicy(ctx context.Context) (store.SkimPolicy, error)
 	ResetSim(ctx context.Context) (store.ResetCounts, error)
+	SimAccounts(ctx context.Context) ([]store.SimAccount, error)
+	Transfer(ctx context.Context, t store.ManualTransfer) (store.Transferred, error)
+}
+
+// versionOut is a version-3 row as the page sees it: the store's fields and, when the process
+// has a builder, the shape a Remix starts from.
+type versionOut struct {
+	store.Version3
+	Shape json.RawMessage `json:"shape,omitempty"`
 }
 
 var _ controlStore = (*store.Store)(nil)
@@ -170,11 +199,21 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 			return
 		}
 		placing, effective := ctl.status()
+		outVersions := make([]versionOut, 0, len(versions))
+		for _, v := range versions {
+			o := versionOut{Version3: v}
+			if ctl.Shape != nil && len(v.Params) > 0 {
+				if sh, err := ctl.Shape(v.Params); err == nil {
+					o.Shape = sh
+				}
+			}
+			outVersions = append(outVersions, o)
+		}
 		writeJSON(w, map[string]any{
 			"simulated": true,
 			"locked":    ctl.Key != "", // the page asks for the operator key before its first change
 			"orders":    map[string]any{"on": on, "source": source, "placing": placing, "effective": effective},
-			"versions":  versions,
+			"versions":  outVersions,
 			"policy": map[string]any{
 				"id": policy.ID, "since_at": policy.EffectiveAt.UTC().Format(time.RFC3339), "note": policy.Note,
 				"winnings_bps": policy.Winnings, "replenish_bps": policy.Replenish, "tax_bps": policy.Tax, "fees_bps": policy.Fees,
@@ -246,6 +285,108 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 		if list != nil {
 			list.drop()
 		}
+		writeJSON(w, out)
+	}))
+
+	// Reap: the operator closes a version's bucket. {id, restake}. Refused (409) while the bucket
+	// has a bet on; 404 when the version holds nothing and no restake was asked for.
+	mux.HandleFunc("POST /api/controls/version/reap", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
+		if ctl.Reap == nil {
+			writeErr(w, http.StatusServiceUnavailable, "No engine runs in this process; reap at the next start's page.")
+			return
+		}
+		var body struct {
+			ID      int64 `json:"id"`
+			Restake bool  `json:"restake"`
+		}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), reloadBudget)
+		defer cancel()
+		out, err := ctl.Reap(ctx, body.ID, body.Restake)
+		if err != nil {
+			var refused ReapRefused
+			switch {
+			case errors.As(err, &refused):
+				writeErr(w, http.StatusConflict, refused.Why)
+			case errors.Is(err, store.ErrNoBucketEver):
+				writeErr(w, http.StatusNotFound, "That version has never had a bucket; Approve seeds one.")
+			default:
+				slog.Error("controls: reap", "err", err)
+				writeErr(w, http.StatusInternalServerError, "The bucket was not reaped: "+err.Error())
+			}
+			return
+		}
+		if list != nil {
+			list.drop()
+		}
+		slog.Info("bucket reaped from the buckets page", "version", body.ID, "bucket", out.Bucket, "reaped_cents", out.ReapedCents, "next", out.Next)
+		writeJSON(w, out)
+	}))
+
+	// The simulated accounts money can be moved between, with balances.
+	mux.HandleFunc("GET /api/controls/accounts", func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			writeErr(w, http.StatusServiceUnavailable, "The controls have no database.")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		defer cancel()
+		accounts, err := db.SimAccounts(ctx)
+		if err != nil {
+			slog.Error("controls: accounts", "err", err)
+			writeErr(w, http.StatusInternalServerError, "The accounts could not be read.")
+			return
+		}
+		if accounts == nil {
+			accounts = []store.SimAccount{}
+		}
+		writeJSON(w, map[string]any{"accounts": accounts})
+	})
+
+	// A transfer by hand: {from, to, cents, memo}. The store applies the rules (never into a
+	// bucket, the source must hold it). Out of a bucket, the engine's copy of that cash is stale,
+	// so the engine reloads.
+	mux.HandleFunc("POST /api/controls/transfer", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			writeErr(w, http.StatusServiceUnavailable, "The controls have no database.")
+			return
+		}
+		var body struct {
+			From  int64  `json:"from"`
+			To    int64  `json:"to"`
+			Cents int64  `json:"cents"`
+			Memo  string `json:"memo"`
+		}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+		defer cancel()
+		done, err := db.Transfer(ctx, store.ManualTransfer{From: body.From, To: body.To, Cents: body.Cents, Memo: body.Memo})
+		if err != nil {
+			var refused store.TransferRefused
+			if errors.As(err, &refused) {
+				writeErr(w, http.StatusBadRequest, refused.Why)
+				return
+			}
+			slog.Error("controls: transfer", "err", err)
+			writeErr(w, http.StatusInternalServerError, "The transfer was not booked.")
+			return
+		}
+		out := map[string]any{"id": done.ID, "reason": done.Reason, "from": done.FromName, "to": done.ToName, "cents": done.Cents}
+		if done.FromBucket {
+			rctx, rcancel := context.WithTimeout(r.Context(), reloadBudget)
+			defer rcancel()
+			for k, v := range ctl.reload(rctx) {
+				out[k] = v
+			}
+		}
+		if list != nil {
+			list.drop()
+		}
+		slog.Info("transfer booked from the buckets page", "id", done.ID, "reason", done.Reason, "from", done.FromName, "to", done.ToName, "cents", done.Cents)
 		writeJSON(w, out)
 	}))
 

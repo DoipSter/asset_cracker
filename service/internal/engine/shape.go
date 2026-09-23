@@ -155,6 +155,38 @@ func FromShape(s Shape) (Params, error) {
 	return p, p.Validate()
 }
 
+// ToShape is the builder's form filled from a registered version: every knob as the version
+// has it, so a remix starts from what actually traded, not from a preset. The name loses its
+// label (the builder adds it back); the hypothesis is left blank, because a remix tests something
+// new and the registry wants that said. Registered again through FromShape, every number becomes
+// the owner's convention, which is what choosing to keep it means.
+func ToShape(p Params) Shape {
+	return Shape{
+		Name:           strings.TrimSuffix(p.Name, ConventionSuffix),
+		Blurb:          "",
+		Exit:           p.Exit,
+		Side:           p.Side,
+		Lambda:         p.Lambda,
+		StaleCost:      p.StaleCost,
+		StaleCostSell:  p.StaleCostSell,
+		TauMin:         p.TauMin,
+		TauMax:         p.TauMax,
+		BandMin:        p.BandMin,
+		BandMax:        p.BandMax,
+		MaxBets:        p.MaxBets,
+		MinGap:         p.MinGap,
+		MinHold:        p.MinHold,
+		Capture:        p.TakeCapture,
+		Kappa:          p.Kappa,
+		WindowCapBps:   p.WindowCapBps,
+		MinVolRatio:    p.MinVolRatio,
+		Sizing:         p.Sizing,
+		BaseStakeCents: p.BaseStakeCents,
+		Multiplier:     p.Multiplier,
+		MaxDoublings:   p.MaxDoublings,
+	}
+}
+
 // Preset is a named Shape with a sentence about what it tests.
 type Preset struct {
 	Key   string `json:"key"`

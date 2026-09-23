@@ -56,13 +56,18 @@ type Version3 struct {
 	Version    int    `json:"version"`
 	Status     string `json:"status"`
 	Hypothesis string `json:"hypothesis"`
+	Params     []byte `json:"-"`     // engine.Params as stored; the page's Remix reads a shape from it
+	Held       bool   `json:"held"`  // a bucket of this version is not frozen: Reap applies
+	Lives      int    `json:"lives"` // buckets this version has had, frozen ones included: Restake applies when > 0 and not held
 }
 
 // ListVersion3 is the version-3 rows of the kalshi15m family. An empty list is the
 // ordinary state: those versions are registered only after their measured numbers exist.
 func (s *Store) ListVersion3(ctx context.Context) ([]Version3, error) {
 	rows, err := s.pool.Query(ctx, `
-		select v.id, st.name, v.version, v.status, v.hypothesis
+		select v.id, st.name, v.version, v.status, v.hypothesis, v.params,
+		       exists (select 1 from bucket b where b.strategy_version_id = v.id and b.mode = 'sim' and b.status <> 'frozen'),
+		       (select count(*) from bucket b where b.strategy_version_id = v.id and b.mode = 'sim')
 		  from strategy_version v
 		  join strategy st on st.id = v.strategy_id
 		 where st.family = 'kalshi15m' and v.version = 3
@@ -74,7 +79,7 @@ func (s *Store) ListVersion3(ctx context.Context) ([]Version3, error) {
 	out := []Version3{}
 	for rows.Next() {
 		var v Version3
-		if err := rows.Scan(&v.ID, &v.Name, &v.Version, &v.Status, &v.Hypothesis); err != nil {
+		if err := rows.Scan(&v.ID, &v.Name, &v.Version, &v.Status, &v.Hypothesis, &v.Params, &v.Held, &v.Lives); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
