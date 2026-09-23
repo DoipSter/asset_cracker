@@ -2,6 +2,7 @@ package analysis
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -407,6 +408,39 @@ func TestScorecardVerdictNeedsThirtyWindows(t *testing.T) {
 	}
 	if o := Build(Inputs{Facts: facts[:29]}).Scorecard.Overall; o.NWindows != 29 || o.Verdict != "unresolved" {
 		t.Errorf("29 windows: %+v", o)
+	}
+}
+
+// The scorecard's series is the overall row window by window: its last point is the row, and a
+// long history is thinned to the bound with the last window kept. The same for a strategy's
+// cumulative P&L. Neither changes a figure.
+func TestSeriesEndWhereTheRowsStand(t *testing.T) {
+	var facts []MarketFacts
+	for i := range 700 {
+		facts = append(facts, score(int64(i+1), "BTC", int64(900*(i+1)), 2, 10, 2.0+0.1+0.2*float64(i%2), 2.0))
+	}
+	sc := Build(Inputs{Facts: facts}).Scorecard
+	if len(sc.Series) != SeriesPoints || sc.Series[len(sc.Series)-1][0] != 900*700 || sc.Series[0][0] != 900*2 {
+		t.Fatalf("thinned series: %d points, first %v, last %v", len(sc.Series), sc.Series[0], sc.Series[len(sc.Series)-1])
+	}
+	if last := sc.Series[len(sc.Series)-1]; last[1] != sc.Overall.BrierModel || last[2] != sc.Overall.BrierMarket {
+		t.Errorf("the series ends at %v, the row says %v %v", last, sc.Overall.BrierModel, sc.Overall.BrierMarket)
+	}
+	short := Build(Inputs{Facts: facts[:5]}).Scorecard
+	if len(short.Series) != 5 || short.Series[0][0] != 900 {
+		t.Errorf("a short history is not thinned: %v", short.Series)
+	}
+	if got := Build(Inputs{}).Scorecard.Series; got == nil || len(got) != 0 {
+		t.Errorf("no facts: %v, want an empty list", got)
+	}
+
+	buckets := []Bucket{{ID: 2, VersionID: 10, Strategy: "Scalper", Engine: "v3", World: "real"}}
+	rows := Build(Inputs{Facts: []MarketFacts{round1(1, 900, 2, -300, 1), round1(2, 1800, 2, 500, 1), round1(3, 2700, 2, 100, 1)}, Buckets: buckets, MarketsSettled: 3, Trials: 18}).Leaderboard.Rows
+	if want := [][2]int64{{900, -300}, {1800, 200}, {2700, 300}}; len(rows) != 1 || fmt.Sprint(rows[0].Series) != fmt.Sprint(want) || rows[0].LifetimePnLCents != 300 {
+		t.Errorf("cumulative P&L: %v (lifetime %d), want %v", rows[0].Series, rows[0].LifetimePnLCents, want)
+	}
+	if got := thin([]int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, 4); fmt.Sprint(got) != "[2 5 7 10]" {
+		t.Errorf("thin: %v", got)
 	}
 }
 

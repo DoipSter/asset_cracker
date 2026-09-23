@@ -80,7 +80,15 @@ type Scorecard struct {
 	Overall ScoreRow   `json:"overall"`
 	ByBand  []ScoreRow `json:"by_band"`
 	ByCoin  []ScoreRow `json:"by_coin"`
+	// Series is the overall row over time: for each settled window, [close (unix seconds), the
+	// mean model Brier over every window up to it, the market's likewise]. The last point's two
+	// means are the overall row's brier_model and brier_market. Thinned to at most SeriesPoints,
+	// each bin giving its last window, so every point is a figure that stood at that moment.
+	Series [][3]float64 `json:"series"`
 }
+
+// SeriesPoints bounds every series the document carries. [CONVENTION: a page's width in points.]
+const SeriesPoints = 300
 
 type FillRow struct {
 	Strategy           string  `json:"strategy"`
@@ -124,18 +132,22 @@ type LeaderRow struct {
 	// and return_t the return over its standard error, both as published. windows_needed is the
 	// sample floor from the power calculation, 0 if it could not be computed. first_close and
 	// last_close (unix seconds) bound the windows counted.
-	Orders          int      `json:"orders"`
-	Decisions       int64    `json:"decisions"`
-	StakedCents     int64    `json:"staked_cents"`
-	ReturnPerDollar float64  `json:"return_per_dollar"`
-	ReturnSE        float64  `json:"return_se"`
-	ReturnLower     float64  `json:"return_lower"`
-	ReturnT         float64  `json:"return_t"`
-	WindowsNeeded   int      `json:"windows_needed"`
-	FirstClose      int64    `json:"first_close"`
-	LastClose       int64    `json:"last_close"`
-	Drawdown        Drawdown `json:"drawdown"`
-	Gate            Gate     `json:"gate"`
+	Orders          int     `json:"orders"`
+	Decisions       int64   `json:"decisions"`
+	StakedCents     int64   `json:"staked_cents"`
+	ReturnPerDollar float64 `json:"return_per_dollar"`
+	ReturnSE        float64 `json:"return_se"`
+	ReturnLower     float64 `json:"return_lower"`
+	ReturnT         float64 `json:"return_t"`
+	WindowsNeeded   int     `json:"windows_needed"`
+	// Series is the version's realised P&L added up window by window: [close (unix seconds),
+	// cumulative cents], thinned to at most SeriesPoints, each bin its last window. The last
+	// point's cents are lifetime_pnl_cents.
+	Series     [][2]int64 `json:"series"`
+	FirstClose int64      `json:"first_close"`
+	LastClose  int64      `json:"last_close"`
+	Drawdown   Drawdown   `json:"drawdown"`
+	Gate       Gate       `json:"gate"`
 }
 
 type Leaderboard struct {
@@ -335,8 +347,54 @@ func scoreRow(facts []MarketFacts, minAbsT float64, keep func(coin string, band 
 		LogLossModel: round(WindowStat(modelLog).Mean, 4), LogLossMarket: round(WindowStat(marketLog).Mean, 4), LogLossDiff: round(lg.Mean, 4), LogLossSE: round(lg.SE, 4)}
 }
 
+// scoreSeries is the overall row window by window: the running mean of each window's Brier, model
+// and market, in the order the windows closed. Every window counts once whatever its size, as in
+// scoreRow, so the last point is the overall row.
+func scoreSeries(facts []MarketFacts) [][3]float64 {
+	type sums struct{ n, model, market float64 }
+	per := map[int64]*sums{}
+	for _, f := range facts {
+		for _, b := range f.Score {
+			if b.N <= 0 {
+				continue
+			}
+			s := per[f.Closes]
+			if s == nil {
+				s = &sums{}
+				per[f.Closes] = s
+			}
+			s.n, s.model, s.market = s.n+float64(b.N), s.model+b.Model, s.market+b.Market
+		}
+	}
+	out := make([][3]float64, 0, len(per))
+	var model, market float64
+	for i, w := range sortedKeys(per) {
+		s := per[w]
+		model, market = model+s.model/s.n, market+s.market/s.n
+		n := float64(i + 1)
+		out = append(out, [3]float64{float64(w), round(model/n, 4), round(market/n, 4)})
+	}
+	return thin(out, SeriesPoints)
+}
+
+// thin keeps at most max points of a series in order: equal runs of points, each giving its last.
+// A series already within the bound is returned as it is.
+func thin[T any](pts []T, max int) []T {
+	if max < 2 || len(pts) <= max {
+		if pts == nil {
+			return []T{}
+		}
+		return pts
+	}
+	out := make([]T, 0, max)
+	for i := 1; i <= max; i++ {
+		out = append(out, pts[i*len(pts)/max-1])
+	}
+	return out
+}
+
 func buildScorecard(facts []MarketFacts, rule thresholds) Scorecard {
-	sc := Scorecard{What: scorecardWhat, ByBand: []ScoreRow{}, ByCoin: []ScoreRow{}}
+	sc := Scorecard{What: scorecardWhat, ByBand: []ScoreRow{}, ByCoin: []ScoreRow{}, Series: scoreSeries(facts)}
 	sc.Overall = scoreRow(facts, rule.overall, func(string, int) bool { return true })
 	for i, b := range Bands {
 		r := scoreRow(facts, rule.cut, func(_ string, band int) bool { return band == i })
@@ -464,9 +522,11 @@ func buildLeaderboard(facts []MarketFacts, buckets []Bucket, book map[int64]int6
 		var per, staked []float64
 		var total float64
 		var first, last int64
+		series := make([][2]int64, 0, len(t.windows))
 		for _, w := range sortedKeys(t.windows) { // time order: the drawdown is a sequence
 			per, staked = append(per, t.windows[w].pnl), append(staked, t.windows[w].staked)
 			total += t.windows[w].pnl
+			series = append(series, [2]int64{w, int64(math.Round(total))})
 			if first == 0 || w < first {
 				first = w
 			}
@@ -479,7 +539,7 @@ func buildLeaderboard(facts []MarketFacts, buckets []Bucket, book map[int64]int6
 		row := LeaderRow{VersionID: id, Strategy: v.strategy, Engine: v.engine, World: v.world, Lives: 1, LifetimePnLCents: int64(total), Bets: t.bets,
 			Windows: st.N, MeanWindowPnLCents: int64(round(st.Mean, 0)), SECents: int64(round(st.SE, 0)), T: tt,
 			TopWindowShare: share, Verdict: Verdict(Stat{N: st.N, T: tt}, rule.leaderboard, "ahead", "behind"), Flags: []string{},
-			Orders: t.orders, FirstClose: first, LastClose: last, Drawdown: DrawdownOf(per)}
+			Orders: t.orders, FirstClose: first, LastClose: last, Drawdown: DrawdownOf(per), Series: thin(series, SeriesPoints)}
 		// The period is the windows with a bet; the journal rows counted are every one this version
 		// wrote on the settled markets inside it, whether or not it bet on them.
 		for _, f := range facts {

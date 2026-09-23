@@ -171,16 +171,23 @@ td.f,td .f{font-size:11.5px}
 .bk .sw[aria-checked=true]{color:var(--ink)}.bk .sw[aria-checked=true] .tr{background:var(--up)}.bk .sw[aria-checked=true] .kn{left:14px;background:var(--paper)}
 .bk .sw[disabled]{opacity:.5;cursor:default}
 .bk .hsp{display:block;width:100%;height:22px;margin:5px 0 0;overflow:visible}
-/* history: every bucket's earnings over time, one line each */
-.hist .cvw{height:230px;position:relative}
-.hist svg{display:block;width:100%;height:100%;overflow:visible}
-.hist .yl{position:absolute;right:0;transform:translateY(-50%);font:10.5px/1 var(--mono);color:var(--mute);background:var(--paper);padding:1px 0 1px 4px}
-.hist .xl{position:absolute;bottom:-16px;font:10px/1 var(--sans);color:var(--mute)}
-.hist .lg{display:flex;flex-wrap:wrap;gap:4px 16px;margin:22px 0 0;font:11px/1.4 var(--sans);color:var(--mute)}
-.hist .lg i{display:inline-block;width:14px;border-top:2px solid;vertical-align:middle;margin-right:5px}
-.hist .lg i.done{border-top-style:dashed}
-.hist .lg .f{font-size:11px}
-.hist .chips{margin:8px 0 6px}
+/* line charts: the buckets' history and the evidence's two; several series on one axis, labels laid over the svg */
+.chart .cvw{height:230px;position:relative}
+.chart svg{display:block;width:100%;height:100%;overflow:visible}
+.chart .yl{position:absolute;right:0;transform:translateY(-50%);font:10.5px/1 var(--mono);color:var(--mute);background:var(--paper);padding:1px 0 1px 4px}
+.chart .xl{position:absolute;bottom:-16px;font:10px/1 var(--sans);color:var(--mute)}
+.chart .lg{display:flex;flex-wrap:wrap;gap:4px 16px;margin:22px 0 0;font:11px/1.4 var(--sans);color:var(--mute)}
+.chart .lg i{display:inline-block;width:14px;border-top:2px solid;vertical-align:middle;margin-right:5px}
+.chart .lg i.done{border-top-style:dashed}
+.chart .lg .f{font-size:11px}
+.chart .chips{margin:8px 0 6px}
+.chart.sm .cvw{height:150px}
+/* the evidence: the method behind a fold, the figures in front */
+.how{margin:8px 0 0;border-top:1px solid var(--hair)}
+.how summary{min-height:34px;padding-top:2px;border-bottom:0;font:600 10px/1.2 var(--sans);letter-spacing:.12em;text-transform:uppercase;color:var(--mute)}
+.how summary::before{font-size:14px}
+.how .what{margin:2px 0 8px;max-width:none}
+.lb .hsp{display:block;width:100%;height:22px;margin:4px 0 0 24px;width:calc(100% - 24px);overflow:visible}
 .said{margin:8px 0 0;padding:6px 10px;border-left:2px solid var(--ink);font:12.5px/1.35 var(--serif)}
 .said.bad{border-color:var(--dn);color:var(--dn)}
 .grp>.said{margin:8px 0 6px}
@@ -875,27 +882,34 @@ function histSpark(name){var hb=null;histSeries().forEach(function(h){if(h.name=
   return'<svg class="hsp" viewBox="0 0 100 22" preserveAspectRatio="none" role="img" aria-label="Earned over the range: '+esc(sgn(last-first))+'">'+
     '<line x1="0" x2="100" y1="'+sp.y0.toFixed(1)+'" y2="'+sp.y0.toFixed(1)+'" stroke="var(--rule)" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/>'+
     '<path d="'+sp.d+'" fill="none" stroke="'+(last>first?"var(--up)":last<first?"var(--dn)":"var(--mute)")+'" stroke-width="1.2" vector-effect="non-scaling-stroke"/></svg>'}
-function histHTML(){var d=S.hist.data,list=histSeries(),W=600,H=230;
-  var out='<div class="sec hist" id="j-history"><span class="k">History · what each bucket has earned</span><h2>Earnings over time</h2>'+
+/* linesSVG draws several series on one axis: lines are {pts:[[x,y],...], ink, dashed}; o.fmt puts a y figure into words, o.zero draws
+   and labels the zero line, o.x0/o.x1 fix the span (else the lines' own). The zero line is labelled first; the top and bottom only
+   where they do not sit on it. Labels are HTML laid over the svg, so the svg can stretch without stretching the type. */
+function linesSVG(lines,o){var W=600,H=230,x0=num(o.x0),x1=num(o.x1),lo=Infinity,hi=-Infinity;
+  lines.forEach(function(l){l.pts.forEach(function(p){lo=Math.min(lo,p[1]);hi=Math.max(hi,p[1])})});
+  if(o.zero){lo=Math.min(lo,0);hi=Math.max(hi,0)}
+  if(x0==null||x1==null||x1<=x0){x0=Infinity;x1=-Infinity;lines.forEach(function(l){x0=Math.min(x0,l.pts[0][0]);x1=Math.max(x1,l.pts[l.pts.length-1][0])})}
+  if(hi===lo){var u=o.unit||1;hi+=u;lo-=u}var pad=(hi-lo)*.06,top=hi,bot=lo;hi+=pad;lo-=pad;
+  var X=function(t){return(t-x0)/((x1-x0)||1)*W},Y=function(v){return H-(v-lo)/(hi-lo)*H};
+  var paths=lines.map(function(l){var dd="";l.pts.forEach(function(p,k){dd+=(k?"L":"M")+X(p[0]).toFixed(1)+" "+Y(p[1]).toFixed(1)});
+    return'<path d="'+dd+'" fill="none" stroke="'+l.ink+'" stroke-width="'+(l.dashed?1.1:1.5)+'"'+(l.dashed?' stroke-dasharray="4 3" stroke-opacity=".75"':"")+' vector-effect="non-scaling-stroke"/>'}).join("");
+  var labels=[];(o.zero?[0,top,bot]:[top,bot]).forEach(function(v){var y=Y(v)/H*100;if(labels.every(function(w){return Math.abs(Y(w)/H*100-y)>=7}))labels.push(v)});
+  return'<div class="cvw"><svg viewBox="0 0 '+W+" "+H+'" preserveAspectRatio="none" role="img" aria-label="'+esc(o.label||"")+'">'+
+    (o.zero?'<line x1="0" x2="'+W+'" y1="'+Y(0).toFixed(1)+'" y2="'+Y(0).toFixed(1)+'" stroke="var(--ink)" stroke-opacity=".45" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/>':"")+paths+"</svg>"+
+    labels.map(function(v){var y=Y(v)/H*100;if(y<3||y>97)return"";return'<span class="yl" style="top:'+y.toFixed(1)+'%">'+esc(o.fmt(v))+"</span>"}).join("")+
+    '<span class="xl" style="left:0">'+esc(sinceText(x0))+'</span><span class="xl" style="right:0">'+esc(sinceText(x1))+"</span></div>"}
+function legendHTML(items){return'<div class="lg">'+items.map(function(it){return'<span><i class="'+(it.dashed?"done":"")+'" style="border-color:'+it.ink+'"></i>'+it.text+(it.figure?' <span class="f '+(it.cls||"")+'">'+it.figure+"</span>":"")+"</span>"}).join("")+"</div>"}
+function dollars(v){return fig(v,0,1).replace(IP,"")}
+function histHTML(){var d=S.hist.data,list=histSeries();
+  var out='<div class="sec hist chart" id="j-history"><span class="k">History · what each bucket has earned</span><h2>Earnings over time</h2>'+
     '<p class="what">One line per bucket, live or closed: its value less what was put into it, from the minute\u2019s value snapshots. A restake or an allocation moves both and draws no step; a closed bucket is dashed and ends where it closed.</p>'+
     '<div class="chips" id="hrange" role="group" aria-label="History range">'+HRANGES.map(function(v){return'<button type="button" data-k="h'+v+'" data-v="'+v+'" data-act="hist-range" aria-pressed="'+(v===S.hist.range)+'">'+v+"</button>"}).join("")+"</div>";
   if(!d)return out+'<p class="empty">'+(S.fail.hist?"No answer from api/buckets/history yet. Trying again shortly.":"Reading the history…")+"</p></div>";
-  var series=list.map(function(hb,i){return{hb:hb,pts:earnedPts(hb),i:i}}).filter(function(s){return s.pts.length>=2});
+  var series=list.map(function(hb,i){return{hb:hb,pts:earnedPts(hb),i:i,done:hb.status==="frozen"}}).filter(function(s){return s.pts.length>=2});
   if(!series.length)return out+'<p class="empty">No snapshots in this range yet. One is written each minute a bucket is held.</p></div>';
-  var x0=num(d.since),x1=num(d.as_of),lo=0,hi=0;series.forEach(function(s){s.pts.forEach(function(p){lo=Math.min(lo,p[1]);hi=Math.max(hi,p[1])})});
-  if(x0==null||x1==null||x1<=x0){x0=Infinity;x1=-Infinity;series.forEach(function(s){x0=Math.min(x0,s.pts[0][0]);x1=Math.max(x1,s.pts[s.pts.length-1][0])})}
-  if(hi===lo){hi+=100;lo-=100}var pad=(hi-lo)*.06,top=hi,bot=lo;hi+=pad;lo-=pad;
-  var X=function(t){return(t-x0)/((x1-x0)||1)*W},Y=function(v){return H-(v-lo)/(hi-lo)*H};
-  var paths=series.map(function(s){var dd="";s.pts.forEach(function(p,k){dd+=(k?"L":"M")+X(p[0]).toFixed(1)+" "+Y(p[1]).toFixed(1)});var done=s.hb.status==="frozen";
-    return'<path d="'+dd+'" fill="none" stroke="'+histColour(s.i)+'" stroke-width="'+(done?1.1:1.5)+'"'+(done?' stroke-dasharray="4 3" stroke-opacity=".75"':"")+' vector-effect="non-scaling-stroke"/>'}).join("");
-  /* the zero line is labelled first; the top and bottom only where they do not sit on it */
-  var zero=Y(0),labels=[];[0,top,bot].forEach(function(v){var y=Y(v)/H*100;if(labels.every(function(w){return Math.abs(Y(w)/H*100-y)>=7}))labels.push(v)});
-  out+='<div class="cvw"><svg viewBox="0 0 '+W+" "+H+'" preserveAspectRatio="none" role="img" aria-label="Earnings over time, one line per bucket">'+
-    '<line x1="0" x2="'+W+'" y1="'+zero.toFixed(1)+'" y2="'+zero.toFixed(1)+'" stroke="var(--ink)" stroke-opacity=".45" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/>'+paths+"</svg>"+
-    labels.map(function(v){var y=Y(v)/H*100;if(y<3||y>97)return"";return'<span class="yl" style="top:'+y.toFixed(1)+'%">'+esc(fig(v,0,1).replace(IP,""))+"</span>"}).join("")+
-    '<span class="xl" style="left:0">'+esc(sinceText(x0))+'</span><span class="xl" style="right:0">'+esc(sinceText(x1))+"</span></div>";
-  out+='<div class="lg">'+series.map(function(s){var last=s.pts[s.pts.length-1][1],done=s.hb.status==="frozen";return'<span><i class="'+(done?"done":"")+'" style="border-color:'+histColour(s.i)+'"></i>'+esc(str(s.hb.strategy)||s.hb.name)+(num(s.hb.life)>1?" life "+s.hb.life:"")+(done?" · closed":"")+' <span class="f '+cls(last)+'">'+sgn(last)+"</span></span>"}).join("")+"</div></div>";
-  return out}
+  out+=linesSVG(series.map(function(s){return{pts:s.pts,ink:histColour(s.i),dashed:s.done}}),{x0:d.since,x1:d.as_of,zero:true,unit:100,fmt:dollars,label:"Earnings over time, one line per bucket"});
+  out+=legendHTML(series.map(function(s){var last=s.pts[s.pts.length-1][1];return{ink:histColour(s.i),dashed:s.done,text:esc(str(s.hb.strategy)||s.hb.name)+(num(s.hb.life)>1?" life "+s.hb.life:"")+(s.done?" · closed":""),figure:sgn(last),cls:cls(last)}}));
+  return out+"</div>"}
 function pc(bps){return(bps/100).toFixed(bps%100?2:0)+"%"}
 /* The operator key: with AC_OPERATOR_KEY set on the service, every change needs it. Asked for once, kept for this tab, asked again if refused. */
 function opKey(){try{return sessionStorage.getItem("ac.key")||""}catch(e){return""}}
@@ -1122,47 +1136,61 @@ function vcell(r,need){need=need||NEED_T;var v=r.verdict,n=num(r.n_windows!=null
   if(resolved(v)){var good=v==="model better"||v==="ahead";return'<span class="vd '+(good?"up":"dn")+'">'+esc(v.replace("model ",""))+"</span>"}
   if(n==null)return'<span class="prog">—</span>';
   if(n<NEED_W)return'<span class="prog" title="unresolved: '+n+" of "+NEED_W+' windows">'+n+" of "+NEED_W+'<i><b style="width:'+Math.max(0,Math.min(100,n/NEED_W*100))+'%"></b></i></span>';
-  if(PARTIAL||Math.abs(num(r.t)||0)>=need)return'<span class="prog" title="unresolved">'+(PARTIAL?"history loading":"no verdict given")+"</span>";
+  if(PARTIAL||Math.abs(num(r.t)||0)>=need)return'<span class="prog" title="unresolved">'+(PARTIAL?"loading history":"no verdict given")+"</span>";
   return'<span class="prog" title="unresolved: |t| below '+fx(need,2)+'">|t| '+fx(Math.abs(num(r.t)||0),2)+" &lt; "+fx(need,2)+"</span>"}
 function scoreTable(title,rows,key){rows=objs(rows);if(!rows.length)return"";
   return'<div class="scroll"><table><thead><tr><th>'+title+"</th><th>Model</th><th>Market</th><th>Diff</th><th>Verdict</th></tr></thead><tbody>"+rows.map(function(r){var z=!num(r.n_windows),res=resolved(r.verdict);
     return"<tr><td>"+esc(str(r[key])||"—")+'</td><td class="f">'+(z?"—":fx(r.brier_model,4))+'</td><td class="f">'+(z?"—":fx(r.brier_market,4))+'</td><td class="f '+(res?(r.diff<0?"up":"dn"):"mu")+'">'+(z?"—"+IP:sdiff(r.diff))+"</td><td>"+vcell(r,NEED_T_CUT)+"</td></tr>"}).join("")+"</tbody></table></div>"}
 function sname(r){return esc(str(r.strategy)||"—")+(r.world==="anti"?" anti":"")+" "+esc(str(r.engine))}
+/* how: the method behind a fold. The API's `what` texts are written for the agents reading it; here they are kept, one click away. */
+function how(title,text){text=str(text);return text?'<details class="how"><summary>'+esc(title)+'</summary><p class="what">'+esc(text)+"</p></details>":""}
+/* The evidence pane leads with what happened: the standings and each strategy's P&L drawn over time, then the model against the market
+   over time, then whether the early sales were real. Every paragraph of method sits behind a fold. */
 function renderEvidence(){var el=$("p-evidence"),d=S.analysis;
   if(!d){setHTML(el,'<p class="empty" style="margin-top:14px">'+(S.fail.analysis?"No answer from api/analysis yet. Trying again shortly.":"Reading the evidence…")+"</p>");return}
   rules(d);PARTIAL=!!(d.coverage&&d.coverage.complete===false);var cov=d.coverage&&typeof d.coverage==="object"?d.coverage:{};
   var sc=d.scorecard&&typeof d.scorecard==="object"?d.scorecard:{},o=sc.overall&&typeof sc.overall==="object"?sc.overall:{},n=num(o.n_windows)||0,t=num(o.t),res=resolved(o.verdict);
-  var out='<div class="lede"><span class="k">The evidence · computed '+clock(d.computed_at)+" · "+(num(d.windows_recorded)!=null?d.windows_recorded:"—")+' windows recorded</span></div>'+
+  var out='<div class="lede"><span class="k">The evidence · computed '+clock(d.computed_at)+" · "+(num(d.windows_recorded)!=null?d.windows_recorded:"—")+' windows recorded</span>'+
     (d.stale?'<p class="what"><b>Not current.</b> The last refresh failed'+(str(d.stale_reason)?": "+esc(d.stale_reason):"")+". These are the figures from "+clock(d.computed_at)+".</p>":"")+
-    (cov.complete===false?'<p class="what"><b>Still reading history.</b> '+(num(cov.markets_aggregated)!=null?grp(cov.markets_aggregated,0):"—")+" of "+(num(cov.markets_settled)!=null?grp(cov.markets_settled,0):"—")+" settled rounds read so far"+(num(cov.markets_unreconciled)?", "+cov.markets_unreconciled+" held back because their payouts are not all written yet":"")+". No verdict is given until every round is in.</p>":"")+
-    '<div class="two"><div><div class="sec" style="margin-top:10px"><span class="k">Scorecard · model v. market</span>';
-  out+='<div class="verdict"><h3>'+(res?esc(o.verdict.charAt(0).toUpperCase()+o.verdict.slice(1)):"Unresolved, as expected <span>"+(n<NEED_W?n+" of "+NEED_W+" windows":"|t| "+fx(Math.abs(t||0),2)+" of "+NEED_T)+"</span>")+"</h3>"+
-    '<p class="what" style="margin:2px 0 6px">'+(res?"Enough independent windows, and the difference can be told from zero.":(n===0?"No settled windows yet. ":"")+"A verdict needs "+NEED_W+" independent windows and |t| of at least "+NEED_T+"; until then a difference cannot be told from zero. A window is 15 minutes, so this takes days to weeks.")+"</p>"+
-    '<div class="meter"><span>Settled windows</span><div class="bar"><i style="width:'+Math.min(100,n/NEED_W*100)+'%"></i><s style="left:100%"></s></div><span class="f">'+n+" / "+NEED_W+"</span></div>"+
-    '<div class="meter"><span>|t| statistic</span><div class="bar"><i style="width:'+Math.min(100,Math.abs(t||0)/4*100)+'%"></i><s style="left:50%"></s></div><span class="f">'+(n&&t!=null?fx(Math.abs(t),2):"—")+" / "+NEED_T+"</span></div></div>";
-  out+='<div class="row"><span>Model Brier <span class="n">lower is better</span></span><span class="f">'+(n?fx(o.brier_model,4):"—")+IP+"</span></div>";
-  out+='<div class="row"><span>Market Brier</span><span class="f">'+(n?fx(o.brier_market,4):"—")+IP+"</span></div>";
-  out+='<div class="row sum"><span>Difference <span class="n" style="font-weight:400">± s.e.; positive = model worse</span></span><span class="f '+(res?(o.diff<0?"up":"dn"):"")+'">'+(n?sdiff(o.diff).replace(IP,"")+" ± "+fx(o.se,4)+IP:"—"+IP)+'</span></div><hr class="dbl" style="margin:0">';
-  out+='<p class="what">'+esc(str(sc.what))+" "+(num(o.n_rows)!=null?grp(o.n_rows,0)+" rows.":"")+"</p>";
-  out+=scoreTable("By time to close",sc.by_band,"band")+'<div style="height:10px"></div>'+scoreTable("By coin",sc.by_coin,"coin")+"</div></div>";
-  /* fills: strategies with no early sales fold into one line */
-  var f=d.fills&&typeof d.fills==="object"?d.fills:{},fr=objs(f.by_strategy),sold=fr.filter(function(r){return num(r.sells)>0}),none=fr.filter(function(r){return!(num(r.sells)>0)});
-  out+='<div><div class="sec" style="margin-top:10px"><span class="k">Fill realism</span><h2>Would those sales have filled?</h2><p class="what">'+esc(str(f.what))+"</p>";
-  if(sold.length){var nod=0,tot=0;out+='<div class="scroll"><table><thead><tr><th>Strategy</th><th>Sells</th><th>Beyond bid</th><th>Sale P&amp;L</th><th>If capped</th></tr></thead><tbody>'+sold.map(function(r){nod+=num(r.sells_without_depth)||0;tot+=r.sells;
-      return"<tr><td>"+esc(str(r.strategy)||"—")+(r.world==="anti"?'<span class="tag">anti</span>':"")+etag(r.engine)+'</td><td class="f">'+r.sells+(num(r.sells_without_depth)?'<span class="mu">†</span>':'<span class="ip">†</span>')+'</td><td class="f">'+(num(r.share_beyond)==null?"—":Math.round(r.share_beyond*100)+"%")+'</td><td class="f '+cls(r.sale_pnl_cents)+'">'+fig(r.sale_pnl_cents)+'</td><td class="f '+cls(r.sale_pnl_capped_cents)+'">'+fig(r.sale_pnl_capped_cents)+"</td></tr>"}).join("")+"</tbody></table></div>";
-    if(nod)out+='<p class="what">† '+nod+" of "+tot+" sales were made before order-book depth was recorded. They are counted, never guessed at, so “if capped” covers only the rest.</p>"}
-  if(none.length)out+='<p class="what" style="font-style:normal"><b>No early sales yet:</b> '+none.map(sname).join(" · ")+".</p>";
-  if(!fr.length)out+='<p class="empty">No early sales on record yet.</p>';
-  out+="</div></div></div>";
-  /* leaderboard */
+    (cov.complete===false?'<p class="what"><b>Still reading history:</b> '+(num(cov.markets_aggregated)!=null?grp(cov.markets_aggregated,0):"—")+" of "+(num(cov.markets_settled)!=null?grp(cov.markets_settled,0):"—")+" settled rounds read"+(num(cov.markets_unreconciled)?", "+cov.markets_unreconciled+" held back":"")+". No verdict until every round is in.</p>":"")+"</div>";
+  /* standings: each strategy version's realised P&L, and its line over time */
   var lb=d.leaderboard&&typeof d.leaderboard==="object"?d.leaderboard:{},lr=objs(lb.rows);
-  out+='<div class="sec"><span class="k">Leaderboard · per strategy version</span><h2>Standings</h2><p class="what">'+esc(str(lb.what))+"</p>"+(d.conventions&&str(d.conventions.note)?'<p class="what">'+esc(d.conventions.note)+"</p>":"")+'<div class="lbcols">';
-  out+=lr.length?lr.map(function(r,i){var w=num(r.windows),res=resolved(r.verdict);
+  var lines=lr.map(function(r,i){return{r:r,i:i,pts:cleanPts(r.series),done:arr(r.flags).some(function(fl){return/not staked again/.test(str(fl))})}}).filter(function(l){return l.pts.length>=2});
+  out+='<div class="sec chart" id="j-standings"><span class="k">Standings · per strategy version</span><h2>Realised P&amp;L</h2>'+
+    '<p class="what">What each strategy has made or lost on settled rounds, added up window by window. Windows are the independent sample, not bets; a verdict needs '+NEED_W+' of them and |t| of at least '+fx(NEED_T_LB,2)+', corrected for every version tried.</p>';
+  if(lines.length)out+=linesSVG(lines.map(function(l){return{pts:l.pts,ink:histColour(l.i),dashed:l.done}}),{zero:true,unit:100,fmt:dollars,label:"Realised P&L over time, one line per strategy version"})+
+    legendHTML(lines.map(function(l){return{ink:histColour(l.i),dashed:l.done,text:esc(str(l.r.strategy)||"—")+(l.r.world==="anti"?" anti":"")+(l.done?" · ran out":""),figure:sgn(l.r.lifetime_pnl_cents),cls:cls(l.r.lifetime_pnl_cents)}}));
+  out+='<div class="lbcols" style="margin-top:12px">'+(lr.length?lr.map(function(r,i){var w=num(r.windows),rs=resolved(r.verdict),pts=cleanPts(r.series),sp=pts.length>=2?sparkPath(pts,100,22):null;
+    var status=rs?vcell(r,NEED_T_LB):PARTIAL?"loading history":w!=null&&w>=NEED_W?(Math.abs(num(r.t)||0)>=NEED_T_LB?"no verdict given":"|t| below "+fx(NEED_T_LB,2)):'<span class="f">'+(w==null?"—":w)+" of "+NEED_W+"</span> windows";
     return'<div class="lb"><div class="t"><span class="r">'+(i+1)+"</span><b>"+esc(str(r.strategy)||"—")+"</b>"+(r.world==="anti"?'<span class="tag">anti</span>':"")+'<span class="tag">'+esc(str(r.engine)||"—")+"</span>"+(num(r.lives)>1?'<span class="tag">'+r.lives+" lives</span>":"")+
       '<span class="f">'+fig(r.book_cents!=null?r.book_cents:r.equity_cents)+'</span><span class="f '+cls(r.lifetime_pnl_cents)+'" style="margin-left:0;min-width:78px;text-align:right">'+fig(r.lifetime_pnl_cents,0,1)+"</span></div>"+
-      '<div class="m"><span>'+(res?vcell(r,NEED_T_LB):PARTIAL?"unresolved, history still loading":w!=null&&w>=NEED_W?(Math.abs(num(r.t)||0)>=NEED_T_LB?"unresolved, no verdict given":"unresolved, |t| below "+fx(NEED_T_LB,2)):"unresolved, <span class=\"f\">"+(w==null?"—":w)+" of "+NEED_W+"</span> windows")+"</span><span>"+(num(r.bets)!=null?r.bets:"—")+" bets</span><span>per window <span class=\"f\">"+(w?sgn(r.mean_window_pnl_cents)+" ± "+usd(r.se_cents):"—")+"</span></span><span>t <span class=\"f\">"+(w?fx(r.t,2):"—")+"</span></span></div>"+
-      arr(r.flags).filter(str).map(function(fl){return'<div class="fl">⚑ '+esc(fl)+"</div>"}).join("")+"</div>"}).join(""):'<p class="empty">No strategies on the board yet.</p>';
-  out+="</div></div>";setHTML(el,out)}
+      (sp?'<svg class="hsp" viewBox="0 0 100 22" preserveAspectRatio="none" aria-hidden="true"><line x1="0" x2="100" y1="'+sp.y0.toFixed(1)+'" y2="'+sp.y0.toFixed(1)+'" stroke="var(--rule)" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/><path d="'+sp.d+'" fill="none" stroke="'+histColour(i)+'" stroke-width="1.3" vector-effect="non-scaling-stroke"/></svg>':"")+
+      '<div class="m"><span>'+status+"</span><span>"+(num(r.bets)!=null?r.bets:"—")+" bets</span><span>"+(w!=null?w:"—")+" windows</span><span>per window <span class=\"f\">"+(w?sgn(r.mean_window_pnl_cents)+" ± "+usd(r.se_cents):"—")+"</span></span><span>t <span class=\"f\">"+(w?fx(r.t,2):"—")+"</span></span></div>"+
+      arr(r.flags).filter(function(fl){return str(fl)&&!/^partial/i.test(fl)}).map(function(fl){return'<div class="fl">⚑ '+esc(fl)+"</div>"}).join("")+"</div>"}).join(""):'<p class="empty">No strategies on the board yet.</p>')+"</div>"+
+    how("How the standings are judged",str(lb.what)+(d.conventions&&str(d.conventions.note)?" "+d.conventions.note:""))+"</div>";
+  /* the scorecard: the model against the market's own price, and the running mean of each over time */
+  out+='<div class="two"><div><div class="sec chart sm" id="j-scorecard"><span class="k">Scorecard · model v. market</span>';
+  out+='<div class="verdict"><h3>'+(res?esc(o.verdict.charAt(0).toUpperCase()+o.verdict.slice(1)):"Unresolved, as expected <span>"+(n<NEED_W?n+" of "+NEED_W+" windows":"|t| "+fx(Math.abs(t||0),2)+" of "+NEED_T)+"</span>")+"</h3>"+
+    '<p class="what" style="margin:2px 0 6px">'+(res?"Enough windows, and the difference can be told from zero.":"Brier score against the market\u2019s mid price, lower is better; a verdict needs "+NEED_W+" windows and |t| of at least "+NEED_T+".")+"</p>"+
+    '<div class="meter"><span>Settled windows</span><div class="bar"><i style="width:'+Math.min(100,n/NEED_W*100)+'%"></i><s style="left:100%"></s></div><span class="f">'+n+" / "+NEED_W+"</span></div>"+
+    '<div class="meter"><span>|t| statistic</span><div class="bar"><i style="width:'+Math.min(100,Math.abs(t||0)/4*100)+'%"></i><s style="left:50%"></s></div><span class="f">'+(n&&t!=null?fx(Math.abs(t),2):"—")+" / "+NEED_T+"</span></div></div>";
+  out+='<div class="row"><span>Model Brier</span><span class="f">'+(n?fx(o.brier_model,4):"—")+IP+"</span></div>";
+  out+='<div class="row"><span>Market Brier</span><span class="f">'+(n?fx(o.brier_market,4):"—")+IP+"</span></div>";
+  out+='<div class="row sum"><span>Difference <span class="n" style="font-weight:400">± s.e.; positive = model worse</span></span><span class="f '+(res?(o.diff<0?"up":"dn"):"")+'">'+(n?sdiff(o.diff).replace(IP,"")+" ± "+fx(o.se,4)+IP:"—"+IP)+'</span></div><hr class="dbl" style="margin:0 0 10px">';
+  var ss=arr(sc.series).filter(function(p){return Array.isArray(p)&&num(p[0])!=null&&num(p[1])!=null&&num(p[2])!=null});
+  if(ss.length>=2)out+='<span class="k">Running mean over windows · lower is better</span>'+linesSVG([{pts:ss.map(function(p){return[p[0],p[1]]}),ink:histColour(0)},{pts:ss.map(function(p){return[p[0],p[2]]}),ink:histColour(1),dashed:true}],{unit:.01,fmt:function(v){return fx(v,4)},label:"Brier score, running mean, model and market"})+
+    legendHTML([{ink:histColour(0),text:"Model",figure:fx(ss[ss.length-1][1],4)},{ink:histColour(1),dashed:true,text:"Market",figure:fx(ss[ss.length-1][2],4)}]);
+  out+='<div style="height:10px"></div>'+scoreTable("By time to close",sc.by_band,"band")+'<div style="height:10px"></div>'+scoreTable("By coin",sc.by_coin,"coin")+how("How the scorecard is made",str(sc.what)+(num(o.n_rows)!=null?" "+grp(o.n_rows,0)+" rows.":""))+"</div></div>";
+  /* fills: strategies with no early sales fold into one line */
+  var f=d.fills&&typeof d.fills==="object"?d.fills:{},fr=objs(f.by_strategy),sold=fr.filter(function(r){return num(r.sells)>0}),none=fr.filter(function(r){return!(num(r.sells)>0)});
+  out+='<div><div class="sec" id="j-fills"><span class="k">Fill realism</span><h2>Would those sales have filled?</h2><p class="what">Every early sale re-priced as if only the size the book displayed had filled, the rest riding to settlement.</p>';
+  if(sold.length){var nod=0,tot=0;out+='<div class="scroll"><table><thead><tr><th>Strategy</th><th>Sells</th><th>Beyond bid</th><th>Sale P&amp;L</th><th>If capped</th></tr></thead><tbody>'+sold.map(function(r){nod+=num(r.sells_without_depth)||0;tot+=r.sells;
+      return"<tr><td>"+esc(str(r.strategy)||"—")+(r.world==="anti"?'<span class="tag">anti</span>':"")+etag(r.engine)+'</td><td class="f">'+r.sells+(num(r.sells_without_depth)?'<span class="mu">†</span>':'<span class="ip">†</span>')+'</td><td class="f">'+(num(r.share_beyond)==null?"—":Math.round(r.share_beyond*100)+"%")+'</td><td class="f '+cls(r.sale_pnl_cents)+'">'+fig(r.sale_pnl_cents)+'</td><td class="f '+cls(r.sale_pnl_capped_cents)+'">'+fig(r.sale_pnl_capped_cents)+"</td></tr>"}).join("")+"</tbody></table></div>";
+    if(nod)out+='<p class="what">† '+nod+" of "+tot+" sales were made before order-book depth was recorded: counted, never guessed at, so “if capped” covers only the rest.</p>"}
+  if(none.length)out+='<p class="what" style="font-style:normal"><b>No early sales yet:</b> '+none.map(sname).join(" · ")+".</p>";
+  if(!fr.length)out+='<p class="empty">No early sales on record yet.</p>';
+  out+=how("How the sales are re-priced",f.what)+"</div></div></div>";
+  setHTML(el,out)}
 
 /* The gain floats under its line. A click opens it; the pointer leaving the line and the card puts it away. */
 (function(){var w=$("gainwrap"),g=$("gain"),b=$("earn");if(!w||!g||!b)return;

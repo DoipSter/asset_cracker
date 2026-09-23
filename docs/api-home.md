@@ -231,6 +231,13 @@ page open. **A result that cannot be told from zero must say so**: `verdict` is 
 unless there are at least 30 independent windows AND |t| reaches the threshold in `conventions`
 that applies to that row, AND `coverage.complete` is true.
 
+Added 2026-09-23, so the page can draw the evidence over time: `scorecard.series` is the overall
+row window by window, `[close (unix s), running mean model Brier, running mean market Brier]`,
+whose last point is `overall.brier_model` and `brier_market`; each `leaderboard.rows[].series` is
+that version's realised P&L added up window by window, `[close, cumulative cents]`, whose last
+point is `lifetime_pnl_cents`. Both are thinned to at most 300 points, each bin its last window,
+so every point is a figure that stood at that moment. No statistic is changed by them.
+
 ```json
 {
   "simulated": true,
