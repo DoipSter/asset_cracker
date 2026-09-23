@@ -156,6 +156,18 @@ td.f,td .f{font-size:11.5px}
 .bk .t b{font-size:14.5px}
 .bk .t .f{margin-left:auto;font-size:13.5px;font-weight:600}
 .bk .t .d{font-size:11px;min-width:54px;text-align:right;margin-left:0;font-weight:400}
+/* close out: a small × at the end of the title line opens a confirm line under the row; the line's own button acts */
+.bk .t .x{flex:none;position:relative;align-self:center;width:22px;height:22px;margin:0 -4px 0 4px;font:400 17px/20px var(--sans);text-align:center;color:var(--mute);border:1px solid transparent;border-radius:50%}
+.bk .t .x::after{content:"";position:absolute;inset:-8px}
+.bk .t .x:hover,.bk .t .x[aria-expanded=true]{color:var(--dn);border-color:var(--dn)}
+.bk .sure{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin:8px 0 0;padding:8px 10px;border:1px solid var(--dn);font:12.5px/1.35 var(--serif)}
+.bk .sure span{flex:1 1 200px}
+.bk .sure .go{margin:0;min-height:30px;padding:0 10px;font-size:10.5px;line-height:30px}
+.said{margin:8px 0 0;padding:6px 10px;border-left:2px solid var(--ink);font:12.5px/1.35 var(--serif)}
+.said.bad{border-color:var(--dn);color:var(--dn)}
+.grp>.said{margin:8px 0 6px}
+/* closed buckets sit folded under the live ones: they are the record, not work to do */
+.closed>summary{min-height:36px;padding-top:0;border-bottom:1px solid var(--hair)}
 .bar{position:relative;height:4px;margin:7px 0 6px;background:var(--hair)}
 .bar i{position:absolute;left:0;top:0;bottom:0;background:var(--ink)}
 .bar i.up{background:var(--up)}.bar i.dn{background:var(--dn)}
@@ -688,13 +700,18 @@ function bucketRow(b,D){var eq=num(b.equity_cents),seed=num(b.seed_cents),hw=num
   var pos=function(v){return Math.max(0,Math.min(100,50+(v/seed-1)/D*50))},bar="";
   if(seed&&eq!=null){var pe=pos(eq);bar='<i class="'+(eq>=seed?"up":"dn")+'" style="left:'+Math.min(50,pe).toFixed(1)+"%;width:"+Math.abs(pe-50).toFixed(1)+'%"></i>'}
   bar+='<s style="left:50%"></s>';if(seed&&hw!=null&&hw>seed*1.002)bar+='<u style="left:'+pos(hw).toFixed(1)+'%"></u>';
-  var stTag=st==="active"?"active":'<span class="tag '+(st==="tripped"?"bad":st==="winding_down"?"warn":"")+'" style="margin-left:0">'+esc(st.replace("_"," "))+"</span>";
-  var close="";
-  if(st!=="frozen"&&num(b.id)!=null){var armed=S.armed==="close:"+b.id;close='<button type="button" class="go bad'+(armed?" armed":"")+'" data-act="close" data-id="'+b.id+'">'+(armed?"Sure? Close out":"Close out")+"</button>"}
-  return'<div class="bk'+(st==="frozen"?" frozen":"")+'"><div class="t"><b>'+esc(str(b.strategy)||str(b.name)||"—")+"</b>"+(coin?'<span class="k">'+esc(coin[1])+"</span>":"")+(num(b.life)>1?'<span class="tag">life '+b.life+"</span>":"")+
-    '<span class="f">'+fig(eq)+'</span><span class="f d '+cls(d)+'">'+pct(d,1)+"</span></div>"+
+  /* the database says "frozen"; on the page a frozen bucket is closed: reaped, kept, finished with */
+  var stTag=st==="active"?"active":'<span class="tag '+(st==="tripped"?"bad":st==="winding_down"?"warn":"")+'" style="margin-left:0">'+esc(st==="frozen"?"closed":st.replace("_"," "))+"</span>";
+  var name=str(b.strategy)||str(b.name)||"—",x="",sure="";
+  if(st!=="frozen"&&num(b.id)!=null){var armed=S.armed==="close:"+b.id;
+    x='<button type="button" class="x" data-act="close-arm" data-id="'+b.id+'" data-k="x'+b.id+'" aria-label="Close out '+esc(name)+'" aria-expanded="'+armed+'" title="Close out">×</button>';
+    if(armed)sure='<div class="sure" role="group" aria-label="Confirm close out"><span>Close out <b>'+esc(name)+'</b>? What it holds goes to replenishment and the bucket is closed with its record; its bets stay.'+(num(b.at_risk_cents)>0?" It has bets open now: the service refuses until they settle.":"")+'</span><button type="button" class="go bad armed" data-act="close" data-id="'+b.id+'" data-k="close'+b.id+'">Close out</button><button type="button" class="go" data-act="keep" data-id="'+b.id+'" data-k="keep'+b.id+'">Keep</button></div>'}
+  if(S.said&&S.said.id===b.id&&st!=="frozen")sure+=saidHTML(); /* the outcome of the last close-out, under the row it was asked of */
+  return'<div class="bk'+(st==="frozen"?" frozen":"")+'"><div class="t"><b>'+esc(name)+"</b>"+(coin?'<span class="k">'+esc(coin[1])+"</span>":"")+(num(b.life)>1?'<span class="tag">life '+b.life+"</span>":"")+
+    '<span class="f">'+fig(eq)+'</span><span class="f d '+cls(d)+'">'+pct(d,1)+"</span>"+x+"</div>"+
     '<div class="bar" role="img" aria-label="Equity '+usd(eq)+", seed "+usd(seed)+", high-water "+usd(hw)+'">'+bar+"</div>"+
-    '<div class="m"><span>'+stTag+"</span><span>life "+(num(b.life)!=null?b.life:"—")+"</span><span>"+(num(b.bets)!=null?b.bets:"—")+" bets</span><span>seed <span class=\"f\">"+usd(seed)+"</span></span><span>high <span class=\"f\">"+usd(hw)+"</span></span><span>allocated <span class=\"f\">"+usd(b.allocated_cents)+"</span></span>"+(num(b.at_risk_cents)?"<span>at risk <span class=\"f\">"+usd(b.at_risk_cents)+"</span></span>":"")+"</div>"+close+"</div>"}
+    '<div class="m"><span>'+stTag+"</span><span>life "+(num(b.life)!=null?b.life:"—")+"</span><span>"+(num(b.bets)!=null?b.bets:"—")+" bets</span><span>seed <span class=\"f\">"+usd(seed)+"</span></span><span>high <span class=\"f\">"+usd(hw)+"</span></span><span>allocated <span class=\"f\">"+usd(b.allocated_cents)+"</span></span>"+(num(b.at_risk_cents)?"<span>at risk <span class=\"f\">"+usd(b.at_risk_cents)+"</span></span>":"")+"</div>"+sure+"</div>"}
+function saidHTML(){return'<p class="said'+(S.said.bad?" bad":"")+'" role="status">'+esc(S.said.text)+"</p>"}
 function pc(bps){return(bps/100).toFixed(bps%100?2:0)+"%"}
 /* The operator key: with AC_OPERATOR_KEY set on the service, every change needs it. Asked for once, kept for this tab, asked again if refused. */
 function opKey(){try{return sessionStorage.getItem("ac.key")||""}catch(e){return""}}
@@ -827,10 +844,14 @@ function renderBuckets(){var el=$("p-buckets"),d=S.buckets;
   var cut=D*1.05>.5;D=Math.min(.5,Math.ceil(D*1.05*20)/20);
   var out='<div class="lede"><span class="k">The money story</span><h2 style="font-size:26px;margin-top:3px">Buckets</h2><p class="what">Bar: equity against seed. The centre tick <b style="font-style:normal">|</b> is the seed, the fill runs from it to equity, and the bracket <b style="font-style:normal">]</b> marks high water. Every bar spans ±'+Math.round(D*100)+"% of seed"+(cut?"; a bar that reaches the edge is cut off there":"")+". “Allocated” is the sustainment allocation taken to date.</p>"+[d.buckets_error,d.capital_error].filter(str).map(function(m){return'<p class="what"><b>Not current.</b> '+esc(m)+"</p>"}).join("")+
     '<div class="jump" role="group" aria-label="Jump to">'+[["controls","Controls"],["g0","Live engine"]].concat(G[1][3].length?[["g1","Archived"]]:[],[["rule","Allocation rule"],["money","Set aside"],["ev","Notices"]]).map(function(j){return'<button type="button" data-k="j'+j[0]+'" data-j="j-'+j[0]+'">'+j[1]+"</button>"}).join("")+'</div></div><div class="cols">';
-  G.forEach(function(g,gi){if(g[0]==="legacy"&&!g[3].length)return;var eq=0,seed=0,al=0,live=0,fz=0;g[3].forEach(function(b){al+=num(b.allocated_cents)||0;if(b.status==="frozen"){fz++;return}live++;eq+=num(b.equity_cents)||0;seed+=num(b.seed_cents)||0});
+  /* live buckets are listed; closed ones (frozen: reaped, record kept) sit folded under them, shut unless the reader opened them */
+  G.forEach(function(g,gi){if(g[0]==="legacy"&&!g[3].length)return;var eq=0,seed=0,al=0,live=0,fz=0,shut=[],ck="closed:"+g[0];g[3].forEach(function(b){al+=num(b.allocated_cents)||0;if(b.status==="frozen"){fz++;shut.push(b);return}live++;eq+=num(b.equity_cents)||0;seed+=num(b.seed_cents)||0});
     out+='<details class="grp sec" id="j-g'+gi+'" data-g="'+g[0]+'"'+(S.fold[g[0]]?"":" open")+'><summary data-k="sum'+gi+'"><h2>'+g[1]+(g[2]?" <small>"+g[2]+"</small>":"")+'</h2><span class="f">'+(g[3].length?usd(eq):"—")+"</span></summary>"+
       (g[0]==="legacy"&&live?'<p class="what">Close one out on its own. What it holds goes to replenishment, and its bets stay, so the record is still there to learn from. This is not a reset.</p>':"")+
-      (g[3].length?g[3].map(function(b){return bucketRow(b,D)}).join("")+'<div class="gsum"><span>'+live+" live bucket"+(live===1?"":"s")+(fz?" · "+fz+" closed":"")+"<small>live seed "+usd(seed)+" · allocated to date "+usd(al)+'</small></span><span class="f">'+usd(eq)+"</span></div>":'<p class="empty">None deployed.</p>')+"</details>"});
+      (g[3].length?g[3].filter(function(b){return b.status!=="frozen"}).map(function(b){return bucketRow(b,D)}).join("")+
+        (S.said&&shut.some(function(b){return b.id===S.said.id})?saidHTML():"")+
+        (shut.length?'<details class="closed" data-g="'+ck+'"'+(S.fold[ck]===false?" open":"")+'><summary data-k="cl'+gi+'"><span class="k">'+shut.length+" closed bucket"+(shut.length===1?"":"s")+" · record kept</span></summary>"+shut.map(function(b){return bucketRow(b,D)}).join("")+"</details>":"")+
+        '<div class="gsum"><span>'+live+" live bucket"+(live===1?"":"s")+(fz?" · "+fz+" closed":"")+"<small>live seed "+usd(seed)+" · allocated to date "+usd(al)+'</small></span><span class="f">'+usd(eq)+"</span></div>":'<p class="empty">None deployed.</p>')+"</details>"});
   out+="</div>";
   /* the rule in force */
   var p=d.policy&&typeof d.policy==="object"?d.policy:{},rates=[["Winnings",p.winnings_bps,""],["Replenishment",p.replenish_bps,""],["Tax reserve",p.tax_bps,"government tax"],["Fee reserve",p.fees_bps,""]];
@@ -880,10 +901,17 @@ $("p-buckets").addEventListener("toggle",function(e){if(e.target&&e.target.id===
 $("p-buckets").addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("[data-act]");if(!b||S.ctlBusy)return;var act=b.getAttribute("data-act");
   var fail=function(err){S.ctlBusy=0;say(err&&err.message?err.message:"The control did not go through.")};
   var done=function(m){S.ctlBusy=0;say(m);refreshBooks()};
-  /* Reap and restake close a bucket: the first click arms the button, the second acts. Any other click disarms. */
-  if(act==="reap"||act==="restake"||act==="close"){var key=act+":"+b.getAttribute("data-id");if(S.armed!==key){S.armed=key;say(act==="restake"?"A fresh $1,000 life is seeded from the common pool (the owners cover any shortfall). Click again to do it.":act==="close"?"Close out sends what this bucket holds to replenishment and freezes it. Its bets and record stay. Click again to do it.":"Reap closes the bucket: what it holds goes to the common pool and it is frozen with its record. Click again to do it.");return}S.armed=null}else if(S.armed){S.armed=null}
+  /* Close out: the × opens the bucket's confirm line (and shuts it again); the line's own button acts; Keep shuts it.
+     Reap and restake arm on the first click and act on the second. Any other action disarms whatever was armed. */
+  S.said=null; /* the last close-out's outcome stays under its row until the next act */
+  if(act==="close-arm"||act==="keep"){var ck="close:"+b.getAttribute("data-id");S.armed=act==="keep"||S.armed===ck?null:ck;renderBuckets();return}
+  if(act==="close"){if(S.armed!=="close:"+b.getAttribute("data-id")){S.armed=null;renderBuckets();return}S.armed=null}
+  else if(act==="reap"||act==="restake"){var key=act+":"+b.getAttribute("data-id");if(S.armed!==key){S.armed=key;say(act==="restake"?"A fresh $1,000 life is seeded from the common pool (the owners cover any shortfall). Click again to do it.":"Reap closes the bucket: what it holds goes to the common pool and it is frozen with its record. Click again to do it.");return}S.armed=null}
+  else if(S.armed){S.armed=null}
   S.ctlBusy=1;
-  if(act==="close"){post("api/controls/bucket/close",{id:Number(b.getAttribute("data-id"))},40000).then(function(j){done("Closed out "+(j.bucket||"the bucket")+": "+usd(j.reaped_cents)+" to replenishment. Its bets and record stay.")}).catch(fail);return}
+  if(act==="close"){var cid=Number(b.getAttribute("data-id")),said=function(t,bad){S.ctlBusy=0;S.said={id:cid,text:t,bad:!!bad};renderBuckets()};
+    post("api/controls/bucket/close",{id:cid},40000).then(function(j){said("Closed out "+(j.bucket||"the bucket")+": "+usd(j.reaped_cents)+" to replenishment. Its bets and record stay.");refreshBooks()},
+      function(e){said((e&&e.message)||"The close-out did not go through.",true)});return}
   if(act==="reap"||act==="restake"){post("api/controls/version/reap",{id:Number(b.getAttribute("data-id")),restake:act==="restake"},40000).then(function(j){var m=j.bucket?"Reaped "+j.bucket+": "+usd(j.reaped_cents)+" to the common pool, frozen with its record.":"";if(j.next)m+=(m?" ":"")+"Seeded "+j.next+" with $1,000"+(num(j.ordering)>0?"; it trades on the next look if its version is approved.":"; held settle-only until its version is approved.");done(m||"Done.")}).catch(fail);return}
   if(act==="remix"){var v=null;objs((S.controls||{}).versions).forEach(function(x){if(String(x.id)===b.getAttribute("data-id"))v=x});if(!v||!v.shape){S.ctlBusy=0;say("That version has no shape to remix.");return}
     var sh=JSON.parse(JSON.stringify(v.shape));sh.name=(sh.name||"")+" remix";nbFill({shape:sh,what:""});S.draft["nb-hyp"]="";S.draft["nb-preset"]="";S.nbOpen=true;S.ctlBusy=0;say("The builder holds "+v.name+"'s numbers. Change what you think went wrong, name it, say what the remix tests, and register it.");
