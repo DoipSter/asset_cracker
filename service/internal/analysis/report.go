@@ -351,6 +351,11 @@ func buildScorecard(facts []MarketFacts, rule thresholds) Scorecard {
 	return sc
 }
 
+// scoredEngine is the engine whose journal the scorecard scores (store.AnalysisModelVersions:
+// the live engine's version-3 originals). A version of any other engine, or a twin, trades a
+// model the scorecard does not see, and the gate's calibration check says so.
+const scoredEngine = "v3"
+
 // version is what the fills and leaderboard group by: a strategy version, whatever bucket or
 // life the money was in.
 type version struct {
@@ -499,7 +504,7 @@ func buildLeaderboard(facts []MarketFacts, buckets []Bucket, book map[int64]int6
 			row.Gate = notEvaluated("no settled window with a bet")
 		default:
 			row.Gate = evaluateGate(gate, gateInputs{windows: st.N, needed: row.WindowsNeeded, ret: Ratio{N: ret.N, Value: row.ReturnPerDollar, SE: row.ReturnSE},
-				lower: row.ReturnLower, drawdown: row.Drawdown, modelScored: v.engine == "v2" && v.world == "real", overall: overall})
+				lower: row.ReturnLower, drawdown: row.Drawdown, modelScored: v.engine == scoredEngine && v.world == "real", overall: overall})
 		}
 		if partial != "" {
 			row.Flags = append(row.Flags, partial+"; lifetime_pnl_cents, bets, windows and t cover those only, and no verdict is given until all are read")

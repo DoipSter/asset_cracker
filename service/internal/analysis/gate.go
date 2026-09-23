@@ -72,7 +72,7 @@ const gateNote = "The promotion gate, a rule chosen in advance. A strategy versi
 	"(the windows at which a true return of min_edge_per_dollar would be found with probability `power` at threshold z, given the spread the bootstrap measured); " +
 	"edge: return_lower, the after-fee return per dollar staked less z bootstrap standard errors, is above zero as published (four places); " +
 	"drawdown: the deepest fall of its realised P&L from a running peak, over every life, is within max_drawdown_cents; " +
-	"calibration: the model it trades on is scored by the scorecard (today: the second engine's originals only) on at least min_windows windows and does not read `model worse`. " +
+	"calibration: the model it trades on is scored by the scorecard (the live engine's originals; a twin or an archived engine is not) on at least min_windows windows and does not read `model worse`. " +
 	"That last check is weak and says so: it is the absence of a finding against the model, not a finding for it; a non-inferiority margin was not stated in advance. " +
 	"z is the two-sided Bonferroni cut for `trials` versions, the leaderboard's own threshold, so `edge` passes exactly when the return's bootstrap t reaches what the verdict needs. " +
 	"The gate is not evaluated, and nothing is stored, while coverage is partial or trials could not be read. " +
@@ -265,7 +265,7 @@ func evaluateGate(cfg GateConfig, in gateInputs) Gate {
 	add("drawdown", in.drawdown.MaxCents <= cfg.MaxDrawdownCents, fmt.Sprintf("deepest fall %d cents, limit %d", in.drawdown.MaxCents, cfg.MaxDrawdownCents))
 	switch {
 	case !in.modelScored:
-		add("calibration", false, "the model this version trades on is not scored; only the second engine's originals are")
+		add("calibration", false, "the model this version trades on is not scored; only the live engine's originals are")
 	case in.overall.NWindows < cfg.MinWindows:
 		add("calibration", false, fmt.Sprintf("the model is scored on %d windows, fewer than min_windows %d", in.overall.NWindows, cfg.MinWindows))
 	default:

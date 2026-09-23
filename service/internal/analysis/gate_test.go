@@ -136,7 +136,7 @@ func gated(bucket int64) []MarketFacts {
 // = 4 windows, under min_windows, so forty windows clear it; the lower bound 0.2 - 2.9913 x 0.0158
 // = 0.153 is above zero; nothing fell; the model is not worse. Every check passes.
 func TestGatePasses(t *testing.T) {
-	buckets := []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v2", World: "real"}}
+	buckets := []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v3", World: "real"}}
 	doc := Build(Inputs{Facts: gated(1), Buckets: buckets, MarketsSettled: 40, Trials: 18, Gate: GateSettings{MinEdgePerDollar: 0.2, Power: 0.8, MaxDrawdownCents: 25_000}})
 	r := doc.Leaderboard.Rows[0]
 	if r.VersionID != 1 || r.StakedCents != 40000 || r.ReturnPerDollar != 0.2 || math.Abs(r.ReturnSE-0.0158) > 0.001 || r.ReturnT < 10 ||
@@ -164,7 +164,7 @@ func TestGatePasses(t *testing.T) {
 
 // Each check fails on its own, and one failure fails the gate.
 func TestGateFailsOneCheckAtATime(t *testing.T) {
-	v2 := []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v2", World: "real"}}
+	v2 := []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v3", World: "real"}}
 	loose := GateSettings{MinEdgePerDollar: 0.2, Power: 0.8, MaxDrawdownCents: 25_000}
 	failing := func(name string, in Inputs) (LeaderRow, Check) {
 		t.Helper()
@@ -220,9 +220,9 @@ func TestGateFailsOneCheckAtATime(t *testing.T) {
 	if !strings.Contains(c.Why, `"model worse"`) {
 		t.Errorf("calibration: %q", c.Why)
 	}
-	// calibration: a version whose model is not the one scored (the first engine, a twin, the third)
+	// calibration: a version whose model is not the one scored (the first engine, a twin, the archived second)
 	for _, b := range []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v1", World: "real"}, {ID: 1, VersionID: 1, Strategy: "Value", Engine: "v2", World: "anti"},
-		{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v3", World: "real"}} {
+		{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v2", World: "real"}} {
 		_, c = failing("calibration", Inputs{Facts: gated(1), Buckets: []Bucket{b}, MarketsSettled: 40, Trials: 18, Gate: loose})
 		if !strings.Contains(c.Why, "not scored") {
 			t.Errorf("%s %s: %q", b.Engine, b.World, c.Why)
@@ -244,7 +244,7 @@ func TestGateFailsOneCheckAtATime(t *testing.T) {
 // No decision is made where no verdict could be: a partial document, an unknown trials count, or
 // a version with nothing settled. Such a row is not evaluated, says why, and is not stored.
 func TestGateIsNotEvaluatedWithoutTheEvidence(t *testing.T) {
-	v2 := []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v2", World: "real"}, {ID: 2, VersionID: 2, Strategy: "Late", Engine: "v2", World: "real"}}
+	v2 := []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v3", World: "real"}, {ID: 2, VersionID: 2, Strategy: "Late", Engine: "v3", World: "real"}}
 	loose := GateSettings{MinEdgePerDollar: 0.2, Power: 0.8, MaxDrawdownCents: 25_000}
 	for name, c := range map[string]struct {
 		in  Inputs
@@ -298,7 +298,7 @@ func TestInvalidGateSettingsFallBackToTheDefaults(t *testing.T) {
 // One snapshot per row decided: the version, the period's bounds, the counts, the row as JSON,
 // and the configuration without its note.
 func TestSnapshots(t *testing.T) {
-	v2 := []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v2", World: "real"}, {ID: 2, VersionID: 2, Strategy: "Late", Engine: "v2", World: "real"}}
+	v2 := []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v3", World: "real"}, {ID: 2, VersionID: 2, Strategy: "Late", Engine: "v3", World: "real"}}
 	doc := Build(Inputs{Facts: gated(1), Buckets: v2, MarketsSettled: 40, Trials: 18, Gate: GateSettings{MinEdgePerDollar: 0.2, Power: 0.8, MaxDrawdownCents: 25_000}})
 	snaps := Snapshots(doc)
 	if len(snaps) != 1 {
@@ -331,7 +331,7 @@ func TestDecisionsAreCountedInsideThePeriod(t *testing.T) {
 	facts := gated(1)
 	facts = append(facts, round1(41, 36900, 2, 50, 1)) // Late bets once, in a later window, where Value journaled 60 more
 	facts[40].Decisions = map[int64]int64{1: 60, 2: 7}
-	v2 := []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v2", World: "real"}, {ID: 2, VersionID: 2, Strategy: "Late", Engine: "v2", World: "real"}}
+	v2 := []Bucket{{ID: 1, VersionID: 1, Strategy: "Value", Engine: "v3", World: "real"}, {ID: 2, VersionID: 2, Strategy: "Late", Engine: "v3", World: "real"}}
 	rows := Build(Inputs{Facts: facts, Buckets: v2, MarketsSettled: 41, Trials: 18}).Leaderboard.Rows
 	byName := map[string]LeaderRow{}
 	for _, r := range rows {
