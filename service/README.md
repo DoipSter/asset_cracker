@@ -9,7 +9,9 @@ code and there are no credentials. The pages are served on localhost. Every ledg
 The buckets page is the operator's desk for the paper fund: turn new orders on or off; approve or
 retire a version-3 strategy, which seeds a fresh $1,000 bucket or holds one settle-only at once,
 without a process start (`Runner3.Reload`); set the four sustainment allocation rates, taken at
-settlement from a bucket's gain above its high-water mark; and reset the simulated books, which
+settlement from a bucket's gain above its high-water mark, by typing over the figures of the
+rule in force (the remainder follows; a save row with the reason appears while a figure
+differs); and reset the simulated books, which
 empties them and starts again from the approved versions. A bucket that loses its last bet with
 less than the floor left is closed at that settlement: reaped into replenishment, frozen, not
 replaced.

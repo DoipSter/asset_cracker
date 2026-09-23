@@ -168,6 +168,15 @@ summary h2{flex:1}summary .f{font-size:13px;font-weight:600}
 .gsum{display:flex;justify-content:space-between;align-items:baseline;gap:8px;padding:6px 0;border-top:1px solid var(--ink);border-bottom:3px double var(--ink);font-weight:700;margin-top:-1px}
 .pol{display:flex;height:9px;border:1px solid var(--ink);margin:8px 0 2px}
 .pol i{display:block;border-right:1px solid var(--paper)}
+.row .pin input{font:inherit;color:inherit;background:transparent;border:0;border-bottom:1px dashed var(--rule);width:5.5em;text-align:right;padding:0 2px;-moz-appearance:textfield}
+.row .pin input::-webkit-outer-spin-button,.row .pin input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.row .pin input:focus{outline:0;border-bottom:1px solid var(--ink)}
+.row .pl{cursor:text}
+.rlsave{border-top:1px solid var(--ink);margin-top:-1px;padding:8px 0 10px}
+.rlsave.hide{display:none}
+.rlsave label{display:block;margin:0 0 3px;font:600 10px/1.2 var(--sans);letter-spacing:.12em;text-transform:uppercase;color:var(--mute)}
+.rlsave input{font:13px/1.2 var(--mono);color:var(--ink);background:var(--paper);border:1px solid var(--ink);padding:7px 8px;width:100%}
+.rlsave .go{margin:8px 6px 0 0}
 .notset{border:1px dashed var(--rule);padding:8px 10px;margin:6px 0 4px;font-size:13px}
 .notset b{font:700 10px var(--sans);letter-spacing:.12em;text-transform:uppercase;display:block;margin-bottom:2px}
 /* the assets dialog: search the catalogue, switch recording */
@@ -218,7 +227,7 @@ summary h2{flex:1}summary .f{font-size:13px;font-weight:600}
 .ctl .go.armed{background:var(--ink);color:var(--paper)}
 .ctl .go.bad.armed{background:var(--dn);border-color:var(--dn);color:var(--paper)}
 .ctl .rates input{max-width:none}
-.ctl .go{display:inline-block;margin:8px 8px 0 0;min-height:36px;padding:0 12px;border:1px solid var(--ink);font:600 11px/36px var(--sans);letter-spacing:.08em;text-transform:uppercase}
+.ctl .go,.rlsave .go{display:inline-block;margin:8px 8px 0 0;min-height:36px;padding:0 12px;border:1px solid var(--ink);font:600 11px/36px var(--sans);letter-spacing:.08em;text-transform:uppercase;background:transparent;color:var(--ink);cursor:pointer}
 .ctl .go[aria-pressed=true]{background:var(--ink);color:var(--paper)}
 .ctl .go.bad{border-color:var(--dn);color:var(--dn)}
 .ctl .msg{min-height:1.2em;margin:6px 0 0;font:12.5px/1.35 var(--sans)}
@@ -703,7 +712,11 @@ function assetSay(m,bad){A.msg=m;A.bad=!!bad;renderAssets()}
 function pctIn(bps){bps=num(bps);if(bps==null)return"";return (Math.round(bps)/100)+""}
 function draft(key,fallback){if(S.draft&&S.draft[key]!=null)return S.draft[key];return fallback==null?"":fallback}
 function ordersLine(o){o=o||{};if(!S.controls)return"Reading the controls…";if(o.on&&o.placing)return"New orders are going out.";if(o.on&&o.effective==="next-start")return"Orders are on. This process places them after its next start.";if(o.on)return"Orders are on.";if(o.effective==="now")return"New orders are off. The next look sends nothing.";return"New orders are off."}
-function rateField(id,label,value){return'<div><label for="'+id+'">'+label+'</label><input id="'+id+'" data-k="'+id+'" type="number" inputmode="decimal" min="0" max="100" step="0.01" value="'+esc(draft(id,value))+'"></div>'}
+/* The rule's four figures as typed (drafts) or as in force; dirty when any typed figure differs from the rule. */
+function ruleBps(p){p=p||{};var keys=["rl-w","rl-repl","rl-tax","rl-fee"],inForce=[p.winnings_bps,p.replenish_bps,p.tax_bps,p.fees_bps];
+  return keys.map(function(k,i){var d=S.draft[k];if(d==null||String(d).trim()==="")return num(inForce[i]);var v=Number(d);return isFinite(v)?Math.round(v*100):null})}
+function ruleDirty(p){p=p||{};var inForce=[p.winnings_bps,p.replenish_bps,p.tax_bps,p.fees_bps],typed=ruleBps(p);return typed.some(function(v,i){return v!==num(inForce[i])})}
+function ruleStays(p){var typed=ruleBps(p);if(typed.some(function(v){return v==null}))return"—";var s=typed.reduce(function(a,b){return a+b},0);return s>10000?"over 100%":pc(10000-s)}
 /* verButtons: what the operator may do to one version. Approve and Retire always; Remix when the
    process has a builder; Reap and Reap & restake while a bucket is held; Restake when every life is
    frozen. Reap and restake arm on the first click and act on the second (S.armed), since they close a bucket. */
@@ -713,7 +726,7 @@ function verButtons(v){var id=v.id,b=function(act,label,cls){var armed=S.armed==
   return out}
 function controlsHTML(){var c=S.controls||{},o=c.orders||{},p=c.policy||{},vs=objs(c.versions),pressed=S.controls?!!o.on:false;
   var vers=vs.length?vs.map(function(v){return'<div class="ver"><b>'+esc(v.name)+'</b> <span class="tag">'+esc(v.status)+'</span>'+(v.held?'':(num(v.lives)>0?' <span class="tag">no bucket</span>':''))+'<div>'+verButtons(v)+'</div></div>'}).join(""):'<p class="what">No version-3 strategy is registered. Scalper and Value trade after their four measured numbers are on the version and you approve it. Approval seeds a fresh $1,000 bucket at once.</p>';
-  return'<div class="ctl sec" id="j-controls"><span class="k">Operator · simulated money</span><h2>Controls</h2><p class="msg" id="ctl-msg">'+esc(S.msg||"")+'</p><div class="grid"><div><span class="k">Live engine</span><h3>New orders</h3><p class="what" id="ctl-orders">'+esc(ordersLine(o))+'</p><button type="button" class="go" data-act="orders-on" aria-pressed="'+(pressed?"true":"false")+'">On</button><button type="button" class="go" data-act="orders-off" aria-pressed="'+(!S.controls||pressed?"false":"true")+'">Off</button><h3>Version 3</h3>'+vers+builderHTML()+'</div><div><span class="k">Sustainment allocation</span><h3>Rates</h3><p class="what">Percent of a gain above high water. What remains stays in the bucket. Taken at settlement, once every closed round is settled for the bucket. A rate saved here is in force from the next settlement.</p><div class="rates">'+rateField("ctl-w","Winnings",pctIn(p.winnings_bps))+rateField("ctl-repl","Replenishment",pctIn(p.replenish_bps))+rateField("ctl-tax","Tax reserve",pctIn(p.tax_bps))+rateField("ctl-fee","Fee reserve",pctIn(p.fees_bps))+'</div><label for="ctl-note">Note</label><input id="ctl-note" data-k="ctl-note" type="text" maxlength="500" value="'+esc(draft("ctl-note",p.note||""))+'"><div><button type="button" class="go" data-act="policy">Save rates</button></div>'+transferHTML()+'<h3>Reset</h3><p class="what">Empties the simulated ledger, every bucket, the sim orders, and the value chart, then starts again: every approved version-3 strategy gets a fresh $1,000 bucket. Candles, quotes, market results, and the strategy registry remain. This places no order.</p><label for="ctl-confirm">Type reset sim</label><input id="ctl-confirm" data-k="ctl-confirm" type="text" autocomplete="off" value="'+esc(draft("ctl-confirm",""))+'"><div><button type="button" class="go bad" data-act="reset">Reset sim books</button></div></div></div></div>'}
+  return'<div class="ctl sec" id="j-controls"><span class="k">Operator · simulated money</span><h2>Controls</h2><p class="msg" id="ctl-msg">'+esc(S.msg||"")+'</p><div class="grid"><div><span class="k">Live engine</span><h3>New orders</h3><p class="what" id="ctl-orders">'+esc(ordersLine(o))+'</p><button type="button" class="go" data-act="orders-on" aria-pressed="'+(pressed?"true":"false")+'">On</button><button type="button" class="go" data-act="orders-off" aria-pressed="'+(!S.controls||pressed?"false":"true")+'">Off</button><h3>Version 3</h3>'+vers+builderHTML()+'</div><div><span class="k">Simulated money</span>'+transferHTML()+'<h3>Reset</h3><p class="what">Empties the simulated ledger, every bucket, the sim orders, and the value chart, then starts again: every approved version-3 strategy gets a fresh $1,000 bucket. Candles, quotes, market results, and the strategy registry remain. This places no order.</p><label for="ctl-confirm">Type reset sim</label><input id="ctl-confirm" data-k="ctl-confirm" type="text" autocomplete="off" value="'+esc(draft("ctl-confirm",""))+'"><div><button type="button" class="go bad" data-act="reset">Reset sim books</button></div></div></div></div>'}
 /* ---------- the strategy builder ---------- */
 /* Every field is one of the engine's parameters (engine.Shape). What you set is recorded as a convention you chose; what you leave blank is inherited from the parent shape. Nothing here is a measurement. */
 var NB=[["nb-name","Name","text",""],["nb-blurb","One line about it","text",""]];
@@ -748,10 +761,11 @@ function nbFill(p){var sh=(p&&p.shape)||{};var set=function(k,v){if(v==null||v==
   set("nb-lambda",sh.lambda);set("nb-stale",sh.stale_cost);set("nb-stale-sell",sh.stale_cost_sell);set("nb-tau-min",sh.tau_min);set("nb-tau-max",sh.tau_max);set("nb-band-min",sh.band_min);set("nb-band-max",sh.band_max);
   set("nb-max-bets",sh.max_bets);set("nb-min-gap",sh.min_gap);set("nb-min-hold",sh.min_hold);set("nb-capture",sh.take_capture);set("nb-kappa",sh.kappa);set("nb-cap",sh.window_cap_bps?sh.window_cap_bps/100:0);set("nb-vol",sh.min_vol_ratio);
   S.draft["nb-sizing"]=sh.sizing||"kelly";set("nb-base",sh.base_stake_cents?sh.base_stake_cents/100:0);set("nb-mult",sh.multiplier);set("nb-doublings",sh.max_doublings);S.draft["nb-control"]=sh.control?"on":""}
-function mountBuckets(el,rest){var ae=document.activeElement,typing=ae&&ae.closest&&ae.closest("#j-controls")&&(ae.tagName==="INPUT"||ae.tagName==="SELECT"||ae.tagName==="TEXTAREA");
+function mountBuckets(el,rest){var ae=document.activeElement,field=ae&&ae.closest&&(ae.tagName==="INPUT"||ae.tagName==="SELECT"||ae.tagName==="TEXTAREA"),typing=field&&ae.closest("#j-controls"),typingRule=field&&ae.closest("#j-rule");
   if(!$("j-controls"))setHTML(el,controlsHTML()+'<div id="bk-rest"></div>');
   else if(!typing){var box=$("j-controls");if(box)box.outerHTML=controlsHTML()}
   else{var m=$("ctl-msg");if(m)m.textContent=S.msg||"";var ol=$("ctl-orders");if(ol)ol.textContent=ordersLine((S.controls||{}).orders)}
+  if(typingRule)return; /* a figure of the rule is being typed: the poll must not take the field away */
   setHTML($("bk-rest"),rest||"")}
 function renderBuckets(){var el=$("p-buckets"),d=S.buckets;
   if(!d){mountBuckets(el,'<p class="empty" style="margin-top:14px">'+(S.fail.buckets?"No answer from api/buckets yet. Trying again shortly.":"Reading the buckets…")+"</p>");return}
@@ -767,11 +781,14 @@ function renderBuckets(){var el=$("p-buckets"),d=S.buckets;
   /* the rule in force */
   var p=d.policy&&typeof d.policy==="object"?d.policy:{},rates=[["Winnings",p.winnings_bps,""],["Replenishment",p.replenish_bps,""],["Tax reserve",p.tax_bps,"government tax"],["Fee reserve",p.fees_bps,""]];
   var sum=0,known=true;rates.forEach(function(r){if(num(r[1])==null)known=false;else sum+=r[1]});var unset=known&&sum===0;
-  out+='<div class="two"><div><div class="sec" id="j-rule"><span class="k">Sustainment allocation · rule in force</span><h2>'+(unset?"Not set yet":"Rule "+(num(p.id)!=null?"no. "+p.id:""))+'</h2><p class="what">'+(p.since_at?"In force since "+esc(iso(p.since_at))+". ":"")+(str(p.note)?"“"+esc(p.note)+"”":"")+"</p>";
-  if(unset)out+='<div class="notset"><b>All four rates are 0%</b>Nothing is taken from any bucket; all of a bucket’s gains stay in the bucket. This is the intended starting state, not a fault.</div>';
+  /* The rates are edited in place: each figure is an input; a save row appears only while a figure differs from the rule in force. */
+  var RL=["rl-w","rl-repl","rl-tax","rl-fee"],dirty=ruleDirty(p);
+  out+='<div class="two"><div><div class="sec" id="j-rule"><span class="k">Sustainment allocation · rule in force</span><h2>'+(unset?"Not set yet":"Rule "+(num(p.id)!=null?"no. "+p.id:""))+'</h2><p class="what">'+(p.since_at?"In force since "+esc(iso(p.since_at))+". ":"")+(str(p.note)?"“"+esc(p.note)+"”":"")+" Percent of a gain above high water, taken at settlement. Type a new figure to change the rule; it is in force from the next settlement.</p>";
+  if(unset&&!dirty)out+='<div class="notset"><b>All four rates are 0%</b>Nothing is taken from any bucket; all of a bucket’s gains stay in the bucket. This is the intended starting state, not a fault.</div>';
   else if(known)out+='<div class="pol" role="img" aria-label="Allocation split">'+rates.map(function(r,i){return'<i style="width:'+Math.max(0,Math.min(100,r[1]/100))+"%;background:var(--ink);opacity:"+(1-i*.2)+'"></i>'}).join("")+"</div>";
-  rates.forEach(function(r){out+='<div class="row"><span>'+r[0]+' <span class="n">'+r[2]+'</span></span><span class="f '+(unset?"mu":"")+'">'+(num(r[1])==null?"—":pc(r[1]))+"</span></div>"});
-  out+='<div class="row sum"><span>Stays in the bucket that earned it</span><span class="f">'+(known?pc(10000-sum):"—")+'</span></div><hr class="dbl" style="margin:0"></div>';
+  rates.forEach(function(r,i){var id=RL[i];out+='<div class="row"><span><label for="'+id+'" class="pl">'+r[0]+'</label> <span class="n">'+r[2]+'</span></span><span class="f pin'+(unset&&!dirty?" mu":"")+'"><input id="'+id+'" data-k="'+id+'" type="number" inputmode="decimal" min="0" max="100" step="0.01" value="'+esc(draft(id,pctIn(r[1])))+'" aria-label="'+r[0]+', percent">%</span></div>'});
+  out+='<div class="row sum"><span>Stays in the bucket that earned it</span><span class="f" id="rl-stay">'+ruleStays(p)+'</span></div>';
+  out+='<div class="rlsave'+(dirty?"":" hide")+'" id="rl-save"><label for="rl-note">Why this rule</label><input id="rl-note" data-k="rl-note" type="text" maxlength="500" value="'+esc(draft("rl-note",""))+'" placeholder="one line; it is dated and kept"><div><button type="button" class="go" data-act="policy">Set the rule</button><button type="button" class="go" data-act="policy-discard">Discard</button></div></div><hr class="dbl" style="margin:0"></div>';
   /* money buckets */
   var m=d.money&&typeof d.money==="object"?d.money:{},mb=[["Winnings",m.winnings_cents,""],["Replenishment",m.replenishment_cents,""],["Tax reserve",m.tax_reserve_cents,"government tax"],["Fee reserve",m.fee_reserve_cents,""]],ms=0,mkn=true;
   mb.forEach(function(r){if(num(r[1])==null)mkn=false;else ms+=r[1]});
@@ -799,7 +816,9 @@ function transferHTML(){var accts=arr(S.accounts);
     '<div><button type="button" class="go" data-act="transfer">Move it</button></div>'}
 function say(m){S.msg=m||"";renderBuckets()}
 function refreshBooks(){due.buckets=0;busy.buckets=0;loadBuckets()}
-$("p-buckets").addEventListener("input",function(e){var k=e.target.getAttribute&&e.target.getAttribute("data-k");if(!k)return;S.draft[k]=e.target.type==="checkbox"?(e.target.checked?"on":""):e.target.value});
+$("p-buckets").addEventListener("input",function(e){var k=e.target.getAttribute&&e.target.getAttribute("data-k");if(!k)return;S.draft[k]=e.target.type==="checkbox"?(e.target.checked?"on":""):e.target.value;
+  /* the rule's figures: the remainder and the save row follow each keystroke without a re-render */
+  if(k.indexOf("rl-")===0){var p=(S.buckets||{}).policy||{},st=$("rl-stay"),sv=$("rl-save");if(st)st.textContent=ruleStays(p);if(sv)sv.classList.toggle("hide",!ruleDirty(p))}});
 $("p-buckets").addEventListener("change",function(e){var t=e.target;if(!t||!t.getAttribute)return;var k=t.getAttribute("data-k");if(!k)return;
   if(k==="nb-preset"){var p=null;arr(S.presets).forEach(function(x){if(x.key===t.value)p=x});S.draft["nb-preset"]=t.value;if(p)nbFill(p);S.nbOpen=true;renderBuckets();return}
   S.draft[k]=t.type==="checkbox"?(t.checked?"on":""):t.value});
@@ -822,7 +841,11 @@ $("p-buckets").addEventListener("click",function(e){var b=e.target.closest&&e.ta
   if(act==="build"){var sh=nbShape();if(sh.error){S.ctlBusy=0;say(sh.error);return}S.nbOpen=true;
     post("api/controls/version/new",sh,20000).then(function(j){Object.keys(S.draft).forEach(function(k){if(k.indexOf("nb-")===0)delete S.draft[k]});
       done("Registered "+(j.name||"the version")+" as a draft"+(j.control?", a negative control":"")+". Approve it above to seed $1,000; it trades on the next look. One more trial in the registry.")}).catch(fail);return}
-  if(act==="policy"){var rates=["ctl-w","ctl-repl","ctl-tax","ctl-fee"].map(bpsOf);if(rates.some(function(n){return n==null})){S.ctlBusy=0;say("Enter each rate as a percentage.");return}post("api/controls/policy",{winnings_bps:rates[0],replenish_bps:rates[1],tax_bps:rates[2],fees_bps:rates[3],note:($("ctl-note")||{}).value||""}).then(function(){["ctl-w","ctl-repl","ctl-tax","ctl-fee","ctl-note"].forEach(function(k){delete S.draft[k]});done("Rates saved.")}).catch(fail);return}
+  var unfocus=function(){var ae=document.activeElement;if(ae&&ae.blur&&ae.closest&&ae.closest("#j-rule"))ae.blur()}; /* the typing guard keeps the poll off the rule while a figure is being typed; a save or a discard ends that */
+  if(act==="policy-discard"){["rl-w","rl-repl","rl-tax","rl-fee","rl-note"].forEach(function(k){delete S.draft[k]});unfocus();S.ctlBusy=0;say("");return}
+  if(act==="policy"){var rates=["rl-w","rl-repl","rl-tax","rl-fee"].map(bpsOf);if(rates.some(function(n){return n==null})){S.ctlBusy=0;say("Enter each rate as a percentage.");return}
+    if(rates.reduce(function(a,b){return a+b},0)>10000){S.ctlBusy=0;say("The four rates add up to more than 100%.");return}
+    post("api/controls/policy",{winnings_bps:rates[0],replenish_bps:rates[1],tax_bps:rates[2],fees_bps:rates[3],note:($("rl-note")||{}).value||""}).then(function(){["rl-w","rl-repl","rl-tax","rl-fee","rl-note"].forEach(function(k){delete S.draft[k]});unfocus();done("The rule is set; it applies from the next settlement of a bucket above its high water.")}).catch(fail);return}
   if(act==="reset"){post("api/controls/reset",{confirm:($("ctl-confirm")||{}).value||""},300000).then(function(j){delete S.draft["ctl-confirm"];var box=$("ctl-confirm");if(box)box.value="";var c=j.cleared||{};done(afterLoad(j,"Cleared "+(num(c.buckets)||0)+" buckets, "+(num(c.orders)||0)+" orders, and "+(num(c.transfers)||0)+" transfers.",true))}).catch(fail)}});
 /* afterLoad says what the engine did with the change: seeded and trading, held settle-only, empty, or healing on its own. */
 function afterLoad(j,lead,starting){j=j||{};var held=num(j.held)||0,ord=num(j.ordering)||0;
