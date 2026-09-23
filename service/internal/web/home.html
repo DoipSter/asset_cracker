@@ -95,9 +95,13 @@ h2{font:700 19px/1.1 var(--serif);margin:0;letter-spacing:-.01em}
 .mid{display:grid;grid-template-columns:112px minmax(0,1fr);margin-top:16px;border-top:1px solid var(--ink);border-bottom:1px solid var(--ink)}
 .rail{border-right:1px solid var(--ink);display:flex;flex-direction:column}
 .rail .k{padding:6px 0 5px;border-bottom:1px solid var(--rule)}
-.rail button{overflow:hidden;display:block;width:100%;text-align:left;min-height:66px;padding:6px 7px 5px 6px;border-bottom:1px solid var(--rule);border-left:3px solid transparent;margin-left:-3px;width:calc(100% + 3px)}
-.rail button:last-child{border-bottom:0}
-.rail button[aria-pressed=true]{background:var(--paper2);border-left-color:var(--ink)}
+/* the rail's header is the way into the catalogue: the label, a glass, the whole line a button */
+.rail .find{display:flex;align-items:center;gap:6px;width:100%;min-height:32px;padding:0 6px 0 0;text-align:left}
+.rail .find svg{flex:none;width:12px;height:12px;margin:0 0 0 auto}
+.rail .find:hover{color:var(--ink)}
+.rail .co{overflow:hidden;display:block;width:100%;text-align:left;min-height:66px;padding:6px 7px 5px 6px;border-bottom:1px solid var(--rule);border-left:3px solid transparent;margin-left:-3px;width:calc(100% + 3px)}
+.rail .co:last-child{border-bottom:0}
+.rail .co[aria-pressed=true]{background:var(--paper2);border-left-color:var(--ink)}
 .rail .l1{display:flex;align-items:baseline;gap:4px}
 .rail .sg{font:700 14px/1 var(--sans);width:13px;text-align:center;overflow:hidden;white-space:nowrap;flex:none}
 .rail .tk{overflow:hidden;text-overflow:ellipsis}
@@ -179,13 +183,13 @@ summary h2{flex:1}summary .f{font-size:13px;font-weight:600}
 .rlsave .go{margin:8px 6px 0 0}
 .notset{border:1px dashed var(--rule);padding:8px 10px;margin:6px 0 4px;font-size:13px}
 .notset b{font:700 10px var(--sans);letter-spacing:.12em;text-transform:uppercase;display:block;margin-bottom:2px}
-/* the assets dialog: search the catalogue, switch recording */
-.dlg{color:var(--ink);background:var(--paper);border:1px solid var(--ink);padding:0;width:min(760px,calc(100vw - 24px));max-height:calc(100vh - 48px);margin:auto;box-shadow:0 12px 40px rgba(0,0,0,.35)}
+/* the assets dialog: search the catalogue, switch recording. There is no close button: a click on the backdrop or Escape puts it away,
+   so on a narrow screen, where the sides are 12px, a band of backdrop 44px deep is kept above and below it to tap */
+.dlg{color:var(--ink);background:var(--paper);border:1px solid var(--ink);padding:0;width:min(760px,calc(100vw - 24px));max-height:calc(100vh - 88px);margin:auto;box-shadow:0 12px 40px rgba(0,0,0,.35)}
 .dlg::backdrop{background:rgba(0,0,0,.45)}
-.dlg .in{padding:12px 16px 16px;overflow:auto;max-height:calc(100vh - 50px)}
+.dlg .in{padding:12px 16px 16px;overflow:auto;max-height:calc(100vh - 90px)}
 .dlg .top{display:flex;align-items:baseline;gap:10px;border-bottom:3px double var(--ink);padding-bottom:6px}
 .dlg .top h2{font-size:22px;margin:0;flex:1}
-.dlg .x{font:600 11px/1 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--mute);min-height:34px;padding:0 8px}
 .dlg .what{font-style:italic;color:var(--mute);font-size:12.5px;margin:6px 0 8px}
 .dlg .bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0;height:auto;background:none}
 .dlg input[type=search]{font:13px/1.2 var(--mono);color:var(--ink);background:var(--paper);border:1px solid var(--ink);padding:7px 8px;flex:1 1 220px;min-width:0}
@@ -271,7 +275,8 @@ footer a{color:inherit;text-decoration:underline;text-underline-offset:2px}
   #p-home .ledger{border-right:1px solid var(--rule);padding-right:28px}
   .total{font-size:54px}
   .mid{grid-template-columns:210px minmax(0,1fr);margin-top:12px;border-top:0;align-self:start}
-  .rail button{min-height:78px;padding:9px 12px 8px 10px}
+  .rail .co{min-height:78px;padding:9px 12px 8px 10px}.rail .find{min-height:36px;padding-right:12px}
+  .dlg{max-height:calc(100vh - 48px)}.dlg .in{max-height:calc(100vh - 50px)}
   .rail .tk{font-size:14px}.rail .px{font-size:15px}.rail .ch{font-size:12px}.rail svg{height:20px}.rail .st{font-size:11px}
   .box{padding:10px 0 14px 22px}
   .bh h2{font-size:28px}.bh .p{font-size:24px}.bh .c{font-size:13px}
@@ -300,7 +305,6 @@ footer a{color:inherit;text-decoration:underline;text-underline-offset:2px}
     <button type="button" data-pane="home">Home</button>
     <button type="button" data-pane="buckets">Buckets</button>
     <button type="button" data-pane="evidence">Evidence</button>
-    <button type="button" data-pane="assets" aria-haspopup="dialog">Assets</button>
   </nav>
   <span class="sim" title="Every figure on this page is simulated money">SIMULATED MONEY</span>
 </div></header>
@@ -345,7 +349,7 @@ footer a{color:inherit;text-decoration:underline;text-underline-offset:2px}
 
 <dialog id="dlg-assets" class="dlg" aria-labelledby="as-h">
   <div class="in">
-    <div class="top"><h2 id="as-h">Assets</h2><span class="k" id="as-sel"></span><button type="button" class="x" data-act="assets-close">Close</button></div>
+    <div class="top"><h2 id="as-h">Assets</h2><span class="k" id="as-sel"></span></div>
     <p class="what">Search what Kalshi and Coinbase list, and switch recording on or off. Recording only: nothing here trades. A Coinbase product switched on is listed on the home page with its live price.</p>
     <div class="bar">
       <input type="search" id="as-q" data-k="as-q" placeholder="Search code or title, e.g. BNB, above/below, SOL-USD" autocomplete="off" aria-label="Search the catalogue">
@@ -475,7 +479,9 @@ document.querySelector(".tabs").addEventListener("click",function(e){var b=e.tar
 function chips(el,list,cur,pre){setHTML(el,list.map(function(v){return'<button type="button" data-k="'+pre+v+'" data-v="'+v+'" aria-pressed="'+(v===cur)+'">'+v+"</button>"}).join(""))}
 $("scale").addEventListener("click",function(e){var b=e.target.closest("button");if(!b)return;S.scale=b.getAttribute("data-v");save();chips($("scale"),SCALES,S.scale,"s");due.home=0;due.sparks=0;tick()});
 $("crange").addEventListener("click",function(e){var b=e.target.closest("button");if(!b)return;S.cr=b.getAttribute("data-v");S.asset=null;S.hover=null;save();chips($("crange"),CRANGES,S.cr,"c");renderBox();due.asset=0;tick()});
-$("rail").addEventListener("click",function(e){var b=e.target.closest("button");if(!b)return;var c=b.getAttribute("data-v");if(!c)return;
+$("rail").addEventListener("click",function(e){var b=e.target.closest("button");if(!b)return;
+  if(b.getAttribute("data-act")==="assets-open"){location.hash="assets";return} /* the header opens the catalogue over the page */
+  var c=b.getAttribute("data-v");if(!c)return;
   if(history.replaceState)history.replaceState(null,"","#asset="+encodeURIComponent(c));else location.hash="asset="+c;
   pick(c);renderRail();renderBox();tick()});
 $("stake").addEventListener("click",function(e){if(e.target.closest(".more")){S.allBets=!S.allBets;renderBox()}});
@@ -520,8 +526,9 @@ function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.to
 /* rail rows are built once per coin list and then only re-inked, so a tap or keyboard focus is never lost to a poll */
 var railSig=null;
 function renderRail(){var list=assets(),sig=list.map(function(a){return a.coin}).join("|"),el=$("rail");
-  if(sig!==railSig){el.innerHTML='<span class="k">Assets</span>'+list.map(function(){return'<button type="button"><span class="l1"></span><span class="px f"></span><span class="sp"></span><span class="st"></span></button>'}).join("");railSig=sig}
-  var bs=el.querySelectorAll("button"),asOf=num((S.home||{}).as_of);
+  if(sig!==railSig){el.innerHTML='<button type="button" class="k find" data-act="assets-open" aria-haspopup="dialog" aria-controls="dlg-assets" aria-label="Assets: search the catalogue, switch recording">Assets<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="6.5" cy="6.5" r="4.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 10l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>'+
+    list.map(function(){return'<button type="button" class="co"><span class="l1"></span><span class="px f"></span><span class="sp"></span><span class="st"></span></button>'}).join("");railSig=sig}
+  var bs=el.querySelectorAll(".co"),asOf=num((S.home||{}).as_of);
   list.forEach(function(a,i){var b=bs[i];if(!b)return;var c=a.coin,ch=num(a.change_pct),pa=num(a.price_age_s),stale=isStale(a),halt=haltedFor(c).length>0,ob=num(a.open_bets);
     b.setAttribute("data-v",c);b.setAttribute("aria-pressed",String(c===S.coin));b.setAttribute("aria-label",(str(a.name)||c)+(halt?", engine halted":"")+(stale?", price is stale":""));
     var pts=cleanPts(S.sparks[c]);if(pts.length&&asOf!=null&&num(a.price)!=null&&!stale&&asOf>pts[pts.length-1][0])pts=pts.concat([[asOf,a.price]]);var sp=sparkPath(pts,100,15);
@@ -696,13 +703,16 @@ function renderAssets(){var d=A.data||{},c=d.catalogue||{},hits=arr(d.results),l
   setHTML($("as-recording"),list.length?list.map(recHTML).join(""):'<div class="empty">Nothing is recorded.</div>');
   setHTML($("as-note"),esc(str(d.note)||""))}
 function assetSay(m,bad){A.msg=m;A.bad=!!bad;renderAssets()}
-(function(){var d=$("dlg-assets");if(!d)return;
+(function(){var d=$("dlg-assets");if(!d)return;var onBack=false;
   $("as-q").addEventListener("input",function(e){clearTimeout(A.timer);var v=e.target.value.trim();A.timer=setTimeout(function(){if(v!==A.q){A.q=v;loadAssets()}},250)});
   $("as-freq").addEventListener("change",function(e){A.frequency=e.target.value;loadAssets()});
-  d.addEventListener("close",function(){assetsClose(true)});
-  d.addEventListener("click",function(e){var b=e.target.closest("button");if(!b)return;var act=b.getAttribute("data-act");
+  d.addEventListener("close",function(){assetsClose(true)}); /* Escape, and the browser's own ways of closing */
+  /* A click beside the dialog closes it. The backdrop's clicks are delivered to the dialog element itself, and nothing inside it can be,
+     as .in fills its box; both ends of the click must land there, so a drag that starts in the search box and ends outside does not close it */
+  d.addEventListener("pointerdown",function(e){onBack=e.target===d});
+  document.addEventListener("click",function(e){if(d.open&&!d.showModal&&!d.contains(e.target))assetsClose(true)}); /* no showModal, no backdrop: any click elsewhere on the page */
+  d.addEventListener("click",function(e){if(e.target===d){if(onBack)assetsClose(true);return}var b=e.target.closest("button");if(!b)return;var act=b.getAttribute("data-act");
     if(b.getAttribute("data-k")&&b.getAttribute("data-k").indexOf("as")===0&&!act){var v=b.getAttribute("data-v");A.source=v==="All"?"":v.toLowerCase();chips($("as-src"),["All","Kalshi","Coinbase"],v,"as");loadAssets();return}
-    if(act==="assets-close"){assetsClose(true);return}
     if(act!=="asset-on"&&act!=="asset-off")return;if(A.busy)return;A.busy=true;renderAssets();
     var on=act==="asset-on",code=b.getAttribute("data-code"),source=b.getAttribute("data-source");
     post("api/controls/asset",{source:source,code:code,record:on}).then(function(j){A.busy=false;

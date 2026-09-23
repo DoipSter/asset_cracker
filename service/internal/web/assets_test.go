@@ -142,7 +142,9 @@ func TestCatalogueSwitch(t *testing.T) {
 }
 
 // The assets page became a dialog on the home page: its old address sends the reader there, and
-// the home page carries the dialog, its search and its switch, all through relative URLs.
+// the home page carries the dialog, its search and its switch, all through relative URLs. The way
+// in is the rail's own header, not a tab of its own; the way out is a click beside it or Escape,
+// not a button.
 func TestAssetsPageIsTheHomeDialog(t *testing.T) {
 	changed := 0
 	rec := httptest.NewRecorder()
@@ -151,9 +153,14 @@ func TestAssetsPageIsTheHomeDialog(t *testing.T) {
 		t.Fatalf("status %d, location %q", rec.Code, rec.Header().Get("Location"))
 	}
 	page := string(homePage)
-	for _, want := range []string{`id="dlg-assets"`, `api/catalogue`, `api/controls/asset`, `role="switch"`, `"asset-off":"asset-on"`, `act==="asset-on"`} {
+	for _, want := range []string{`id="dlg-assets"`, `data-act="assets-open"`, `h==="assets"`, `api/catalogue`, `api/controls/asset`, `role="switch"`, `"asset-off":"asset-on"`, `act==="asset-on"`} {
 		if !strings.Contains(page, want) {
 			t.Errorf("the home page lacks %s", want)
+		}
+	}
+	for _, gone := range []string{`data-pane="assets"`, `assets-close`} {
+		if strings.Contains(page, gone) {
+			t.Errorf("the home page still carries %s", gone)
 		}
 	}
 	if strings.Contains(page, `fetch("/`) || strings.Contains(page, `href="/`) {
