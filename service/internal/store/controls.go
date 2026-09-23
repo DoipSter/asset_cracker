@@ -116,11 +116,14 @@ func (s *Store) CreateVersion3(ctx context.Context, v NewVersion3) (int64, error
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// The strategy row: found, or made. Not an upsert: `on conflict do update` needs UPDATE on
+	// the table, and the service role may add rows to strategy, never change them (db/grants.sql).
 	var strategyID int64
-	if err := tx.QueryRow(ctx, `
-		insert into strategy (family, name, description) values ('kalshi15m', $1, $2)
-		on conflict (family, name) do update set description = strategy.description
-		returning id`, v.Name, v.Blurb).Scan(&strategyID); err != nil {
+	err = tx.QueryRow(ctx, `select id from strategy where family = 'kalshi15m' and name = $1`, v.Name).Scan(&strategyID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `insert into strategy (family, name, description) values ('kalshi15m', $1, $2) returning id`, v.Name, v.Blurb).Scan(&strategyID)
+	}
+	if err != nil {
 		return 0, err
 	}
 	var exists bool
