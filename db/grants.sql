@@ -14,8 +14,8 @@ grant execute on function ensure_month_partitions(date) to assetcracker;
 
 grant update (strike, opens_at, closes_at, result, settlement_value, settled_at) on market to assetcracker;
 grant update (active) on instrument to assetcracker;
-grant update (status, retired_at, retired_reason) on strategy_version to assetcracker;
-grant update (status, tripped_at, trip_reason, frozen_at, replaced_by_bucket_id, limits) on bucket to assetcracker;
+grant update (status, retired_at, retired_reason, archived_at) on strategy_version to assetcracker;
+grant update (status, tripped_at, trip_reason, frozen_at, replaced_by_bucket_id, limits, orders_on, close_requested_at) on bucket to assetcracker;
 grant update (status, venue_order_id) on trade_order to assetcracker;
 grant update (status, decided_by, decided_at, decision_note) on proposal to assetcracker;
 

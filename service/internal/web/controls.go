@@ -72,6 +72,10 @@ type Control struct {
 	// Reap closes a version's held bucket by the operator's hand, into the common pool; with
 	// restake, or with nothing held, a fresh life is seeded in its place. Nil means no engine.
 	Reap func(ctx context.Context, versionID int64, restake bool) (Reaped, error)
+	// CloseWhenFlat is Reap without restake that does not refuse a bucket with a position on:
+	// flat, it is reaped now; not flat, it is marked and the engine reaps it after its last
+	// settlement, and closing says so. Nil means no engine, and the close handler falls back to Reap.
+	CloseWhenFlat func(ctx context.Context, versionID int64) (Reaped, *Closing, error)
 	// Deploy opens a bucket for a version at the seed and from the source the operator chose.
 	// family is the version's, so app hands it to the runner that holds that family. Nil means
 	// no engine.
@@ -96,6 +100,13 @@ type Reaped struct {
 	Next        string `json:"next,omitempty"`
 	Held        int    `json:"held"`
 	Ordering    int    `json:"ordering"`
+}
+
+// Closing is a close-out the engine has taken on: the bucket had positions open, so it is
+// marked and closed the first time it holds nothing.
+type Closing struct {
+	Bucket string `json:"bucket"`
+	Open   int    `json:"open"`
 }
 
 // ReapRefused is a Reap the engine would not do; its text is shown on the page.
@@ -177,6 +188,8 @@ type controlStore interface {
 	Transfer(ctx context.Context, t store.ManualTransfer) (store.Transferred, error)
 	LookupBucket(ctx context.Context, bucketID int64) (store.BucketRef, error)
 	CloseOutBucket(ctx context.Context, bucketID int64) (store.ClosedOut, error)
+	SetBucketOrders(ctx context.Context, bucketID int64, on bool) error
+	SetVersionArchived(ctx context.Context, id int64, archived bool) error
 	OpenBank(ctx context.Context) (store.Bank, error)
 	ListPaydays(ctx context.Context) ([]store.Payday, error)
 	SchedulePayday(ctx context.Context, amountCents int64, everyDays int, note string, now time.Time) (store.Payday, error)
@@ -290,6 +303,81 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 			return
 		}
 		writeJSON(w, map[string]any{"on": body.On, "effective": ctl.apply(body.On)})
+	}))
+
+	// One bucket's own new-orders switch. Off, the engine holds it settle-only from the reload
+	// that follows: valued, settled and swept, no buy formed. The engine-wide switch still rules.
+	mux.HandleFunc("POST /api/controls/bucket/orders", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			writeErr(w, http.StatusServiceUnavailable, "The controls have no database.")
+			return
+		}
+		var body struct {
+			ID int64 `json:"id"`
+			On bool  `json:"on"`
+		}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		if body.ID == 0 {
+			writeErr(w, http.StatusBadRequest, "Name the bucket.")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), reloadBudget)
+		defer cancel()
+		if err := db.SetBucketOrders(ctx, body.ID, body.On); err != nil {
+			if errors.Is(err, store.ErrNoSuchBucket) {
+				writeErr(w, http.StatusNotFound, "That bucket is not on the books, or is closed.")
+				return
+			}
+			slog.Error("controls: bucket orders", "err", err)
+			writeErr(w, http.StatusInternalServerError, "The switch was not saved.")
+			return
+		}
+		if list != nil {
+			list.drop()
+		}
+		out := ctl.reload(ctx)
+		out["id"], out["on"] = body.ID, body.On
+		slog.Info("bucket orders switched from the buckets page", "bucket", body.ID, "on", body.On)
+		writeJSON(w, out)
+	}))
+
+	// Archive takes a retired version off the registry's list; everything about it is kept, and
+	// {"archived": false} lists it again. Refused while it is not retired or still holds a bucket.
+	mux.HandleFunc("POST /api/controls/version/archive", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			writeErr(w, http.StatusServiceUnavailable, "The controls have no database.")
+			return
+		}
+		body := struct {
+			ID       int64 `json:"id"`
+			Archived *bool `json:"archived"`
+		}{}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		if body.ID == 0 {
+			writeErr(w, http.StatusBadRequest, "Name the version.")
+			return
+		}
+		archived := body.Archived == nil || *body.Archived
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		defer cancel()
+		if err := db.SetVersionArchived(ctx, body.ID, archived); err != nil {
+			switch {
+			case errors.Is(err, store.ErrVersionNotFound):
+				writeErr(w, http.StatusNotFound, "That version is not registered.")
+			case errors.Is(err, store.ErrNotArchivable):
+				writeErr(w, http.StatusConflict, err.Error())
+			default:
+				slog.Error("controls: archive", "err", err)
+				writeErr(w, http.StatusInternalServerError, "The version was not archived.")
+			}
+			return
+		}
+		slog.Info("version archived or unarchived from the buckets page", "version", body.ID, "archived", archived)
+		writeJSON(w, map[string]any{"id": body.ID, "archived": archived})
 	}))
 
 	mux.HandleFunc("POST /api/controls/version", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
@@ -487,9 +575,25 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 			return
 		}
 		// The live engine closes its own bucket, unless it does not hold one (already gone from
-		// memory, or never loaded): then the ledger close is the whole of it.
-		if ref.Version >= 3 && ctl.Reap != nil {
-			out, err := ctl.Reap(ctx, ref.VersionID, false)
+		// memory, or never loaded): then the ledger close is the whole of it. With positions
+		// open the engine takes the close on and finishes it after the last settlement.
+		if ref.Version >= 3 && (ctl.CloseWhenFlat != nil || ctl.Reap != nil) {
+			var out Reaped
+			var err error
+			if ctl.CloseWhenFlat != nil {
+				var closing *Closing
+				out, closing, err = ctl.CloseWhenFlat(ctx, ref.VersionID)
+				if err == nil && closing != nil {
+					if list != nil {
+						list.drop()
+					}
+					slog.Info("bucket marked to close once flat, from the buckets page", "bucket", closing.Bucket, "open", closing.Open)
+					writeJSON(w, map[string]any{"bucket": closing.Bucket, "closing": true, "open": closing.Open, "kept": true})
+					return
+				}
+			} else {
+				out, err = ctl.Reap(ctx, ref.VersionID, false)
+			}
 			if err == nil {
 				if list != nil {
 					list.drop()

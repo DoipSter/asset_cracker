@@ -35,10 +35,12 @@ type fakeVersion struct {
 
 type fakeBucket struct {
 	store.SimBucket
-	strategy string
-	seed     int64
-	adjust   int64 // money moved under the engine, for the cash-check tests
-	reaped   int64
+	strategy  string
+	seed      int64
+	adjust    int64 // money moved under the engine, for the cash-check tests
+	reaped    int64
+	ordersOff bool // bucket.orders_on = false: held settle-only
+	closeReq  bool // bucket.close_requested_at set: closed the first time it holds nothing
 }
 
 type fakeMarket struct {
@@ -363,7 +365,7 @@ func (s *fakeStore) HeldBuckets(ctx context.Context, family string, version int)
 			continue
 		}
 		v := s.version(b.VersionID)
-		h := store.HeldBucket{SimBucket: b.SimBucket, Strategy: b.strategy, VersionStatus: v.Status, Params: v.Params, SeedCents: b.seed}
+		h := store.HeldBucket{SimBucket: b.SimBucket, Strategy: b.strategy, VersionStatus: v.Status, Params: v.Params, SeedCents: b.seed, OrdersOn: !b.ordersOff, CloseRequested: b.closeReq}
 		h.CashCents = s.cash(b)
 		out = append(out, h)
 	}
@@ -567,6 +569,21 @@ func (s *fakeStore) RecordSettlements(ctx context.Context, setup store.SimSetup,
 		s.settlements = append(s.settlements, fakeSettlement{marketID: marketID, setup: setup, row: row})
 	}
 	return b.err
+}
+
+func (s *fakeStore) RequestClose(ctx context.Context, bucketID int64) error {
+	if hb := s.hook(ctx, "RequestClose"); hb.err != nil {
+		return hb.err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, fb := range s.buckets {
+		if fb.ID == bucketID && !fb.Frozen {
+			fb.closeReq = true
+			return nil
+		}
+	}
+	return store.ErrNoSuchBucket
 }
 
 func (s *fakeStore) CloseBucket(ctx context.Context, setup store.SimSetup, b store.SimBucket, reason string, restake bool, life int, seedCents int64) (store.SimBucket, error) {

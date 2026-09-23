@@ -187,6 +187,28 @@ was staked again took its earlier life's bets with it.
 `allocated_cents` is the sustainment allocation taken from that bucket to date. `status` is
 `active`, `tripped`, `winding_down` or `frozen`; frozen buckets are listed after live ones.
 
+Added 2026-09-23 (migration 0022): `orders_on` is the bucket's own new-orders switch (false:
+held settle-only, whatever its version's status; the engine-wide switch still rules over it), and
+`closing` is true from the moment × was pressed while the bucket had a position on until the
+engine has closed it, which is the pass after its last settlement or the next start.
+
+## GET api/buckets/history?range=24H
+
+Every version-3 bucket's worth over time, live and closed, for the history charts. `range` is
+`1H`, `24H`, `7D` or `ALL` (from the first snapshot ever written).
+
+```json
+{ "simulated": true, "range": "24H", "since": 1758610000, "as_of": 1758696400,
+  "buckets": [ { "id": 26, "name": "kalshi15m3 Value (conventions) v3", "strategy": "Value (conventions)", "status": "active",
+                 "life": 1, "seed_cents": 100000, "closing": false, "orders_on": true,
+                 "points": [[1758610020, 99120, 98800, 100000], ...] } ] }
+```
+
+`points` are `[unix seconds, value_cents, cash_cents, contributed_cents]`, the value snapshots of
+scope `bucket` thinned in the database to at most 300 per bucket (each bin's last row, never an
+average). Value less contributed is what the bucket earned: a restake or an allocation moves
+both. A bucket with no snapshot in the range has an empty list.
+
 Added when built: `simulated: true`; `unmarked_bets` per bucket. `equity_cents` is cash plus open
 bets at the bid, the same marking as api/home (so it is a little above the widget's equity, which
 takes the selling fee off). `high_water_cents` is null for the first engine, which takes no

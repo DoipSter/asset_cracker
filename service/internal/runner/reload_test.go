@@ -101,6 +101,84 @@ func TestReloadSeedsAnApprovalAndBenchesARetirement(t *testing.T) {
 	}
 }
 
+// × on a bucket with a bet on does not refuse: it marks the bucket, and the settlement of its
+// last position closes it, with the reason saying so. Nobody has to come back and press it again.
+func TestCloseWhenFlatFollowsTheLastSettlement(t *testing.T) {
+	ctx := context.Background()
+	g := newRig(t)
+	r := g.start(true)
+	scalper := g.s.versions[0].ID
+	g.buy100()
+
+	rep, plan, err := r.CloseWhenFlat(ctx, scalper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan == nil || plan.Open != 1 || rep.Bucket != "" || !g.s.buckets[0].closeReq || g.s.count("CloseBucket") != 0 || g.contracts(r) != 100 {
+		t.Fatalf("with a bet on: plan %+v rep %+v marked %v closes %d contracts %d", plan, rep, g.s.buckets[0].closeReq, g.s.count("CloseBucket"), g.contracts(r))
+	}
+	g.wantState(stateRunning)
+	// A second × while it waits is the same request, not a refusal.
+	if _, plan2, err := r.CloseWhenFlat(ctx, scalper); err != nil || plan2 == nil {
+		t.Fatalf("asked twice: %+v %v", plan2, err)
+	}
+	// The minute's sweep with nothing due to settle leaves a bucket that still has its bet.
+	r.sweep(ctx)
+	if g.s.count("CloseBucket") != 0 {
+		t.Fatal("swept away with a position still open")
+	}
+
+	g.advance(10 * time.Minute)
+	g.s.setResult(mktA, "yes")
+	g.settle(mktA, "yes")
+	if g.s.count("CloseBucket") != 1 || len(r.BucketIDs()) != 0 || !g.s.buckets[0].Frozen {
+		t.Fatalf("after the last settlement: closes %d held %v frozen %v", g.s.count("CloseBucket"), r.BucketIDs(), g.s.buckets[0].Frozen)
+	}
+	g.wantState(stateRunning)
+}
+
+// A close asked for before a restart is finished by the start, once nothing is open.
+func TestCloseWhenFlatSurvivesARestart(t *testing.T) {
+	g := newRig(t)
+	r := g.start(true)
+	g.buy100()
+	if _, plan, err := r.CloseWhenFlat(context.Background(), g.s.versions[0].ID); err != nil || plan == nil {
+		t.Fatalf("mark: %+v %v", plan, err)
+	}
+	g.advance(10 * time.Minute)
+	g.s.setResult(mktA, "yes") // settled in the record while the process was down
+	r = g.start(true)          // the start-up sweep settles it from the record, and the close follows
+	if g.s.count("CloseBucket") != 1 || len(r.BucketIDs()) != 0 || !g.s.buckets[0].Frozen {
+		t.Fatalf("after the restart: closes %d held %v frozen %v", g.s.count("CloseBucket"), r.BucketIDs(), g.s.buckets[0].Frozen)
+	}
+}
+
+// A bucket's own orders switch: off, it is held settle-only under an approved version and with the
+// engine's switch on; back on, it may order again. Both take effect at a reload.
+func TestBucketOrdersSwitch(t *testing.T) {
+	ctx := context.Background()
+	g := newRig(t)
+	r := g.start(true)
+	if rep, err := r.Reload(ctx); err != nil || rep.MayOrder != 1 {
+		t.Fatalf("on: %+v %v", rep, err)
+	}
+	g.s.buckets[0].ordersOff = true
+	rep, err := r.Reload(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	why := r.buckets[0].whyNot
+	r.mu.Unlock()
+	if rep.Held != 1 || rep.MayOrder != 0 || why != "its own orders switch is off: settle-only" {
+		t.Fatalf("off: %+v %q", rep, why)
+	}
+	g.s.buckets[0].ordersOff = false
+	if rep, err := r.Reload(ctx); err != nil || rep.MayOrder != 1 {
+		t.Fatalf("on again: %+v %v", rep, err)
+	}
+}
+
 // Reap by the operator's hand: refused while a bet is open; once it settles the bucket is reaped
 // into the pool and frozen; with restake a fresh life takes its place and trades if its version
 // is approved. A version without a bucket is refused by name.

@@ -56,10 +56,11 @@ type Version3 struct {
 	Version    int    `json:"version"`
 	Status     string `json:"status"`
 	Hypothesis string `json:"hypothesis"`
-	Params     []byte `json:"-"`      // engine.Params as stored; the page's Remix reads a shape from it
-	Family     string `json:"family"` // kalshi15m (the rounds) or kalshiladder (the daily and weekly ladders)
-	Held       bool   `json:"held"`   // a bucket of this version is not frozen: Reap applies
-	Lives      int    `json:"lives"`  // buckets this version has had, frozen ones included: Restake applies when > 0 and not held
+	Params     []byte `json:"-"`        // engine.Params as stored; the page's Remix reads a shape from it
+	Family     string `json:"family"`   // kalshi15m (the rounds) or kalshiladder (the daily and weekly ladders)
+	Held       bool   `json:"held"`     // a bucket of this version is not frozen: Reap applies
+	Lives      int    `json:"lives"`    // buckets this version has had, frozen ones included: Restake applies when > 0 and not held
+	Archived   bool   `json:"archived"` // taken off the registry's list; everything about it is kept
 }
 
 // The market families a version may belong to. Each has its own runner and bucket prefix.
@@ -68,13 +69,14 @@ const (
 	FamilyLadders = "kalshiladder"
 )
 
-// ListVersion3 is the version-3 rows of both families. An empty list is the ordinary state
-// before anything is registered.
+// ListVersion3 is the version-3 rows of both families, archived ones included and marked. An
+// empty list is the ordinary state before anything is registered.
 func (s *Store) ListVersion3(ctx context.Context) ([]Version3, error) {
 	rows, err := s.pool.Query(ctx, `
 		select v.id, st.name, st.family, v.version, v.status, v.hypothesis, v.params,
 		       exists (select 1 from bucket b where b.strategy_version_id = v.id and b.mode = 'sim' and b.status <> 'frozen'),
-		       (select count(*) from bucket b where b.strategy_version_id = v.id and b.mode = 'sim')
+		       (select count(*) from bucket b where b.strategy_version_id = v.id and b.mode = 'sim'),
+		       v.archived_at is not null
 		  from strategy_version v
 		  join strategy st on st.id = v.strategy_id
 		 where st.family in ($1, $2) and v.version = 3
@@ -86,12 +88,38 @@ func (s *Store) ListVersion3(ctx context.Context) ([]Version3, error) {
 	out := []Version3{}
 	for rows.Next() {
 		var v Version3
-		if err := rows.Scan(&v.ID, &v.Name, &v.Family, &v.Version, &v.Status, &v.Hypothesis, &v.Params, &v.Held, &v.Lives); err != nil {
+		if err := rows.Scan(&v.ID, &v.Name, &v.Family, &v.Version, &v.Status, &v.Hypothesis, &v.Params, &v.Held, &v.Lives, &v.Archived); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+
+// ErrNotArchivable is an archive of a version that is not retired, or that still holds a bucket.
+var ErrNotArchivable = errors.New("only a retired version with no open bucket can be archived; retire it and close its bucket first")
+
+// SetVersionArchived takes a retired version-3 row off the registry's list, or puts it back.
+// Nothing else about it changes: its row, its buckets and its results are kept, and the trials
+// count is what it was. Archiving is refused while the version is not retired or a bucket of it
+// is not frozen, so nothing the engine holds can go out of sight.
+func (s *Store) SetVersionArchived(ctx context.Context, id int64, archived bool) error {
+	var status string
+	var held bool
+	err := s.pool.QueryRow(ctx, `
+		select v.status, exists (select 1 from bucket b where b.strategy_version_id = v.id and b.mode = 'sim' and b.status <> 'frozen')
+		  from strategy_version v where v.id = $1 and v.version = 3`, id).Scan(&status, &held)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrVersionNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if archived && (status != "retired" || held) {
+		return ErrNotArchivable
+	}
+	_, err = s.pool.Exec(ctx, `update strategy_version set archived_at = case when $2 then coalesce(archived_at, now()) end where id = $1`, id, archived)
+	return err
 }
 
 // ErrVersionExists is a builder submission whose strategy already has a version 3.

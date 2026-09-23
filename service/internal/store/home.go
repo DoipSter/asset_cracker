@@ -147,6 +147,46 @@ func (s *Store) SnapshotSeries(ctx context.Context, scope, key string, since tim
 	return out, rows.Err()
 }
 
+// SnapshotSeriesByKey is SnapshotSeries for several keys of one scope at once, each thinned to at
+// most maxPoints the same way, as [unix seconds, value, cash, contributed]: what the history
+// charts draw for every bucket in one read. Value less contributed is what the bucket earned
+// (EarnedBetween), so a restake or an allocation does not read as a gain or a loss. A key with
+// no rows in the span is absent from the map.
+func (s *Store) SnapshotSeriesByKey(ctx context.Context, scope string, keys []string, since time.Time, maxPoints int) (map[string][][4]int64, error) {
+	out := map[string][][4]int64{}
+	if len(keys) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		select key,
+		       (array_agg(extract(epoch from at)::bigint order by at desc))[1],
+		       (array_agg(value_cents order by at desc))[1],
+		       (array_agg(cash_cents order by at desc))[1],
+		       (array_agg(contributed_cents order by at desc))[1]
+		  from value_snapshot
+		 where mode = 'sim' and scope = $1 and key = any($2::text[]) and at >= $3
+		 group by key, floor(extract(epoch from at) / $4::float8)
+		 order by key, 2`, scope, keys, since, float64(BinSeconds(time.Since(since), maxPoints)))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		var p [4]int64
+		if err := rows.Scan(&key, &p[0], &p[1], &p[2], &p[3]); err != nil {
+			return nil, err
+		}
+		out[key] = append(out[key], p)
+	}
+	for k, pts := range out {
+		if len(pts) > maxPoints { // cannot happen while BinSeconds is right; the page's bound is kept regardless
+			out[k] = pts[len(pts)-maxPoints:]
+		}
+	}
+	return out, rows.Err()
+}
+
 // BucketCapital is one bucket's place in the balance sheet, live or frozen.
 type BucketCapital struct {
 	ID               int64
@@ -247,6 +287,8 @@ type BucketRow struct {
 	Source         string // where the seed was drawn from: SeedFromReplenishment or SeedFromBank, read off the seed's memo; "" with no seed
 	AllocatedCents int64  // the sustainment allocation taken from it to date
 	Bets           int64  // simulated buys filled
+	OrdersOn       bool   // the bucket's own new-orders switch; false is held settle-only
+	Closing        bool   // × was pressed with a position open: the engine closes it once it holds nothing
 }
 
 // LifeOf reads a bucket's life number from its name: "<name> life N" is life N, anything else 1.
@@ -284,7 +326,8 @@ func (s *Store) Buckets(ctx context.Context) ([]BucketRow, error) {
 		       coalesce((select sum(k.winnings_cents + k.replenish_cents + k.tax_cents + k.fees_cents)
 		                   from bucket_skim k where k.bucket_id = b.id), 0)::bigint,
 		       (select count(*) from trade_order o where o.bucket_id = b.id and o.action = 'buy'
-		           and exists (select 1 from fill f where f.order_id = o.id))
+		           and exists (select 1 from fill f where f.order_id = o.id)),
+		       b.orders_on, b.close_requested_at is not null and b.status <> 'frozen'
 		  from bucket b
 		  join strategy_version v on v.id = b.strategy_version_id
 		  join strategy st on st.id = v.strategy_id
@@ -297,7 +340,7 @@ func (s *Store) Buckets(ctx context.Context) ([]BucketRow, error) {
 	out := []BucketRow{}
 	for rows.Next() {
 		var b BucketRow
-		if err := rows.Scan(&b.ID, &b.VersionID, &b.Name, &b.Status, &b.Strategy, &b.Version, &b.Anti, &b.CashCents, &b.SeedCents, &b.Source, &b.AllocatedCents, &b.Bets); err != nil {
+		if err := rows.Scan(&b.ID, &b.VersionID, &b.Name, &b.Status, &b.Strategy, &b.Version, &b.Anti, &b.CashCents, &b.SeedCents, &b.Source, &b.AllocatedCents, &b.Bets, &b.OrdersOn, &b.Closing); err != nil {
 			return nil, err
 		}
 		b.Life = LifeOf(b.Name)

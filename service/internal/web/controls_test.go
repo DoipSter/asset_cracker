@@ -14,22 +14,24 @@ import (
 )
 
 type fakeControls struct {
-	on          bool
-	set         bool
-	versions    []store.Version3
-	policy      store.SkimPolicy
-	reset       store.ResetCounts
-	resetErr    error
-	ordersSaved *bool
-	statusSaved string
-	policySaved bool
-	steps       []string
-	created     []store.NewVersion3
-	closed      []int64
-	bank        store.Bank
-	paydays     []store.Payday
-	scheduled   []store.Payday
-	stopped     []int64
+	on           bool
+	set          bool
+	versions     []store.Version3
+	policy       store.SkimPolicy
+	reset        store.ResetCounts
+	resetErr     error
+	ordersSaved  *bool
+	statusSaved  string
+	policySaved  bool
+	steps        []string
+	created      []store.NewVersion3
+	closed       []int64
+	bank         store.Bank
+	paydays      []store.Payday
+	scheduled    []store.Payday
+	stopped      []int64
+	bucketOrders []bool
+	archived     []bool
 }
 
 func (f *fakeControls) OrdersSetting(context.Context) (bool, bool, error) {
@@ -96,6 +98,23 @@ func (f *fakeControls) CloseOutBucket(_ context.Context, id int64) (store.Closed
 		return store.ClosedOut{}, store.OpenContracts{Name: "still open", Lots: 2}
 	}
 	return store.ClosedOut{Name: "kalshi15m2 Model v2", ReapedCents: 4400}, nil
+}
+func (f *fakeControls) SetBucketOrders(_ context.Context, id int64, on bool) error {
+	if id != 50 {
+		return store.ErrNoSuchBucket
+	}
+	f.bucketOrders = append(f.bucketOrders, on)
+	return nil
+}
+func (f *fakeControls) SetVersionArchived(_ context.Context, id int64, archived bool) error {
+	switch id {
+	case 19: // retired, no bucket
+		f.archived = append(f.archived, archived)
+		return nil
+	case 7: // still held
+		return store.ErrNotArchivable
+	}
+	return store.ErrVersionNotFound
 }
 func (f *fakeControls) OpenBank(context.Context) (store.Bank, error) {
 	if f.bank.ID == 0 && f.bank.Name == "" {
@@ -302,6 +321,73 @@ func TestCloseOutOneBucket(t *testing.T) {
 	}
 	if rec = postJSON(mux, "/api/controls/bucket/close", `{}`); rec.Code != 400 {
 		t.Fatalf("no id %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A × on a live-engine bucket with positions open is not refused any more: the engine marks it
+// and the answer says closing, with how many are open. Flat, it is reaped at once as before.
+func TestCloseOutWaitsForTheLastSettlement(t *testing.T) {
+	f := &fakeControls{}
+	var dropped int
+	open := 2
+	mux := controlsMux(f, Control{
+		Drop: func() { dropped++ },
+		CloseWhenFlat: func(_ context.Context, id int64) (Reaped, *Closing, error) {
+			if id != 19 {
+				return Reaped{}, nil, ReapRefused{"that version holds no bucket"}
+			}
+			if open > 0 {
+				return Reaped{}, &Closing{Bucket: "kalshi15m3 Scalper v3", Open: open}, nil
+			}
+			return Reaped{Bucket: "kalshi15m3 Scalper v3", ReapedCents: 100}, nil, nil
+		},
+		Reap: func(context.Context, int64, bool) (Reaped, error) {
+			t.Fatal("Reap must not be used when CloseWhenFlat is there")
+			return Reaped{}, nil
+		},
+	})
+	rec := postJSON(mux, "/api/controls/bucket/close", `{"id":50}`)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"closing":true`) || !strings.Contains(rec.Body.String(), `"open":2`) || len(f.closed) != 0 || dropped != 0 {
+		t.Fatalf("with positions open: %d %s closed %v dropped %d", rec.Code, rec.Body.String(), f.closed, dropped)
+	}
+	open = 0
+	if rec = postJSON(mux, "/api/controls/bucket/close", `{"id":50}`); rec.Code != 200 || strings.Contains(rec.Body.String(), `"closing"`) || !strings.Contains(rec.Body.String(), `"reaped_cents":100`) || dropped != 1 {
+		t.Fatalf("flat: %d %s dropped %d", rec.Code, rec.Body.String(), dropped)
+	}
+	// An old engine's bucket never goes through the live engine.
+	if rec = postJSON(mux, "/api/controls/bucket/close", `{"id":30}`); rec.Code != 200 || len(f.closed) != 1 || f.closed[0] != 30 {
+		t.Fatalf("old engine: %d %s closed %v", rec.Code, rec.Body.String(), f.closed)
+	}
+}
+
+// A bucket's own orders switch is saved and the engine reloaded; a version is archived only when
+// the store allows it, and can be listed again.
+func TestBucketOrdersAndArchive(t *testing.T) {
+	f := &fakeControls{}
+	reloads := 0
+	mux := controlsMux(f, Control{Reload: func(context.Context) (int, int, error) { reloads++; return 2, 1, nil }})
+	rec := postJSON(mux, "/api/controls/bucket/orders", `{"id":50,"on":false}`)
+	if rec.Code != 200 || reloads != 1 || len(f.bucketOrders) != 1 || f.bucketOrders[0] || !strings.Contains(rec.Body.String(), `"on":false`) || !strings.Contains(rec.Body.String(), `"held":2`) {
+		t.Fatalf("off: %d %s reloads %d saved %v", rec.Code, rec.Body.String(), reloads, f.bucketOrders)
+	}
+	if rec = postJSON(mux, "/api/controls/bucket/orders", `{"id":99,"on":true}`); rec.Code != 404 || reloads != 1 {
+		t.Fatalf("unknown bucket: %d %s reloads %d", rec.Code, rec.Body.String(), reloads)
+	}
+	if rec = postJSON(mux, "/api/controls/bucket/orders", `{"on":true}`); rec.Code != 400 {
+		t.Fatalf("no id: %d %s", rec.Code, rec.Body.String())
+	}
+
+	if rec = postJSON(mux, "/api/controls/version/archive", `{"id":19}`); rec.Code != 200 || len(f.archived) != 1 || !f.archived[0] || !strings.Contains(rec.Body.String(), `"archived":true`) {
+		t.Fatalf("archive: %d %s %v", rec.Code, rec.Body.String(), f.archived)
+	}
+	if rec = postJSON(mux, "/api/controls/version/archive", `{"id":19,"archived":false}`); rec.Code != 200 || len(f.archived) != 2 || f.archived[1] {
+		t.Fatalf("unarchive: %d %s %v", rec.Code, rec.Body.String(), f.archived)
+	}
+	if rec = postJSON(mux, "/api/controls/version/archive", `{"id":7}`); rec.Code != 409 || !strings.Contains(rec.Body.String(), "retired") {
+		t.Fatalf("held: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = postJSON(mux, "/api/controls/version/archive", `{"id":99}`); rec.Code != 404 {
+		t.Fatalf("unknown: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

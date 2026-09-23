@@ -748,6 +748,78 @@ func homeRoutes(mux *http.ServeMux, db *store.Store, userAgent string, src Sourc
 		writeJSON(w, doc)
 	})
 
+	// Every version-3 bucket's worth over time, from the minute's value snapshots: one line per
+	// bucket, live and closed, thinned in the database. The buckets page's history charts read it.
+	mux.HandleFunc("GET /api/buckets/history", func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			writeErr(w, http.StatusServiceUnavailable, "The history has no database.")
+			return
+		}
+		rng := r.URL.Query().Get("range")
+		if rng == "" {
+			rng = "24H"
+		}
+		var span time.Duration
+		switch rng {
+		case "1H":
+			span = time.Hour
+		case "24H":
+			span = 24 * time.Hour
+		case "7D":
+			span = 7 * 24 * time.Hour
+		case "ALL":
+			span = 0
+		default:
+			writeErr(w, http.StatusBadRequest, "range is 1H, 24H, 7D or ALL")
+			return
+		}
+		l := list.get(db, time.Now())
+		if !l.good {
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+		defer cancel()
+		since := time.Now().Add(-span)
+		if span == 0 {
+			first, ok, err := db.FirstSnapshot(ctx, "total", "all")
+			if err != nil {
+				http.Error(w, "query failed", http.StatusInternalServerError)
+				return
+			}
+			since = time.Now().Add(-24 * time.Hour)
+			if ok {
+				since = first.At
+			}
+		}
+		var keys []string
+		for _, row := range l.rows {
+			if row.Version == 3 {
+				keys = append(keys, row.Name)
+			}
+		}
+		series, err := db.SnapshotSeriesByKey(ctx, "bucket", keys, since, 300)
+		if err != nil {
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+		out := []map[string]any{}
+		for _, row := range l.rows {
+			if row.Version != 3 {
+				continue
+			}
+			pts := series[row.Name]
+			if pts == nil {
+				pts = [][4]int64{}
+			}
+			out = append(out, map[string]any{"id": row.ID, "name": row.Name, "strategy": strings.TrimPrefix(row.Strategy, "Anti "), "status": row.Status,
+				"life": row.Life, "seed_cents": row.SeedCents, "closing": row.Closing, "orders_on": row.OrdersOn, "points": pts})
+		}
+		writeJSON(w, map[string]any{"simulated": true, "range": rng, "since": since.Unix(), "as_of": time.Now().Unix(),
+			"what":    "Each bucket's worth, minute by minute, from the value snapshots: [unix seconds, value, cash, contributed] in cents. Value less contributed is what the bucket earned; a restake or an allocation moves both.",
+			"buckets": out})
+	})
+
 	var cs controlStore
 	if db != nil {
 		cs = db
@@ -885,7 +957,7 @@ func bucketDocs(rows []store.BucketRow, books []runner.Book) []map[string]any {
 		doc := map[string]any{"id": row.ID, "version_id": row.VersionID, "name": row.Name, "engine": fmt.Sprintf("v%d", row.Version), "strategy": strings.TrimPrefix(row.Strategy, "Anti "),
 			"world": "real", "status": row.Status, "life": row.Life, "seed_cents": row.SeedCents, "source": row.Source, "equity_cents": row.CashCents,
 			"cash_cents": row.CashCents, "at_risk_cents": int64(0), "high_water_cents": nil, "allocated_cents": row.AllocatedCents,
-			"bets": row.Bets, "unmarked_bets": 0}
+			"bets": row.Bets, "unmarked_bets": 0, "orders_on": row.OrdersOn, "closing": row.Closing}
 		if row.Anti {
 			doc["world"] = "anti"
 		}

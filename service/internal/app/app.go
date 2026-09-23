@@ -406,6 +406,29 @@ func Run(version string) error {
 					}
 					return web.Reaped{}, last
 				},
+				// CloseWhenFlat asks each runner like Reap does; the one that holds the version
+				// either reaps now or marks the bucket and says so.
+				CloseWhenFlat: func(rctx context.Context, versionID int64) (web.Reaped, *web.Closing, error) {
+					var last error
+					for _, r := range runners {
+						rep, plan, err := r.CloseWhenFlat(rctx, versionID)
+						if err == nil {
+							dropCapital() // a bucket closed, or will be: the next snapshot reads the ledger
+							if plan != nil {
+								return web.Reaped{}, &web.Closing{Bucket: plan.Bucket, Open: plan.Open}, nil
+							}
+							return web.Reaped{Bucket: rep.Bucket, ReapedCents: rep.ReapedCents, Held: rep.Held, Ordering: rep.MayOrder}, nil, nil
+						}
+						last = err
+						if !errors.Is(err, runner.ErrNoHeldBucket) && !errors.Is(err, store.ErrNoBucketEver) && !errors.Is(err, store.ErrBucketHeld) {
+							return web.Reaped{}, nil, err
+						}
+					}
+					if errors.Is(last, runner.ErrNoHeldBucket) {
+						return web.Reaped{}, nil, web.ReapRefused{Why: last.Error()}
+					}
+					return web.Reaped{}, nil, last
+				},
 				// Deploy knows the version's family from the registry, so only the runner that
 				// holds that family is suspended for it.
 				Deploy: func(rctx context.Context, family string, d store.Deploy) (web.Deployed, error) {

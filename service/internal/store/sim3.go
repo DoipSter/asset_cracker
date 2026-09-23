@@ -104,11 +104,13 @@ type VersionRow struct {
 // HeldBucket is a bucket the third engine holds, with what the runner needs to run it. It is
 // SimBucket plus three things SimBucket has no place for (sim.go is not changed for this).
 type HeldBucket struct {
-	SimBucket            // CashCents is the ledger sum at the moment of the read
-	Strategy      string // the strategy's name, e.g. "Scalper"
-	VersionStatus string // draft | probation | bench | active | retired, as read
-	Params        json.RawMessage
-	SeedCents     int64 // what it was seeded with, from the ledger: the allocator's mark until its first high
+	SimBucket             // CashCents is the ledger sum at the moment of the read
+	Strategy       string // the strategy's name, e.g. "Scalper"
+	VersionStatus  string // draft | probation | bench | active | retired, as read
+	Params         json.RawMessage
+	SeedCents      int64 // what it was seeded with, from the ledger: the allocator's mark until its first high
+	OrdersOn       bool  // the bucket's own new-orders switch (bucket.orders_on); false is held settle-only
+	CloseRequested bool  // × was pressed with a position open: closed the first time it holds nothing
 }
 
 // BucketFill is one recorded fill with everything the rebuild folds it with (plan 5.4).
@@ -642,7 +644,8 @@ func (s *Store) HeldBuckets(ctx context.Context, family string, version int) ([]
 		select b.id, b.name, b.ledger_account_id, b.strategy_version_id, st.name, v.status, v.params,
 		       coalesce((select sum(e.amount_cents) from ledger_entry e where e.account_id = b.ledger_account_id), 0)::bigint,
 		       coalesce((select sum(e.amount_cents) from ledger_entry e join ledger_transfer t on t.id = e.transfer_id
-		                  where e.account_id = b.ledger_account_id and t.reason = 'seed'), 0)::bigint
+		                  where e.account_id = b.ledger_account_id and t.reason = 'seed'), 0)::bigint,
+		       b.orders_on, b.close_requested_at is not null
 		  from bucket b
 		  join strategy_version v on v.id = b.strategy_version_id
 		  join strategy st        on st.id = v.strategy_id
@@ -656,13 +659,41 @@ func (s *Store) HeldBuckets(ctx context.Context, family string, version int) ([]
 	for rows.Next() {
 		var h HeldBucket
 		var params []byte
-		if err := rows.Scan(&h.ID, &h.Name, &h.LedgerAccountID, &h.VersionID, &h.Strategy, &h.VersionStatus, &params, &h.CashCents, &h.SeedCents); err != nil {
+		if err := rows.Scan(&h.ID, &h.Name, &h.LedgerAccountID, &h.VersionID, &h.Strategy, &h.VersionStatus, &params, &h.CashCents, &h.SeedCents, &h.OrdersOn, &h.CloseRequested); err != nil {
 			return nil, err
 		}
 		h.Params = params
 		out = append(out, h)
 	}
 	return out, rows.Err()
+}
+
+// SetBucketOrders is the bucket's own new-orders switch. Off, the engine holds it settle-only
+// from its next load: valued, settled and swept, no buy formed. A frozen bucket has no switch.
+func (s *Store) SetBucketOrders(ctx context.Context, bucketID int64, on bool) error {
+	tag, err := s.pool.Exec(ctx, `update bucket set orders_on = $2 where id = $1 and mode = 'sim' and status <> 'frozen'`, bucketID, on)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNoSuchBucket
+	}
+	return nil
+}
+
+// RequestClose records that × was pressed on a bucket while it had a position open. The engine
+// closes it the first time it holds nothing (closeExhaustedLocked), which is the sweep after the
+// last settlement or the next start. Asking twice is one request; a frozen bucket is refused.
+func (s *Store) RequestClose(ctx context.Context, bucketID int64) error {
+	tag, err := s.pool.Exec(ctx, `update bucket set close_requested_at = coalesce(close_requested_at, now())
+	                               where id = $1 and mode = 'sim' and status <> 'frozen'`, bucketID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNoSuchBucket
+	}
+	return nil
 }
 
 // BucketCash is each bucket's cash as the ledger has it: the sum of the entries on its own

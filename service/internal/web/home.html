@@ -163,6 +163,24 @@ td.f,td .f{font-size:11.5px}
 .bk .sure{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin:8px 0 0;padding:8px 10px;border:1px solid var(--dn);font:12.5px/1.35 var(--serif)}
 .bk .sure span{flex:1 1 200px}
 .bk .sure .go{margin:0;min-height:30px;padding:0 10px;font-size:10.5px;line-height:30px}
+/* a bucket's own new-orders switch sits in its meta line: the assets dialog's switch, smaller */
+.bk .sw{display:inline-flex;align-items:center;gap:5px;font:600 10px/1 var(--sans);letter-spacing:.06em;text-transform:uppercase;color:var(--mute);min-height:22px;padding:0;white-space:nowrap;vertical-align:middle;position:relative}
+.bk .sw::after{content:"";position:absolute;inset:-8px 0}
+.bk .sw .tr{width:26px;height:14px;border:1px solid var(--ink);border-radius:8px;position:relative;background:var(--paper2)}
+.bk .sw .kn{position:absolute;top:2px;left:2px;width:8px;height:8px;border-radius:50%;background:var(--ink);transition:left .12s}
+.bk .sw[aria-checked=true]{color:var(--ink)}.bk .sw[aria-checked=true] .tr{background:var(--up)}.bk .sw[aria-checked=true] .kn{left:14px;background:var(--paper)}
+.bk .sw[disabled]{opacity:.5;cursor:default}
+.bk .hsp{display:block;width:100%;height:22px;margin:5px 0 0;overflow:visible}
+/* history: every bucket's earnings over time, one line each */
+.hist .cvw{height:230px;position:relative}
+.hist svg{display:block;width:100%;height:100%;overflow:visible}
+.hist .yl{position:absolute;right:0;transform:translateY(-50%);font:10.5px/1 var(--mono);color:var(--mute);background:var(--paper);padding:1px 0 1px 4px}
+.hist .xl{position:absolute;bottom:-16px;font:10px/1 var(--sans);color:var(--mute)}
+.hist .lg{display:flex;flex-wrap:wrap;gap:4px 16px;margin:22px 0 0;font:11px/1.4 var(--sans);color:var(--mute)}
+.hist .lg i{display:inline-block;width:14px;border-top:2px solid;vertical-align:middle;margin-right:5px}
+.hist .lg i.done{border-top-style:dashed}
+.hist .lg .f{font-size:11px}
+.hist .chips{margin:8px 0 6px}
 .said{margin:8px 0 0;padding:6px 10px;border-left:2px solid var(--ink);font:12.5px/1.35 var(--serif)}
 .said.bad{border-color:var(--dn);color:var(--dn)}
 .grp>.said{margin:8px 0 6px}
@@ -497,7 +515,7 @@ function tick(){
   if(n>=due.home)loadHome();
   if(S.pane==="home"||S.pane==="buckets"){if(n>=due.controls)loadControls()}
   if(S.pane==="home"){if(n>=due.asset)loadAsset();if(n>=due.sparks)loadSparks();if(S.form&&S.form.kind==="transfer"&&n>=due.accounts)loadAccounts();renderBoxHead();renderCaption();if(S.cr==="15M")drawChart()}
-  if(S.pane==="buckets"&&n>=due.buckets)loadBuckets();
+  if(S.pane==="buckets"){if(n>=due.buckets)loadBuckets();if(n>=due.hist)loadHist()}
   if(S.pane==="evidence"&&n>=due.analysis)loadAnalysis();
   renderDateline()}
 setInterval(tick,1000);
@@ -823,19 +841,61 @@ function bucketRow(b,D){var eq=num(b.equity_cents),seed=num(b.seed_cents),hw=num
   var pos=function(v){return Math.max(0,Math.min(100,50+(v/seed-1)/D*50))},bar="";
   if(seed&&eq!=null){var pe=pos(eq);bar='<i class="'+(eq>=seed?"up":"dn")+'" style="left:'+Math.min(50,pe).toFixed(1)+"%;width:"+Math.abs(pe-50).toFixed(1)+'%"></i>'}
   bar+='<s style="left:50%"></s>';if(seed&&hw!=null&&hw>seed*1.002)bar+='<u style="left:'+pos(hw).toFixed(1)+'%"></u>';
-  /* the database says "frozen"; on the page a frozen bucket is closed: reaped, kept, finished with */
-  var stTag=st==="active"?"active":'<span class="tag '+(st==="tripped"?"bad":st==="winding_down"?"warn":"")+'" style="margin-left:0">'+esc(st==="frozen"?"closed":st.replace("_"," "))+"</span>";
+  /* the database says "frozen"; on the page a frozen bucket is closed: reaped, kept, finished with. "closing" is a × pressed with a bet on: the engine closes it once that settles */
+  var closing=!!b.closing&&st!=="frozen",live=st!=="frozen"&&num(b.id)!=null;
+  var stTag=closing?'<span class="tag warn" style="margin-left:0">closing</span>':st==="active"?"active":'<span class="tag '+(st==="tripped"?"bad":st==="winding_down"?"warn":"")+'" style="margin-left:0">'+esc(st==="frozen"?"closed":st.replace("_"," "))+"</span>";
   var name=str(b.strategy)||str(b.name)||"—",x="",sure="";
-  if(st!=="frozen"&&num(b.id)!=null){var armed=S.armed==="close:"+b.id;
+  if(live&&!closing){var armed=S.armed==="close:"+b.id;
     x='<button type="button" class="x" data-act="close-arm" data-id="'+b.id+'" data-k="x'+b.id+'" aria-label="Close out '+esc(name)+'" aria-expanded="'+armed+'" title="Close out">×</button>';
-    if(armed)sure='<div class="sure" role="group" aria-label="Confirm close out"><span>Close out <b>'+esc(name)+'</b>? What it holds goes to replenishment and the bucket is closed with its record; its bets stay.'+(num(b.at_risk_cents)>0?" It has bets open now: the service refuses until they settle.":"")+'</span><button type="button" class="go bad armed" data-act="close" data-id="'+b.id+'" data-k="close'+b.id+'">Close out</button><button type="button" class="go" data-act="keep" data-id="'+b.id+'" data-k="keep'+b.id+'">Keep</button></div>'}
-  if(S.said&&S.said.id===b.id&&st!=="frozen")sure+=saidHTML(); /* the outcome of the last close-out, under the row it was asked of */
+    if(armed)sure='<div class="sure" role="group" aria-label="Confirm close out"><span>Close out <b>'+esc(name)+'</b>? What it holds goes to replenishment and the bucket is closed with its record; its bets stay.'+(num(b.at_risk_cents)>0?" It has bets on now: it is closed the moment they settle.":"")+'</span><button type="button" class="go bad armed" data-act="close" data-id="'+b.id+'" data-k="close'+b.id+'">Close out</button><button type="button" class="go" data-act="keep" data-id="'+b.id+'" data-k="keep'+b.id+'">Keep</button></div>'}
+  if(S.said&&S.said.id===b.id&&st!=="frozen")sure+=saidHTML(); /* the outcome of the last act on this row, under it */
+  /* the bucket's own new-orders switch: only a bucket the live engine holds has one; it is not offered while the bucket is closing */
+  var sw=live&&b.engine==="v3"?'<span>orders <button type="button" class="sw" role="switch" aria-checked="'+(b.orders_on!==false)+'" data-act="bucket-orders" data-id="'+b.id+'" data-on="'+(b.orders_on!==false?"1":"0")+'" data-k="sw'+b.id+'" aria-label="New orders for '+esc(name)+'"'+(closing?" disabled":"")+'><span>'+(b.orders_on!==false?"On":"Off")+'</span><span class="tr"><span class="kn"></span></span></button></span>':"";
   return'<div class="bk'+(st==="frozen"?" frozen":"")+'"><div class="t"><b>'+esc(name)+"</b>"+(coin?'<span class="k">'+esc(coin[1])+"</span>":"")+(num(b.life)>1?'<span class="tag">life '+b.life+"</span>":"")+
     '<span class="f">'+fig(eq)+'</span><span class="f d '+cls(d)+'">'+pct(d,1)+"</span>"+x+"</div>"+
-    '<div class="bar" role="img" aria-label="Equity '+usd(eq)+", seed "+usd(seed)+", high-water "+usd(hw)+'">'+bar+"</div>"+
-    '<div class="m"><span>'+stTag+"</span><span>life "+(num(b.life)!=null?b.life:"—")+"</span><span>"+(num(b.bets)!=null?b.bets:"—")+" bets</span><span>seed <span class=\"f\">"+usd(seed)+"</span>"+(str(b.source)?" from "+esc(sourceWord(b.source)):"")+"</span><span>high <span class=\"f\">"+usd(hw)+"</span></span><span>allocated <span class=\"f\">"+usd(b.allocated_cents)+"</span></span>"+(num(b.at_risk_cents)?"<span>at risk <span class=\"f\">"+usd(b.at_risk_cents)+"</span></span>":"")+"</div>"+sure+"</div>"}
+    '<div class="bar" role="img" aria-label="Equity '+usd(eq)+", seed "+usd(seed)+", high-water "+usd(hw)+'">'+bar+"</div>"+histSpark(b.name)+
+    '<div class="m"><span>'+stTag+"</span>"+(closing?"<span>closes when its bets settle</span>":"")+"<span>life "+(num(b.life)!=null?b.life:"—")+"</span><span>"+(num(b.bets)!=null?b.bets:"—")+" bets</span><span>seed <span class=\"f\">"+usd(seed)+"</span>"+(str(b.source)?" from "+esc(sourceWord(b.source)):"")+"</span><span>high <span class=\"f\">"+usd(hw)+"</span></span><span>allocated <span class=\"f\">"+usd(b.allocated_cents)+"</span></span>"+(num(b.at_risk_cents)?"<span>at risk <span class=\"f\">"+usd(b.at_risk_cents)+"</span></span>":"")+sw+"</div>"+sure+"</div>"}
 function sourceWord(s){return s==="bank"?"the bank":s==="replenishment"?"replenishment":s}
 function saidHTML(){return'<p class="said'+(S.said.bad?" bad":"")+'" role="status">'+esc(S.said.text)+"</p>"}
+/* ---------- history: what each bucket earned over time ----------
+   api/buckets/history gives every version-3 bucket's value, cash and contributed by the minute, thinned in the database. Value less
+   contributed is what the bucket earned, and that is what is drawn: a restake or an allocation moves both and draws no step. Read while
+   the pane is showing, once a minute, and again when the range changes. */
+var HRANGES=["1H","24H","7D","ALL"],HIST_INK=["#4c8bd9","#d98b3a","#2f9e8f","#c94c6f","#8a5bd1","#7a8c2e","#b8862b","#5b7fa6"];
+S.hist={range:"24H",data:null};due.hist=0;
+function loadHist(){var r=S.hist.range;if(busy.hist===r)return;busy.hist=r;due.hist=Date.now()+60000;
+  get("api/buckets/history?range="+encodeURIComponent(r)).then(function(j){if(busy.hist===r)busy.hist=null;if(r!==S.hist.range)return;S.hist.data=j&&typeof j==="object"?j:{};S.fail.hist=0;renderBuckets()})
+  .catch(function(){if(busy.hist===r)busy.hist=null;S.fail.hist=1;due.hist=Date.now()+5000;renderBuckets()})}
+function histSeries(){var d=S.hist.data;return objs(d&&d.buckets)}
+function earnedPts(hb){return cleanPts(arr(hb.points).map(function(p){return Array.isArray(p)&&p.length>=4?[p[0],p[1]-p[3]]:null}).filter(Boolean))}
+function histColour(i){return legible(HIST_INK[i%HIST_INK.length])}
+/* the row's sparkline: the bucket's earnings over the chosen range; the dashed line is where it stood at the start of the range */
+function histSpark(name){var hb=null;histSeries().forEach(function(h){if(h.name===name)hb=h});if(!hb)return"";
+  var pts=earnedPts(hb);if(pts.length<2)return"";var sp=sparkPath(pts,100,22);if(!sp)return"";var last=pts[pts.length-1][1],first=pts[0][1];
+  return'<svg class="hsp" viewBox="0 0 100 22" preserveAspectRatio="none" role="img" aria-label="Earned over the range: '+esc(sgn(last-first))+'">'+
+    '<line x1="0" x2="100" y1="'+sp.y0.toFixed(1)+'" y2="'+sp.y0.toFixed(1)+'" stroke="var(--rule)" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/>'+
+    '<path d="'+sp.d+'" fill="none" stroke="'+(last>first?"var(--up)":last<first?"var(--dn)":"var(--mute)")+'" stroke-width="1.2" vector-effect="non-scaling-stroke"/></svg>'}
+function histHTML(){var d=S.hist.data,list=histSeries(),W=600,H=230;
+  var out='<div class="sec hist" id="j-history"><span class="k">History · what each bucket has earned</span><h2>Earnings over time</h2>'+
+    '<p class="what">One line per bucket, live or closed: its value less what was put into it, from the minute\u2019s value snapshots. A restake or an allocation moves both and draws no step; a closed bucket is dashed and ends where it closed.</p>'+
+    '<div class="chips" id="hrange" role="group" aria-label="History range">'+HRANGES.map(function(v){return'<button type="button" data-k="h'+v+'" data-v="'+v+'" data-act="hist-range" aria-pressed="'+(v===S.hist.range)+'">'+v+"</button>"}).join("")+"</div>";
+  if(!d)return out+'<p class="empty">'+(S.fail.hist?"No answer from api/buckets/history yet. Trying again shortly.":"Reading the history…")+"</p></div>";
+  var series=list.map(function(hb,i){return{hb:hb,pts:earnedPts(hb),i:i}}).filter(function(s){return s.pts.length>=2});
+  if(!series.length)return out+'<p class="empty">No snapshots in this range yet. One is written each minute a bucket is held.</p></div>';
+  var x0=num(d.since),x1=num(d.as_of),lo=0,hi=0;series.forEach(function(s){s.pts.forEach(function(p){lo=Math.min(lo,p[1]);hi=Math.max(hi,p[1])})});
+  if(x0==null||x1==null||x1<=x0){x0=Infinity;x1=-Infinity;series.forEach(function(s){x0=Math.min(x0,s.pts[0][0]);x1=Math.max(x1,s.pts[s.pts.length-1][0])})}
+  if(hi===lo){hi+=100;lo-=100}var pad=(hi-lo)*.06,top=hi,bot=lo;hi+=pad;lo-=pad;
+  var X=function(t){return(t-x0)/((x1-x0)||1)*W},Y=function(v){return H-(v-lo)/(hi-lo)*H};
+  var paths=series.map(function(s){var dd="";s.pts.forEach(function(p,k){dd+=(k?"L":"M")+X(p[0]).toFixed(1)+" "+Y(p[1]).toFixed(1)});var done=s.hb.status==="frozen";
+    return'<path d="'+dd+'" fill="none" stroke="'+histColour(s.i)+'" stroke-width="'+(done?1.1:1.5)+'"'+(done?' stroke-dasharray="4 3" stroke-opacity=".75"':"")+' vector-effect="non-scaling-stroke"/>'}).join("");
+  /* the zero line is labelled first; the top and bottom only where they do not sit on it */
+  var zero=Y(0),labels=[];[0,top,bot].forEach(function(v){var y=Y(v)/H*100;if(labels.every(function(w){return Math.abs(Y(w)/H*100-y)>=7}))labels.push(v)});
+  out+='<div class="cvw"><svg viewBox="0 0 '+W+" "+H+'" preserveAspectRatio="none" role="img" aria-label="Earnings over time, one line per bucket">'+
+    '<line x1="0" x2="'+W+'" y1="'+zero.toFixed(1)+'" y2="'+zero.toFixed(1)+'" stroke="var(--ink)" stroke-opacity=".45" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/>'+paths+"</svg>"+
+    labels.map(function(v){var y=Y(v)/H*100;if(y<3||y>97)return"";return'<span class="yl" style="top:'+y.toFixed(1)+'%">'+esc(fig(v,0,1).replace(IP,""))+"</span>"}).join("")+
+    '<span class="xl" style="left:0">'+esc(sinceText(x0))+'</span><span class="xl" style="right:0">'+esc(sinceText(x1))+"</span></div>";
+  out+='<div class="lg">'+series.map(function(s){var last=s.pts[s.pts.length-1][1],done=s.hb.status==="frozen";return'<span><i class="'+(done?"done":"")+'" style="border-color:'+histColour(s.i)+'"></i>'+esc(str(s.hb.strategy)||s.hb.name)+(num(s.hb.life)>1?" life "+s.hb.life:"")+(done?" · closed":"")+' <span class="f '+cls(last)+'">'+sgn(last)+"</span></span>"}).join("")+"</div></div>";
+  return out}
 function pc(bps){return(bps/100).toFixed(bps%100?2:0)+"%"}
 /* The operator key: with AC_OPERATOR_KEY set on the service, every change needs it. Asked for once, kept for this tab, asked again if refused. */
 function opKey(){try{return sessionStorage.getItem("ac.key")||""}catch(e){return""}}
@@ -906,7 +966,7 @@ function ruleStays(p){var typed=ruleBps(p);if(typed.some(function(v){return v==n
    The deploy form is the buckets page's one purpose: a strategy, a seed, and where the seed is drawn from. Deploy seeds the bucket, puts a
    draft or retired version on probation, and the engine loads it; it trades on the next look if its version vets. The registry under it
    lists every version with what may be done to it. */
-function deployHTML(){var c=S.controls||{},vs=objs(c.versions),m=(S.buckets||{}).money||{},pool=num(m.replenishment_cents);
+function deployHTML(){var c=S.controls||{},vs=objs(c.versions).filter(function(v){return!v.archived}),m=(S.buckets||{}).money||{},pool=num(m.replenishment_cents);
   var cur=draft("dp-version",""),chosen=null;vs.forEach(function(v){if(String(v.id)===String(cur))chosen=v});
   var vopts='<option value="">Pick a strategy…</option>'+vs.map(function(v){return'<option value="'+v.id+'"'+(String(v.id)===String(cur)?" selected":"")+(v.held?" disabled":"")+">"+esc(v.name)+" · "+esc(v.status)+(v.family==="kalshiladder"?" · ladders":"")+(v.held?" · deployed":num(v.lives)>0?" · closed, life "+v.lives:"")+"</option>"}).join("");
   var seedDefault=num(c.default_seed_cents)!=null?(c.default_seed_cents/100)+"":"1000",src=draft("dp-source",arr(c.seed_sources)[0]||"replenishment");
@@ -923,11 +983,16 @@ function deployHTML(){var c=S.controls||{},vs=objs(c.versions),m=(S.buckets||{})
    (the bucket trades again as it stands); Retire while not retired (its bucket is held settle-only); Remix when the process has a builder.
    A held bucket is closed by the × on its own row. */
 function verButtons(v){var id=v.id,b=function(act,label,cls){return'<button type="button" class="go'+(cls?" "+cls:"")+'" data-act="'+act+'" data-id="'+id+'">'+label+"</button>"};
+  if(v.archived)return b("unarchive","List again");
   var out="";if(!v.held)out+=b("deploy-pick","Deploy…");else if(v.status==="retired"||v.status==="draft")out+=b("approve","Resume");
-  if(v.status!=="retired")out+=b("retire","Retire");if(v.shape)out+=b("remix","Remix");return out}
-function registryHTML(){var c=S.controls||{},o=c.orders||{},vs=objs(c.versions),pressed=S.controls?!!o.on:false;
-  var vers=vs.length?vs.map(function(v){return'<div class="ver"><b>'+esc(v.name)+'</b> <span class="tag">'+esc(v.status)+'</span>'+(v.family==="kalshiladder"?' <span class="tag">ladders</span>':'')+(v.held?' <span class="tag">deployed</span>':(num(v.lives)>0?' <span class="tag">no bucket</span>':''))+'<div>'+verButtons(v)+'</div></div>'}).join(""):'<p class="empty">Nothing is registered.</p>';
-  return'<div class="sec" id="j-registry"><span class="k">The registry · version 3</span><h2>Strategies</h2><p class="what">Every version the engine may hold a bucket for. A retired version\u2019s bucket is held settle-only; a draft trades nothing until it is deployed.</p>'+vers+
+  if(v.status!=="retired")out+=b("retire","Retire");if(v.shape)out+=b("remix","Remix");
+  if(v.status==="retired"&&!v.held)out+=b("archive","Archive"); /* out of the list; everything about it kept */
+  return out}
+function verRow(v){return'<div class="ver"><b>'+esc(v.name)+'</b> <span class="tag">'+esc(v.status)+'</span>'+(v.family==="kalshiladder"?' <span class="tag">ladders</span>':'')+(v.held?' <span class="tag">deployed</span>':(num(v.lives)>0?' <span class="tag">no bucket</span>':''))+'<div>'+verButtons(v)+'</div></div>'}
+function registryHTML(){var c=S.controls||{},o=c.orders||{},vs=objs(c.versions),pressed=S.controls?!!o.on:false,listed=vs.filter(function(v){return!v.archived}),arch=vs.filter(function(v){return v.archived});
+  var vers=listed.length?listed.map(verRow).join(""):'<p class="empty">'+(arch.length?"Nothing is listed; "+arch.length+" archived below.":"Nothing is registered.")+"</p>";
+  if(arch.length)vers+='<details class="closed" data-g="archived"'+(S.fold.archived===false?" open":"")+'><summary data-k="clarch"><span class="k">'+arch.length+" archived · record kept</span></summary>"+arch.map(verRow).join("")+"</details>";
+  return'<div class="sec" id="j-registry"><span class="k">The registry · version 3</span><h2>Strategies</h2><p class="what">Every version the engine may hold a bucket for. A retired version\u2019s bucket is held settle-only; a draft trades nothing until it is deployed. Archive takes a retired version with no open bucket off this list; nothing about it is lost.</p>'+vers+
     '<h3 style="font:700 16px/1.2 var(--serif);margin:14px 0 0">New orders</h3><p class="what" id="ctl-orders">'+esc(ordersLine(o))+'</p><button type="button" class="go" data-act="orders-on" aria-pressed="'+(pressed?"true":"false")+'">On</button><button type="button" class="go" data-act="orders-off" aria-pressed="'+(!S.controls||pressed?"false":"true")+'">Off</button></div>'}
 /* ---------- the strategy builder ---------- */
 /* Every field is one of the engine's parameters (engine.Shape). What you set is recorded as a convention you chose; what you leave blank is inherited from the parent shape. Nothing here is a measurement. */
@@ -975,7 +1040,7 @@ function renderBuckets(force){var el=$("p-buckets");if(el.hidden&&!force)return;
   bs.forEach(function(b){G[b.engine==="v3"?0:1][3].push(b);var s=num(b.seed_cents);if(s&&b.status!=="frozen"){[b.equity_cents,b.high_water_cents].forEach(function(v){if(num(v)!=null)D=Math.max(D,Math.abs(v/s-1))})}});
   var cut=D*1.05>.5;D=Math.min(.5,Math.ceil(D*1.05*20)/20);
   out+='<p class="what">Each bucket is one strategy\u2019s account. Bar: equity against seed. The centre tick <b style="font-style:normal">|</b> is the seed, the fill runs from it to equity, and the bracket <b style="font-style:normal">]</b> marks high water. Every bar spans ±'+Math.round(D*100)+"% of seed"+(cut?"; a bar that reaches the edge is cut off there":"")+". “Allocated” is what the allocation rule has set aside from it to date; the balances are on Home.</p>"+[d.buckets_error,d.capital_error].filter(str).map(function(m){return'<p class="what"><b>Not current.</b> '+esc(m)+"</p>"}).join("")+
-    '<div class="jump" role="group" aria-label="Jump to">'+[["deploy","Deploy"],["g0","Live engine"]].concat(G[1][3].length?[["g1","Archived"]]:[],[["registry","Strategies"],["ev","Notices"]]).map(function(j){return'<button type="button" data-k="j'+j[0]+'" data-j="j-'+j[0]+'">'+j[1]+"</button>"}).join("")+"</div></div>";
+    '<div class="jump" role="group" aria-label="Jump to">'+[["deploy","Deploy"],["g0","Live engine"]].concat(G[1][3].length?[["g1","Old engines"]]:[],[["history","History"],["registry","Strategies"],["ev","Notices"]]).map(function(j){return'<button type="button" data-k="j'+j[0]+'" data-j="j-'+j[0]+'">'+j[1]+"</button>"}).join("")+"</div></div>";
   out+=deployHTML()+'<div class="cols">';
   /* live buckets are listed; closed ones (frozen: reaped, record kept) sit folded under them, shut unless the reader opened them */
   G.forEach(function(g,gi){if(g[0]==="legacy"&&!g[3].length)return;var eq=0,seed=0,al=0,live=0,fz=0,shut=[],ck="closed:"+g[0];g[3].forEach(function(b){al+=num(b.allocated_cents)||0;if(b.status==="frozen"){fz++;shut.push(b);return}live++;eq+=num(b.equity_cents)||0;seed+=num(b.seed_cents)||0});
@@ -989,7 +1054,7 @@ function renderBuckets(force){var el=$("p-buckets");if(el.hidden&&!force)return;
   var ev=objs(d.events),fold=[];ev.forEach(function(e){var l=fold[fold.length-1];if(l&&l.e.kind===e.kind&&l.e.note===e.note&&l.e.at===e.at)l.n++;else fold.push({e:e,n:1})});
   out+='<div class="grp">'+registryHTML()+'<div class="sec" id="j-ev"><span class="k">Recent bucket events · newest first</span><h2>Notices</h2>';
   out+=fold.length?fold.map(function(f){var e=f.e;return'<div class="ev"><time>'+esc(iso(e.at))+'</time><span><span class="k">'+esc(str(e.kind)||"—")+"</span>"+(f.n>1?"<b>"+f.n+" buckets</b>":str(e.bucket)?"<b>"+esc(e.bucket)+"</b>":"")+(str(e.note)?' <span class="mu">· '+esc(e.note)+"</span>":"")+"</span></div>"}).join(""):'<p class="empty">Nothing has happened to a bucket yet.</p>';
-  out+="</div></div></div>";setHTML(el,out)}
+  out+="</div></div></div>"+histHTML();setHTML(el,out)}
 $("p-buckets").addEventListener("toggle",function(e){var g=e.target&&e.target.getAttribute&&e.target.getAttribute("data-g");if(g)S.fold[g]=!e.target.open},true);
 $("p-buckets").addEventListener("click",function(e){var b=e.target.closest("[data-j]");if(!b)return;var t=$(b.getAttribute("data-j"));if(t){if(t.tagName==="DETAILS")t.open=true;t.scrollIntoView()}});
 function bpsOf(id){var n=$(id);if(!n)return null;var raw=String(n.value).trim();if(raw==="")return null;var v=Number(raw);if(!isFinite(v))return null;return Math.round(v*100)}
@@ -1010,10 +1075,19 @@ $("p-buckets").addEventListener("click",function(e){var b=e.target.closest&&e.ta
   if(act==="close"){if(S.armed!=="close:"+b.getAttribute("data-id")){S.armed=null;renderBuckets(true);return}S.armed=null}
   else if(S.armed){S.armed=null}
   if(act==="deploy-pick"){S.draft["dp-version"]=b.getAttribute("data-id");say("");var f=$("j-deploy");if(f&&f.scrollIntoView)f.scrollIntoView({block:"start"});var sel=$("dp-seed");if(sel)sel.focus();return}
+  if(act==="hist-range"){S.hist.range=b.getAttribute("data-v");S.hist.data=null;busy.hist=null;due.hist=0;renderBuckets(true);loadHist();return}
   S.ctlBusy=1;
-  if(act==="close"){var cid=Number(b.getAttribute("data-id")),said=function(t,bad){S.ctlBusy=0;S.said={id:cid,text:t,bad:!!bad};renderBuckets(true)};
-    post("api/controls/bucket/close",{id:cid},40000).then(function(j){said("Closed out "+(j.bucket||"the bucket")+": "+usd(j.reaped_cents)+" to replenishment. Its bets and record stay.");refreshBooks()},
-      function(e){said((e&&e.message)||"The close-out did not go through.",true)});return}
+  /* the outcome of an act on one row is shown under that row */
+  var rowSaid=function(id,t,bad){S.ctlBusy=0;S.said={id:id,text:t,bad:!!bad};renderBuckets(true)};
+  if(act==="close"){var cid=Number(b.getAttribute("data-id"));
+    post("api/controls/bucket/close",{id:cid},40000).then(function(j){
+      if(j.closing)rowSaid(cid,(j.bucket||"The bucket")+" has "+(num(j.open)||0)+" position"+(j.open===1?"":"s")+" on: it is closed the moment they settle, and nothing new is opened meanwhile.");
+      else rowSaid(cid,"Closed out "+(j.bucket||"the bucket")+": "+usd(j.reaped_cents)+" to replenishment. Its bets and record stay.");refreshBooks()},
+      function(e){rowSaid(cid,(e&&e.message)||"The close-out did not go through.",true)});return}
+  if(act==="bucket-orders"){var oid=Number(b.getAttribute("data-id")),on=b.getAttribute("data-on")!=="1";
+    post("api/controls/bucket/orders",{id:oid,on:on},40000).then(function(j){rowSaid(oid,afterLoad(j,on?"New orders are on for this bucket.":"New orders are off for this bucket: it is held settle-only, its bets settle, nothing new is opened.",on));refreshBooks()},
+      function(e){rowSaid(oid,(e&&e.message)||"The switch was not saved.",true)});return}
+  if(act==="archive"||act==="unarchive"){post("api/controls/version/archive",{id:Number(b.getAttribute("data-id")),archived:act==="archive"}).then(function(){done(act==="archive"?"Archived: out of the list, everything about it kept. It is under “archived” below, and can be listed again from there.":"Listed again.")}).catch(fail);return}
   if(act==="deploy"){var vid=Number(($("dp-version")||{}).value||0),seed=Math.round(Number(String(($("dp-seed")||{}).value||"").trim())*100),src=($("dp-source")||{}).value||"";
     if(!vid){S.ctlBusy=0;say("Pick the strategy to deploy.",true);return}if(!(seed>0)){S.ctlBusy=0;say("Enter the seed in dollars.",true);return}
     post("api/controls/bucket/deploy",{version_id:vid,cents:seed,source:src},40000).then(function(j){["dp-version","dp-seed"].forEach(function(k){delete S.draft[k]});

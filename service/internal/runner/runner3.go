@@ -328,6 +328,8 @@ func (o Options3) load(ctx context.Context, db Store3, on bool) (*loaded3, error
 			b.whyNot = "new orders are off: settle-only"
 		case h.VersionStatus != "probation" && h.VersionStatus != "active":
 			b.whyNot = "its version is " + h.VersionStatus + ": settle-only"
+		case !h.OrdersOn:
+			b.whyNot = "its own orders switch is off: settle-only"
 		case !ordering[h.VersionID]:
 			b.whyNot = "refused: " + l.refused[h.VersionID]
 		default:
@@ -615,6 +617,56 @@ func (r *Runner3) Reap(ctx context.Context, versionID int64, restake bool) (Reap
 	return out, nil
 }
 
+// ClosePlan is a close-out the engine has taken on and finishes itself: the bucket had a position
+// open when × was pressed, so it is marked and closed by the pass after its last settlement
+// (closeExhaustedLocked), or by the next start.
+type ClosePlan struct {
+	Bucket string
+	Open   int // positions open at the moment it was marked
+}
+
+// CloseWhenFlat is Reap without restake for a bucket that may still have a position on. Flat, it
+// is reaped now and the report says so. Not flat, it is marked, in the database (RequestClose) and
+// in the held set, and the plan says so; the reap follows the last settlement. Every other refusal
+// is the error Reap gives.
+func (r *Runner3) CloseWhenFlat(ctx context.Context, versionID int64) (ReapReport, *ClosePlan, error) {
+	rep, err := r.Reap(ctx, versionID, false)
+	var open OpenPositions
+	if !errors.As(err, &open) {
+		return rep, nil, err
+	}
+	r.mu.Lock()
+	r.absorbLocked()
+	var id int64
+	for _, b := range r.buckets {
+		if b.VersionID == versionID {
+			id = b.ID
+		}
+	}
+	r.mu.Unlock()
+	if id == 0 {
+		return ReapReport{}, nil, err // gone between the two looks: the refusal stands
+	}
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.writeBudget)
+	defer cancel()
+	if werr := r.db.RequestClose(wctx, id); werr != nil {
+		return ReapReport{}, nil, fmt.Errorf("marking %s to close once flat: %w", open.Bucket, werr)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	defer r.fenceLocked("close when flat")
+	r.absorbLocked()
+	for i := range r.buckets {
+		if r.buckets[i].ID == id {
+			r.buckets[i].CloseRequested = true
+		}
+	}
+	slog.Info("v3 bucket marked to close once flat", "bucket", open.Bucket, "open", open.Lots)
+	// It may have gone flat while the mark was written: then this is the pass that closes it.
+	r.closeExhaustedLocked(ctx)
+	return ReapReport{}, &ClosePlan{Bucket: open.Bucket, Open: open.Lots}, nil
+}
+
 // DeployReport is what a Deploy did.
 type DeployReport struct {
 	Bucket    string // the bucket opened
@@ -713,6 +765,11 @@ func (r *Runner3) mayOrderCount() int {
 // a bucket that loses its last bet is closed then and not at the next start (platform brief,
 // section 5: closed, never topped up; frozen, not deleted; not replaced until a different
 // strategy is waiting). A close that fails leaves the bucket held, exhausted, until the next try.
+//
+// The same pass closes a bucket whose close the operator asked for while it had a position open
+// (CloseWhenFlat; bucket.close_requested_at), the first time it holds nothing: so the × is
+// honoured by the sweep after the last settlement, or by the next start, and nobody has to come
+// back and press it again.
 func (r *Runner3) closeExhausted(ctx context.Context) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -731,7 +788,8 @@ func (r *Runner3) closeExhaustedLocked(ctx context.Context) {
 	var closed bool
 	for _, b := range r.buckets {
 		a := r.engine.Account(b.ID)
-		if a == nil || !a.RanOut() {
+		asked := a != nil && b.CloseRequested && len(a.Positions) == 0
+		if a == nil || (!a.RanOut() && !asked) {
 			keep = append(keep, b)
 			if a != nil {
 				accounts = append(accounts, a)
@@ -739,17 +797,24 @@ func (r *Runner3) closeExhaustedLocked(ctx context.Context) {
 			continue
 		}
 		reason := fmt.Sprintf("ran out: %d cents left and nothing open", a.CashCents)
+		if asked {
+			reason = "closed out by the operator, once its last position settled"
+		}
 		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.writeBudget)
 		_, err := r.db.CloseBucket(wctx, r.setup, b.SimBucket, reason, false, 0, 0)
 		cancel()
 		if err != nil {
-			slog.Error("v3 could not close a bucket that ran out; it stays held and exhausted", "bucket", b.Name, "err", err)
+			slog.Error("v3 could not close a bucket; it stays held", "bucket", b.Name, "why", reason, "err", err)
 			keep, accounts = append(keep, b), append(accounts, a)
 			continue
 		}
 		closed = true
 		delete(r.hwm, b.ID)
-		slog.Warn("v3 bucket ran out: reaped, frozen, not replaced", "bucket", b.Name, "left_cents", a.CashCents)
+		if asked {
+			slog.Info("v3 bucket closed out as the operator asked: reaped, frozen, not replaced", "bucket", b.Name, "reaped_cents", a.CashCents)
+		} else {
+			slog.Warn("v3 bucket ran out: reaped, frozen, not replaced", "bucket", b.Name, "left_cents", a.CashCents)
+		}
 	}
 	if !closed {
 		return
@@ -1524,6 +1589,7 @@ func (r *Runner3) sweep(ctx context.Context) {
 		return out
 	}()
 	if len(due) == 0 {
+		r.closeAsked(ctx)
 		return
 	}
 	ids := make([]int64, 0, len(due))
@@ -1553,6 +1619,24 @@ func (r *Runner3) sweep(ctx context.Context) {
 				r.settleLocked(ctx, id, due[id], result)
 			}
 		}()
+	}
+	r.closeAsked(ctx)
+}
+
+// closeAsked is the minute's look at buckets whose close the operator asked for: if one holds
+// nothing now it is closed. Settlement already does this; this covers a bucket that went flat
+// some other way (a position sold out, a mark that landed after the last settlement), so a ×
+// never waits for the next start. Nothing to do when no bucket is marked.
+func (r *Runner3) closeAsked(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	defer r.fenceLocked("close asked")
+	r.absorbLocked()
+	for _, b := range r.buckets {
+		if b.CloseRequested {
+			r.closeExhaustedLocked(ctx)
+			return
+		}
 	}
 }
 
