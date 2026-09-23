@@ -542,7 +542,16 @@ function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.to
   [["Replenishment",m.replenishment_cents],["Taxes",m.tax_reserve_cents],["Winnings",m.winnings_cents],["Fee reserve",m.fee_reserve_cents]].forEach(function(p){
     rows+=compLine(p[0],null,p[1],{sheet:true,quiet:num(p[1])===0})});
   rows+='<div class="row sum"><span>Total value</span><span class="f v'+(v<0?" dn":"")+'">'+fig(v,1)+'</span></div><hr class="dbl" style="margin:0">';
-  var gain='<span class="k">The gain</span>'+compLine("Deployed capital",live.earned_cents,null,{noValue:true})+compLine("Fees paid",feesPaid?-feesPaid:0,null,{noValue:true,quiet:!feesPaid,note:"to date"})+'<div class="row sum"><span>Earned '+esc(when)+'</span><span class="f e '+c+'">'+fig(e,0,1)+"</span></div>";
+  /* The fee has already left the cash, so it is already inside the earned figure. On the whole
+     life the two lines are that figure split: the result before the fee, then the fee, and they
+     add to the total. A shorter window does not know its own fee, so it shows the one figure. */
+  var gain='<span class="k">The gain</span>',liveEarn=num(live.earned_cents);
+  if(rg==="ALL"&&feesPaid&&liveEarn!=null){
+    gain+=compLine("Before fees",liveEarn+feesPaid,null,{noValue:true});
+    gain+=compLine("Fees paid",-feesPaid,null,{noValue:true});
+  }else gain+=compLine("Deployed capital",liveEarn,null,{noValue:true});
+  if(e!=null&&liveEarn!=null&&e!==liveEarn)gain+=compLine("Other",e-liveEarn,null,{noValue:true});
+  gain+='<div class="row sum"><span>Earned '+esc(when)+'</span><span class="f e '+c+'">'+fig(e,0,1)+"</span></div>";
   setHTML($("gain"),gain);
   var arch=by.legacy,held=arch&&(num(arch.value_cents)||num(arch.buckets));
   rows+='<p class="memo"><i>Memo, outside the sum:</i><span>at risk <span class="f">'+fig(t.at_risk_cents)+'</span></span><span>unrealised <span class="f '+cls(t.unrealized_cents)+'">'+fig(t.unrealized_cents,0,1)+"</span></span>"+(held?'<span>old engines still hold <span class="f">'+fig(arch.value_cents)+"</span> — close them out on Buckets; the record stays</span>":"")+"</p>";
