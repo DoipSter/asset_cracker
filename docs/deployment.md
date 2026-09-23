@@ -56,23 +56,41 @@ The agent works only as `acdeploy`. Admin steps are handed to Brad as a command 
 A release is a commit. The binary carries its short sha and reports it at `/healthz`.
 
 ```
+deploy/pi/deploy.sh check     # what the Pi runs, what would go out, and whether it may
 deploy/pi/deploy.sh prod
 ```
 
-1. Refuses unless the tree is clean and the branch is `main` (`AC_ALLOW_BRANCH=<branch>` to
-   override while work has not been merged yet).
+More than one agent releases to this Pi, from more than one checkout. So a release must be a
+commit everyone can see that includes what the Pi runs now, and the script refuses otherwise:
+
+1. **Pre-flight.** Refuses, saying why, unless: the tree is clean; the branch is `main`
+   (`AC_ALLOW_BRANCH=<branch>` to override while work has not been merged yet); the commit is
+   on `origin/<branch>` (push first); the sha the Pi runs is in this commit's history; and no
+   other release is in flight. `check` runs this step alone and changes nothing.
+   - *The Pi runs a sha you do not have, or one not in your history*: someone else released
+     while you worked. Fetch, rebase or merge, and release from a commit that includes theirs.
+     Releasing over it would take their work off the Pi. `AC_REPLACE=<that sha>` says you mean
+     to; `rollback` is the usual way to go backwards.
+   - *Another release is in flight*: `/opt/assetcracker/release.lock/who` names who and since
+     when. The lock is taken before the build and removed when the script exits, however it
+     exits; if the holder died, remove the directory on the Pi.
 2. `go vet`, `go test`, cross-compile for linux/arm64.
 3. Copies to `/opt/assetcracker/releases/<sha>/`. Needs no sudo: the deploy user owns that tree.
 4. `db/migrate.sh prod`: new migrations, then `db/grants.sql`.
 5. Points `/opt/assetcracker/current` at the new release (one atomic rename), remembers the
-   old one in `/opt/assetcracker/previous`, restarts the unit.
+   old one in `/opt/assetcracker/previous`, appends a line to `/opt/assetcracker/releases.log`
+   (when, sha, branch, who, in place of what), restarts the unit.
 6. Polls `/healthz` for up to a minute. Healthy means: the expected version, the database
    answering, the Coinbase feed alive (some product traded in the last minute; a quiet coin is
    not a fault), quotes under a minute old for every series.
 7. **Not healthy: switches back to the previous release, restarts, prints the unit's last log
    lines, exits non-zero.** Healthy: prunes to the newest five releases.
 
-`deploy/pi/deploy.sh rollback` does step 7's switch on demand.
+`deploy/pi/deploy.sh rollback` does step 7's switch on demand; it is logged too.
+
+`ssh acdeploy@rpi-v5-1.local cat /opt/assetcracker/releases.log` answers "what went out, when,
+by whom". Releases before 2026-09-23 predate the log; the unit's journal has them
+(`msg="asset cracker service running" version=...`).
 
 ## Migrations
 
@@ -143,10 +161,20 @@ by pull request; prod releases come from `main`. Every piece of work is an Agora
 INT-10 in the `asset_cracker` room, created when the work starts and moved to done with the
 commit that finished it.
 
+Several agents may be at work at once, sometimes in the same checkout. Before a release:
+`agora_sync`, so a release someone else made minutes ago is known and not talked over; after
+one: an `agora_event` naming the sha, so theirs knows. On 2026-09-22 two agents released to
+the Pi within minutes of each other, neither aware of the other; nothing was lost, because the
+second commit happened to sit on the first, but only by luck. The script's pre-flight (above) is
+the backstop that does not depend on anyone remembering.
+
 ## Not done yet
 
 - Off-Pi backup destination, and a restore drill.
 - Alerting.
+- Nothing makes an agent hello/sync on Agora before it releases; that is still a convention.
+  The pre-flight refuses a release that would drop another's, but a release that merely
+  surprises another agent is still possible.
 - The Pi boots to a desktop. Booting to the console would free a few hundred MB; optional.
 - A UPS or a tested power-loss recovery. Postgres is crash-safe and checksummed, but an
   unclean power cut has not been tried.

@@ -141,6 +141,7 @@ a warning, so a mistyped variable never makes a looser gate. The rule they set i
     cd service && go vet ./... && go test ./...
     tools/guard-frozen.sh      # frozen v1/v2 archives must not change unless AC_ALLOW_LEGACY=1
     deploy/pi/deploy.sh        # test, cross-compile for linux/arm64, copy to /opt/assetcracker
+    deploy/pi/deploy.sh check  # before a release: what the Pi runs, and whether this commit may replace it
 
 The running service is the systemd unit on the Pi, database `assetcracker`. It refuses to start
 against a scratch database (`*_dev`): that database rehearses migrations and constraint tests
