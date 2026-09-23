@@ -179,7 +179,7 @@ type Runner3 struct {
 
 	// coinMu guards views and nothing else. It is held across a map read or write only.
 	coinMu sync.Mutex
-	views  map[string]seenView // by coin
+	views  map[string]seenView // by viewKey(coin, ticker)
 
 	// mu guards everything below. Step and the settlement path hold it across their ledger write.
 	// Lock order where both are needed: mu, then coinMu.
@@ -964,10 +964,23 @@ func (r *Runner3) Inputs(coin string, info kalshi.MarketInfo, closes, at time.Ti
 	}
 	view := r.model.View(coin, r.marketOf(info, closes), f(price), k3.UnixSeconds(at), nil)
 	r.coinMu.Lock()
-	r.views[coin] = seenView{ticker: info.Ticker, at: at, view: view}
+	// Keyed by coin AND ticker: the ladder recorder computes the views of every leg of a series
+	// before it steps any of them, so a view per coin would leave only the last leg's for the
+	// others to find ("no model view", and nothing decided; found 2026-09-23). The rounds have
+	// one market per coin at a time, for which the two keys are the same thing.
+	r.views[viewKey(coin, info.Ticker)] = seenView{ticker: info.Ticker, at: at, view: view}
+	if len(r.views) > 4096 { // legs come and go by the hundred; forget views that cannot be asked for again
+		for k, s := range r.views {
+			if at.Sub(s.at) > time.Hour {
+				delete(r.views, k)
+			}
+		}
+	}
 	r.coinMu.Unlock()
 	return view.Journal()
 }
+
+func viewKey(coin, ticker string) string { return coin + "|" + ticker }
 
 // SetLongSigma gives a coin's model its long volatility (engine.LongSigmaFromDaily), the one a
 // market more than an hour from its close is priced with. The model's mutex only.
@@ -990,7 +1003,7 @@ func (r *Runner3) Observe(t coinbase.Trade) {
 func (r *Runner3) viewFor(coin, ticker string, at time.Time) k3.View {
 	r.coinMu.Lock()
 	defer r.coinMu.Unlock()
-	if s, ok := r.views[coin]; ok && s.ticker == ticker && s.at.Equal(at) {
+	if s, ok := r.views[viewKey(coin, ticker)]; ok && s.at.Equal(at) {
 		return s.view
 	}
 	return k3.View{Coin: coin} // not OK: nothing is decided on a view that was not journaled
@@ -1050,7 +1063,8 @@ func (r *Runner3) Step(ctx context.Context, coin string, evalID int64, at time.T
 		// Thinned exactly as runner2.go does it: a decision is journaled when it sent an order, when
 		// its answer changed, and every fifteen seconds regardless. The evaluation row, with v3's
 		// model inputs in it, is stored every second, so any second can be recomputed.
-		key, sig := strconv.FormatInt(d.BucketID, 10)+"|"+coin, d.Side+"|"+d.BlockedBy+"|"+d.Why
+		// The thinning is per bucket per MARKET (the ladders have many per coin; the rounds one).
+		key, sig := strconv.FormatInt(d.BucketID, 10)+"|"+viewKey(coin, m.Ticker), d.Side+"|"+d.BlockedBy+"|"+d.Why
 		index[i] = -1
 		if d.Intent < 0 && r.last[key] == sig && now-r.lastAt[key] < thinSeconds3 {
 			continue

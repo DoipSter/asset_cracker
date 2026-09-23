@@ -179,6 +179,35 @@ func TestBucketOrdersSwitch(t *testing.T) {
 	}
 }
 
+// The ladder recorder computes every leg's view before stepping any of them. Each leg must then
+// find its own view, not the last leg's: two markets of one coin, Inputs for both, then Step for
+// both, and both decide (the first bought, the second was looked at with a real view).
+func TestViewsAreKeptPerMarket(t *testing.T) {
+	g := newRig(t)
+	r := g.start(true)
+	infoA, closesA, coin := g.info(mktA)
+	infoB, closesB, _ := g.info(mktB)
+	infoB.Ticker = "KXBTC15M-B" // a second leg of the same coin
+	g.s.markets[mktB].coin, g.s.markets[mktB].ticker = coin, infoB.Ticker
+	at := g.now()
+	if r.Inputs(coin, infoA, closesA, at, above) == nil || r.Inputs(coin, infoB, closesB, at, above) == nil {
+		t.Fatal("both views must be computed")
+	}
+	if !r.viewFor(coin, infoA.Ticker, at).OK || !r.viewFor(coin, infoB.Ticker, at).OK {
+		t.Fatal("each leg must find its own view after the other's was computed")
+	}
+	if r.viewFor(coin, "KXBTC15M-Z", at).OK || r.viewFor(coin, infoA.Ticker, at.Add(time.Second)).OK {
+		t.Fatal("a view is only for its own ticker and second")
+	}
+	g.evalID++
+	r.Step(context.Background(), coin, g.evalID, at, mktA, infoA, closesA, up("100"), above)
+	g.evalID++
+	r.Step(context.Background(), coin, g.evalID, at, mktB, infoB, closesB, up("100"), above)
+	if n := g.contracts(r); n < 100 {
+		t.Fatalf("the first leg should have filled 100 contracts on its own view; got %d", n)
+	}
+}
+
 // Reap by the operator's hand: refused while a bet is open; once it settles the bucket is reaped
 // into the pool and frozen; with restake a fresh life takes its place and trades if its version
 // is approved. A version without a bucket is refused by name.
