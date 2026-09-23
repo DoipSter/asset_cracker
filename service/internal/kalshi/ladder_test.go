@@ -237,6 +237,30 @@ func (f *ladderFake) SaveRows(_ context.Context, rows []LadderRow) ([]int64, err
 	return ids, nil
 }
 
+type watchFake struct{ calls []string }
+
+func (w *watchFake) Watch(_ context.Context, series, coin string, at, closes time.Time, legs []LadderLeg) {
+	w.calls = append(w.calls, fmt.Sprintf("%s|%s|%s|%d", series, coin, closes.UTC().Format("15:04"), len(legs)))
+}
+
+// The watcher gets each close's two-sided legs together, three or more, closes in order.
+func TestWatchGroupsLegsByClose(t *testing.T) {
+	c1, c2 := ladderAt.Add(time.Hour), ladderAt.Add(25*time.Hour)
+	pt := func(ticker string, closes time.Time, strike float64, bid, ask int64, two bool) ladderPoint {
+		return ladderPoint{mk: LadderNew{Ticker: ticker, Closes: closes, Strike: &strike}, yesBid: bid, yesAsk: ask, twoSided: two}
+	}
+	points := []ladderPoint{
+		pt("B1", c2, 100, 4000, 4500, true), pt("B2", c2, 101, 3000, 3500, true), pt("B3", c2, 102, 2000, 2500, true), pt("B4", c2, 103, 0, 100, false),
+		pt("A1", c1, 100, 6000, 6500, true), pt("A2", c1, 101, 5000, 5500, true), // two legs: not a distribution
+	}
+	w := &watchFake{}
+	r := &LadderRecorder{Series: "KXBTCD", Coin: "BTC", Watch: w}
+	r.watch(context.Background(), points, ladderAt)
+	if len(w.calls) != 1 || w.calls[0] != "KXBTCD|BTC|"+c2.UTC().Format("15:04")+"|3" {
+		t.Fatalf("watch calls %v", w.calls)
+	}
+}
+
 // engineFake records what the recorder hands an engine: one Inputs and one Step per two-sided
 // leg with the row's id, and a Settled per stored result.
 type engineFake struct {

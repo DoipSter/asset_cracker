@@ -40,6 +40,23 @@ leg closing at the same instant is one window. Presets: Day Value, Day Favourite
 Designed from the model side on purpose: `docs/longshot-protocol.md` reserves the price-band
 question on these horizons for its one look each.
 
+**The volatility forecast and the ladder watcher** (2026-09-23, `internal/app/volmodel.go`,
+`internal/engine/vol.go`, `internal/engine/ladder_fit.go`). The long volatility above is set at
+start from the daily closes and then replaced, at start and every six hours, by a HAR-RV forecast
+(Corsi: tomorrow's realised variance on today's, the week's mean and the month's mean), fitted by
+least squares on the daily realised variances built from three years of recorded hourly candles.
+Each fit is scored on its last ninety days out of sample against the sixty-day mean it replaces,
+and the log carries the coefficients, the in-sample R², the holdout errors and the forecast; the
+rounds keep their fast estimate untouched while the measurement protocol runs. The same object
+watches every ladder close with three or more two-sided legs each minute: the lognormal the
+market's mids imply (its sigma against the forecast, its median, the fit's error) and any pair of
+legs whose prices cross the order of their strikes, net of Kalshi's fee. It writes one
+`analysis_result` row per series and close every ten minutes under `ladder.implied`, warns once
+per half hour when a crossing beats the fee, and places no order: the engine trades one leg at a
+time, and a pair is a later design. All of it is read from prices and quotes, never from an
+outcome. `docs/calibration-protocol.md` is the DRAFT of the third model, a fitted belief; it
+waits on the owner's yes because it reads outcomes.
+
 **The bucket's lifecycle by hand.** The × on a bucket's row closes it out once nothing is open:
 what it holds goes to the common pool and the bucket is frozen with its record (`Runner3.Reap`
 for the live engine, refused while a bet is on; the ledger alone for an old engine's). The next

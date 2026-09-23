@@ -136,6 +136,20 @@ type LadderEngine interface {
 	Settled(ctx context.Context, coin string, marketID int64, info MarketInfo, closes time.Time)
 }
 
+// LadderLeg is one leg's top of book in dollars, for a watcher.
+type LadderLeg struct {
+	Ticker   string
+	Strike   float64
+	Bid, Ask float64 // yes bid, yes ask
+}
+
+// LadderWatcher reads one close's legs together, each pass: the distribution the ladder implies
+// and any crossed pair. It is handed only closes with at least three two-sided legs. nil means
+// no watcher.
+type LadderWatcher interface {
+	Watch(ctx context.Context, series, coin string, at, closes time.Time, legs []LadderLeg)
+}
+
 // LadderSink is where the recorder writes. It reaches the database and nothing else.
 type LadderSink interface {
 	// SaveMarkets records markets first seen and returns their ids by ticker.
@@ -423,6 +437,8 @@ type LadderRecorder struct {
 	// trades its legs. Both empty or nil: record only.
 	Coin   string
 	Engine LadderEngine
+	// Watch reads each close's legs together (the implied distribution, crossed pairs). nil: none.
+	Watch LadderWatcher
 
 	open      map[string]ladderKnown // markets seen open, by ticker
 	waiting   map[string]*awaiting   // closed, result not stored yet
@@ -576,12 +592,38 @@ func (r *LadderRecorder) pass(ctx context.Context) error {
 			r.Engine.Step(ctx, r.Coin, ids[i], at, rows[i].MarketID, p.mk.info(), p.mk.Closes, p.quotes.Quotes(), price)
 		}
 	}
+	if r.Watch != nil {
+		r.watch(ctx, points, at)
+	}
 	if !r.reported {
 		r.reported = true
-		slog.Info("ladder recorder: recording", "series", r.Series, "open_markets", len(points), "rows", len(rows), "trading", trading)
+		slog.Info("ladder recorder: recording", "series", r.Series, "open_markets", len(points), "rows", len(rows), "trading", trading, "watched", r.Watch != nil)
 	}
 	r.settle(ctx, at)
 	return nil
+}
+
+// watch groups the two-sided legs by their close and hands each group of three or more to the
+// watcher, in the order of the closes.
+func (r *LadderRecorder) watch(ctx context.Context, points []ladderPoint, at time.Time) {
+	groups := map[time.Time][]LadderLeg{}
+	for _, p := range points {
+		if !p.twoSided || p.mk.Strike == nil {
+			continue
+		}
+		groups[p.mk.Closes] = append(groups[p.mk.Closes], LadderLeg{Ticker: p.mk.Ticker, Strike: *p.mk.Strike,
+			Bid: float64(p.yesBid) / priceScale, Ask: float64(p.yesAsk) / priceScale})
+	}
+	closes := make([]time.Time, 0, len(groups))
+	for c, legs := range groups {
+		if len(legs) >= 3 {
+			closes = append(closes, c)
+		}
+	}
+	sort.Slice(closes, func(i, j int) bool { return closes[i].Before(closes[j]) })
+	for _, c := range closes {
+		r.Watch.Watch(ctx, r.Series, r.Coin, at, c, groups[c])
+	}
 }
 
 // info is the leg as the engine's market: ticker, strike, close.

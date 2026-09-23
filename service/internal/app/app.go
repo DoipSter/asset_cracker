@@ -139,6 +139,11 @@ func Run(version string) error {
 	runners := []*runner.Runner3{run3, runL}
 	wg.Add(1)
 	go func() { defer wg.Done(); runL.Run(ctx) }()
+	// The volatility forecast (HAR-RV on the hourly candles) replaces the daily-closes sigma
+	// above as soon as it is fitted, and every six hours after; it also watches the ladders.
+	vol := newVolModel(db, coins, runL, version)
+	wg.Add(1)
+	go func() { defer wg.Done(); vol.run(ctx) }()
 
 	// The tracked assets: what the home page lists and the trade stream follows, from the
 	// instrument table, seeded and switched-on alike. Prints are RECORDED (price_tick) only
@@ -202,7 +207,8 @@ func Run(version string) error {
 			Price:  freshPrice(latest, strings.TrimPrefix(priceFrom, "coinbase:")),
 			Start:  5*time.Second + time.Duration(i)*12*time.Second,
 			Coin:   in.Underlying,
-			Engine: eng}
+			Engine: eng,
+			Watch:  vol}
 		wg.Add(1)
 		go func() { defer wg.Done(); rec.Run(ctx) }()
 	}

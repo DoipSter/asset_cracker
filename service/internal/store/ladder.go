@@ -79,6 +79,51 @@ func (s *Store) InsertEvaluations(ctx context.Context, rows []EvaluationRow) ([]
 	return ids, nil
 }
 
+// HourlyCloses is a spot instrument's hourly candle closes since a time, oldest first, with
+// each candle's start time: what the volatility forecast is fitted on.
+func (s *Store) HourlyCloses(ctx context.Context, symbol string, since time.Time) ([]HourlyClose, error) {
+	rows, err := s.pool.Query(ctx, `
+		select c.at, c.close::float8
+		  from candle c join instrument i on i.id = c.instrument_id
+		 where i.symbol = $1 and c.granularity_s = 3600 and c.at >= $2
+		 order by c.at`, symbol, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []HourlyClose
+	for rows.Next() {
+		var h HourlyClose
+		if err := rows.Scan(&h.At, &h.Close); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// HourlyClose is one hourly candle's close at its start time.
+type HourlyClose struct {
+	At    time.Time
+	Close float64
+}
+
+// InsertAnalysisResult appends one row to the analysis_result table (migration 0016): an
+// analysis computed by the service, in its own shape, never edited; a rerun is a new row.
+func (s *Store) InsertAnalysisResult(ctx context.Context, key, source, codeSHA string, params any, windowFrom, windowTo time.Time, result any) error {
+	p, err := json.Marshal(params)
+	if err != nil {
+		return err
+	}
+	r, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `insert into analysis_result (key, source, code_sha, params, window_from, window_to, result)
+	                            values ($1, $2, nullif($3, ''), $4, $5, $6, $7)`, key, source, codeSHA, p, windowFrom, windowTo, r)
+	return err
+}
+
 // DailyCloses is the last n daily candle closes of a spot instrument (by symbol, e.g. BTC-USD),
 // oldest first: what the model's long volatility is read from at start.
 func (s *Store) DailyCloses(ctx context.Context, symbol string, n int) ([]float64, error) {
