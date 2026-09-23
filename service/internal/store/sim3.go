@@ -562,6 +562,30 @@ func LotKey(bucketID int64, side string) [2]string {
 // same question as OrdersRecorded, for a payout. Here the answer MAY be acted on, because a
 // settlement is idempotent by unique (market_id, bucket_id, side): a late commit makes the retry
 // find the rows (plan 5.3). Keys are LotKey.
+// SettledStreak is the bucket's run of most recent settlements that paid nothing, newest first,
+// stopping at the first that paid: the martingale's loss streak (engine.Account.LossStreak). A
+// settled binary side pays a dollar a contract or nothing, so "paid nothing" is "paid less than it
+// cost", which is the engine's own rule.
+func (s *Store) SettledStreak(ctx context.Context, bucketID int64) (int, error) {
+	rows, err := s.pool.Query(ctx, `select payout_cents from settlement where bucket_id = $1 order by at desc, id desc limit 64`, bucketID)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var payout int64
+		if err := rows.Scan(&payout); err != nil {
+			return 0, err
+		}
+		if payout > 0 {
+			break
+		}
+		n++
+	}
+	return n, rows.Err()
+}
+
 func (s *Store) SettlementsRecorded(ctx context.Context, marketID int64, bucketIDs []int64) (map[[2]string]bool, error) {
 	out := map[[2]string]bool{}
 	if len(bucketIDs) == 0 {

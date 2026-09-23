@@ -1529,7 +1529,16 @@ func (r *Runner3) read(ctx context.Context, pending []string, ids []int64, bucke
 	}
 	accounts := make([]*k3.Account, 0, len(buckets))
 	for _, b := range buckets {
-		accounts = append(accounts, k3.NewAccount(b.params, b.ID, cash[b.ID], b.mayOrder))
+		a := k3.NewAccount(b.params, b.ID, cash[b.ID], b.mayOrder)
+		if b.params.Sizing == k3.SizingMartingale && b.mayOrder {
+			// The martingale's state is the ledger's, like everything else in this rebuild.
+			streak, err := r.db.SettledStreak(ctx, b.ID)
+			if err != nil {
+				return nil, fmt.Errorf("reading bucket %d's settled streak: %w", b.ID, err)
+			}
+			a.LossStreak = streak
+		}
+		accounts = append(accounts, a)
 	}
 	if out.engine, err = r.newEngine(accounts); err != nil {
 		return nil, err

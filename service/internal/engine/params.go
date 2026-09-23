@@ -77,6 +77,29 @@ type Params struct {
 	Exit        string  `json:"exit"`         // "hold": never sells early. "ev": the value and capture rules
 	TakeCapture float64 `json:"take_capture"` // sell once the bid covers this share of the way to a dollar [INHERITED]
 
+	// The builder's shapes (2026-09-22). Each is a FILTER or a SIZING on top of the one entry rule;
+	// none of them lets an order through that the belief does not favour after costs.
+	//
+	// Side restricts which side may be bought: "" or "model", whichever the blend favours;
+	// "favourite", only the side the market prices above one half (the favourite-longshot bias:
+	// backing favourites, which is the same act as fading longshots); "longshot", only the side
+	// under one half (the tail shape).
+	Side string `json:"side,omitempty"`
+	// MinVolRatio, when above 0, blocks entries while the model's volatility is under this many
+	// times the coin's calibrated default: the tail shape buys cheap sides only when the market
+	// is moving enough to reach them. [CONVENTION when set]
+	MinVolRatio float64 `json:"min_vol_ratio,omitempty"`
+	// Sizing is "" or "kelly" (the fraction kappa of the edge, plan 4.5) or "martingale": a fixed
+	// stake of BaseStakeCents times Multiplier for each consecutive settled loss the bucket has
+	// just had, up to MaxDoublings, and back to the base after a win. The window cap and the
+	// entry rule still apply, so this is a BOUNDED martingale that only bets where the belief has
+	// an edge: it changes how much, never whether. Built as a negative control, to show the
+	// drawdown and one-window checks catch what it does to a record. [CONVENTION when set]
+	Sizing         string  `json:"sizing,omitempty"`
+	BaseStakeCents int64   `json:"base_stake_cents,omitempty"`
+	Multiplier     float64 `json:"multiplier,omitempty"`
+	MaxDoublings   int     `json:"max_doublings,omitempty"`
+
 	Levels     int  `json:"levels"`       // recorded levels an order may walk [FACT: five are recorded]
 	FeePerFill bool `json:"fee_per_fill"` // the pessimistic fee rounding; copied into the Paper by whoever builds it
 
@@ -97,6 +120,20 @@ var measuredFields = []string{"lambda", "stale_cost", "stale_cost_sell", "drift_
 
 // fields a version that never sells early leaves at zero, with no provenance.
 var exitOnlyFields = map[string]bool{"stale_cost_sell": true, "min_hold": true, "take_capture": true}
+
+// The builder's shape fields: zero, with no provenance, means "not used", so a version stored
+// before they existed still validates. Set, each needs provenance like every other number.
+var shapeFields = map[string]bool{"min_vol_ratio": true, "base_stake_cents": true, "multiplier": true, "max_doublings": true}
+
+// The values Side and Sizing may take.
+const (
+	SideModel     = "model"
+	SideFavourite = "favourite"
+	SideLongshot  = "longshot"
+
+	SizingKelly      = "kelly"
+	SizingMartingale = "martingale"
+)
 
 func inherited(v float64, note string) Provenance {
 	return Provenance{Kind: KindInherited, Value: v, Note: note}
@@ -263,6 +300,9 @@ func (p Params) validate(plumbing bool) error {
 			}
 			continue
 		}
+		if shapeFields[key] && val == 0 && !has {
+			continue // the shape is not used
+		}
 		switch {
 		case !has:
 			fail("%s has no provenance", key)
@@ -336,6 +376,33 @@ func (p Params) validate(plumbing bool) error {
 	}
 	if !(p.DriftTol >= 0 && p.DriftTol <= 1) {
 		fail("drift_tol %v is outside 0..1", p.DriftTol)
+	}
+	// The shapes.
+	switch p.Side {
+	case "", SideModel, SideFavourite, SideLongshot:
+	default:
+		fail("side %q is not model, favourite or longshot", p.Side)
+	}
+	if !(p.MinVolRatio >= 0 && p.MinVolRatio <= 100) {
+		fail("min_vol_ratio %v is outside 0..100", p.MinVolRatio)
+	}
+	switch p.Sizing {
+	case "", SizingKelly:
+		if p.BaseStakeCents != 0 || p.Multiplier != 0 || p.MaxDoublings != 0 {
+			fail("base_stake_cents, multiplier and max_doublings are for martingale sizing only")
+		}
+	case SizingMartingale:
+		if p.BaseStakeCents < 100 || p.BaseStakeCents > p.SeedCents {
+			fail("base_stake_cents %d must be at least 100 and at most the seed", p.BaseStakeCents)
+		}
+		if !(p.Multiplier >= 1 && p.Multiplier <= 4) {
+			fail("multiplier %v is outside 1..4", p.Multiplier)
+		}
+		if p.MaxDoublings < 0 || p.MaxDoublings > 10 {
+			fail("max_doublings %d is outside 0..10", p.MaxDoublings)
+		}
+	default:
+		fail("sizing %q is neither kelly nor martingale", p.Sizing)
 	}
 	if !(p.Kappa > 0 && p.Kappa <= 1) {
 		fail("kappa %v is outside 0..1", p.Kappa)

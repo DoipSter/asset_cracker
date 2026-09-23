@@ -207,6 +207,13 @@ summary h2{flex:1}summary .f{font-size:13px;font-weight:600}
 .ctl label{display:block;margin:8px 0 3px;font:600 10px/1.2 var(--sans);letter-spacing:.12em;text-transform:uppercase;color:var(--mute)}
 .ctl input{font:13px/1.2 var(--mono);color:var(--ink);background:var(--paper);border:1px solid var(--ink);padding:7px 8px;width:100%;max-width:320px}
 .ctl .rates{display:grid;grid-template-columns:1fr 1fr;gap:0 10px;max-width:420px}
+.ctl select,.ctl textarea{font:13px/1.3 var(--mono);color:var(--ink);background:var(--paper);border:1px solid var(--ink);padding:7px 8px;width:100%;max-width:320px}
+.ctl textarea{max-width:560px;resize:vertical}
+.nb{margin-top:10px;border-top:1px solid var(--rule)}
+.nb summary{min-height:40px}.nb summary h3{margin:0;font-size:16px}
+.nb .rates{max-width:640px;grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
+.nb .nb-what{margin:4px 0 0;color:var(--ink)}
+.nb label input[type=checkbox]{width:auto;margin-right:6px;vertical-align:-2px}
 .ctl .rates input{max-width:none}
 .ctl .go{display:inline-block;margin:8px 8px 0 0;min-height:36px;padding:0 12px;border:1px solid var(--ink);font:600 11px/36px var(--sans);letter-spacing:.08em;text-transform:uppercase}
 .ctl .go[aria-pressed=true]{background:var(--ink);color:var(--paper)}
@@ -422,6 +429,7 @@ function loadSparks(){if(!S.home)return;due.sparks=Date.now()+300000;var r={"1H"
     if(c===S.coin&&S.cr===r&&S.asset&&cleanPts(S.asset.points).length>1){S.sparks[c]=S.asset.points;renderRail();return next()}
     get("api/asset?coin="+encodeURIComponent(c)+"&range="+r).then(function(j){if(S.sparkKey===r){S.sparks[c]=arr(j&&j.points);renderRail()}},function(){}).then(next)})()}
 function loadBuckets(){if(busy.buckets)return;busy.buckets=1;due.buckets=Date.now()+15000;
+  if(!S.presets)get("api/controls/presets").then(function(j){S.presets=arr(j);renderBuckets()},function(){S.presets=[]}); /* the builder's shapes: fetched once */
   Promise.all([get("api/buckets"),get("api/controls").catch(function(){return null})]).then(function(a){
     busy.buckets=0;S.buckets=a[0]&&typeof a[0]==="object"?a[0]:{};if(a[1])S.controls=a[1];S.fail.buckets=0;renderBuckets()})
   .catch(function(){busy.buckets=0;S.fail.buckets=1;due.buckets=Date.now()+2000;renderBuckets()})}
@@ -695,8 +703,42 @@ function ordersLine(o){o=o||{};if(!S.controls)return"Reading the controls…";if
 function rateField(id,label,value){return'<div><label for="'+id+'">'+label+'</label><input id="'+id+'" data-k="'+id+'" type="number" inputmode="decimal" min="0" max="100" step="0.01" value="'+esc(draft(id,value))+'"></div>'}
 function controlsHTML(){var c=S.controls||{},o=c.orders||{},p=c.policy||{},vs=objs(c.versions),pressed=S.controls?!!o.on:false;
   var vers=vs.length?vs.map(function(v){return'<div class="ver"><b>'+esc(v.name)+'</b> <span class="tag">'+esc(v.status)+'</span><div><button type="button" class="go" data-act="approve" data-id="'+v.id+'">Approve</button><button type="button" class="go" data-act="retire" data-id="'+v.id+'">Retire</button></div></div>'}).join(""):'<p class="what">No version-3 strategy is registered. Scalper and Value trade after their four measured numbers are on the version and you approve it. Approval seeds a fresh $1,000 bucket at once.</p>';
-  return'<div class="ctl sec" id="j-controls"><span class="k">Operator · simulated money</span><h2>Controls</h2><p class="msg" id="ctl-msg">'+esc(S.msg||"")+'</p><div class="grid"><div><span class="k">Live engine</span><h3>New orders</h3><p class="what" id="ctl-orders">'+esc(ordersLine(o))+'</p><button type="button" class="go" data-act="orders-on" aria-pressed="'+(pressed?"true":"false")+'">On</button><button type="button" class="go" data-act="orders-off" aria-pressed="'+(!S.controls||pressed?"false":"true")+'">Off</button><h3>Version 3</h3>'+vers+'</div><div><span class="k">Sustainment allocation</span><h3>Rates</h3><p class="what">Percent of a gain above high water. What remains stays in the bucket. Taken at settlement, once every closed round is settled for the bucket. A rate saved here is in force from the next settlement.</p><div class="rates">'+rateField("ctl-w","Winnings",pctIn(p.winnings_bps))+rateField("ctl-repl","Replenishment",pctIn(p.replenish_bps))+rateField("ctl-tax","Tax reserve",pctIn(p.tax_bps))+rateField("ctl-fee","Fee reserve",pctIn(p.fees_bps))+'</div><label for="ctl-note">Note</label><input id="ctl-note" data-k="ctl-note" type="text" maxlength="500" value="'+esc(draft("ctl-note",p.note||""))+'"><div><button type="button" class="go" data-act="policy">Save rates</button></div><h3>Reset</h3><p class="what">Empties the simulated ledger, every bucket, the sim orders, and the value chart, then starts again: every approved version-3 strategy gets a fresh $1,000 bucket. Candles, quotes, market results, and the strategy registry remain. This places no order.</p><label for="ctl-confirm">Type reset sim</label><input id="ctl-confirm" data-k="ctl-confirm" type="text" autocomplete="off" value="'+esc(draft("ctl-confirm",""))+'"><div><button type="button" class="go bad" data-act="reset">Reset sim books</button></div></div></div></div>'}
-function mountBuckets(el,rest){var typing=document.activeElement&&document.activeElement.closest&&document.activeElement.closest("#j-controls")&&document.activeElement.tagName==="INPUT";
+  return'<div class="ctl sec" id="j-controls"><span class="k">Operator · simulated money</span><h2>Controls</h2><p class="msg" id="ctl-msg">'+esc(S.msg||"")+'</p><div class="grid"><div><span class="k">Live engine</span><h3>New orders</h3><p class="what" id="ctl-orders">'+esc(ordersLine(o))+'</p><button type="button" class="go" data-act="orders-on" aria-pressed="'+(pressed?"true":"false")+'">On</button><button type="button" class="go" data-act="orders-off" aria-pressed="'+(!S.controls||pressed?"false":"true")+'">Off</button><h3>Version 3</h3>'+vers+builderHTML()+'</div><div><span class="k">Sustainment allocation</span><h3>Rates</h3><p class="what">Percent of a gain above high water. What remains stays in the bucket. Taken at settlement, once every closed round is settled for the bucket. A rate saved here is in force from the next settlement.</p><div class="rates">'+rateField("ctl-w","Winnings",pctIn(p.winnings_bps))+rateField("ctl-repl","Replenishment",pctIn(p.replenish_bps))+rateField("ctl-tax","Tax reserve",pctIn(p.tax_bps))+rateField("ctl-fee","Fee reserve",pctIn(p.fees_bps))+'</div><label for="ctl-note">Note</label><input id="ctl-note" data-k="ctl-note" type="text" maxlength="500" value="'+esc(draft("ctl-note",p.note||""))+'"><div><button type="button" class="go" data-act="policy">Save rates</button></div><h3>Reset</h3><p class="what">Empties the simulated ledger, every bucket, the sim orders, and the value chart, then starts again: every approved version-3 strategy gets a fresh $1,000 bucket. Candles, quotes, market results, and the strategy registry remain. This places no order.</p><label for="ctl-confirm">Type reset sim</label><input id="ctl-confirm" data-k="ctl-confirm" type="text" autocomplete="off" value="'+esc(draft("ctl-confirm",""))+'"><div><button type="button" class="go bad" data-act="reset">Reset sim books</button></div></div></div></div>'}
+/* ---------- the strategy builder ---------- */
+/* Every field is one of the engine's parameters (engine.Shape). What you set is recorded as a convention you chose; what you leave blank is inherited from the parent shape. Nothing here is a measurement. */
+var NB=[["nb-name","Name","text",""],["nb-blurb","One line about it","text",""]];
+var NB_NUM=[["nb-lambda","Lambda: weight on the model (0 to 1)","0.5"],["nb-stale","Stale cost, buying ($)","0.0012"],["nb-stale-sell","Stale cost, selling ($, ev only)",""],
+  ["nb-tau-min","Earliest entry: seconds before close",""],["nb-tau-max","Latest entry: seconds before close",""],["nb-band-min","Lowest ask it buys",""],["nb-band-max","Highest ask it buys",""],
+  ["nb-max-bets","Filled buys per round",""],["nb-min-gap","Seconds between buys",""],["nb-min-hold","Seconds held before a sale (ev)",""],["nb-capture","Take capture: share of the way to $1 (ev)",""],
+  ["nb-kappa","Kelly fraction",""],["nb-cap","Window cap: % of min(equity, seed)",""],["nb-vol","Volatility trigger: times the coin's default",""],
+  ["nb-base","Martingale base stake ($)",""],["nb-mult","Martingale multiplier",""],["nb-doublings","Martingale max doublings",""]];
+function nbField(id,label,value,type){return'<div><label for="'+id+'">'+esc(label)+'</label><input id="'+id+'" data-k="'+id+'" type="'+(type||"text")+'"'+(type==="number"?' inputmode="decimal" step="any"':"")+' value="'+esc(draft(id,value))+'"></div>'}
+function nbSelect(id,label,opts,value){return'<div><label for="'+id+'">'+esc(label)+'</label><select id="'+id+'" data-k="'+id+'">'+opts.map(function(o){return'<option value="'+esc(o[0])+'"'+(draft(id,value)===o[0]?" selected":"")+'>'+esc(o[1])+"</option>"}).join("")+"</select></div>"}
+function builderHTML(){var ps=arr(S.presets),cur=draft("nb-preset","");
+  var presetOpts=[["","Start from…"]].concat(ps.map(function(p){return[p.key,p.title]}));
+  var chosen=null;ps.forEach(function(p){if(p.key===cur)chosen=p});
+  return'<details class="nb" id="nb"'+(S.nbOpen?" open":"")+'><summary><h3>New strategy</h3><span class="f">builder</span></summary>'+
+    '<p class="what">Pick a shape to fill the form, change what you like, name it, and say what it tests. It is registered as a draft; Approve above seeds $1,000 and it trades on the next look. Every number you set is recorded as a convention you chose; every one you leave blank is inherited from the parent shape. Nothing here is a measurement, and no shape can make the engine buy where its belief has no edge after costs.</p>'+
+    nbSelect("nb-preset","Shape",presetOpts,cur)+(chosen?'<p class="what nb-what">'+esc(chosen.what)+'</p>':"")+
+    '<div class="rates">'+nbSelect("nb-exit","Exit",[["hold","hold to settlement"],["ev","sell on value or capture (ev)"]],"hold")+nbSelect("nb-side","Side",[["model","whichever the belief favours"],["favourite","the favourite only (priced above ½)"],["longshot","the longshot only (under ½)"]],"model")+
+    NB.map(function(f){return nbField(f[0],f[1],f[3],f[2])}).join("")+NB_NUM.map(function(f){return nbField(f[0],f[1],f[2],"number")}).join("")+
+    nbSelect("nb-sizing","Sizing",[["kelly","Kelly fraction of the edge"],["martingale","martingale: fixed stake, multiplied after each settled loss (a negative control)"]],"kelly")+'</div>'+
+    '<label for="nb-hyp">Hypothesis: what this version is meant to test</label><textarea id="nb-hyp" data-k="nb-hyp" rows="3" maxlength="2000">'+esc(draft("nb-hyp",""))+'</textarea>'+
+    '<label><input type="checkbox" id="nb-control" data-k="nb-control"'+(draft("nb-control","")==="on"?" checked":"")+'> Register as a negative control, expected to be caught, not to win</label>'+
+    '<div><button type="button" class="go" data-act="build">Register as draft</button></div></details>'}
+function nbShape(){var g=function(id){var n=$(id);return n?String(n.value).trim():""},f=function(id){var v=g(id);if(v==="")return 0;var x=Number(v);return isFinite(x)?x:NaN};
+  var s={name:g("nb-name"),blurb:g("nb-blurb"),hypothesis:g("nb-hyp"),exit:g("nb-exit")||"hold",side:g("nb-side")||"model",
+    lambda:f("nb-lambda"),stale_cost:f("nb-stale"),stale_cost_sell:f("nb-stale-sell"),tau_min:f("nb-tau-min"),tau_max:f("nb-tau-max"),band_min:f("nb-band-min"),band_max:f("nb-band-max"),
+    max_bets:Math.round(f("nb-max-bets")),min_gap:f("nb-min-gap"),min_hold:f("nb-min-hold"),take_capture:f("nb-capture"),kappa:f("nb-kappa"),window_cap_bps:Math.round(f("nb-cap")*100),
+    min_vol_ratio:f("nb-vol"),sizing:g("nb-sizing")||"kelly",base_stake_cents:Math.round(f("nb-base")*100),multiplier:f("nb-mult"),max_doublings:Math.round(f("nb-doublings")),control:!!($("nb-control")&&$("nb-control").checked)};
+  for(var k in s)if(typeof s[k]==="number"&&isNaN(s[k]))return{error:"A number could not be read: "+k.replace(/_/g," ")+"."};
+  return s}
+function nbFill(p){var sh=(p&&p.shape)||{};var set=function(k,v){if(v==null||v===0||v==="")delete S.draft[k];else S.draft[k]=String(v)};
+  set("nb-name",sh.name);set("nb-blurb",sh.blurb);set("nb-hyp",sh.hypothesis||(p?p.what:""));S.draft["nb-exit"]=sh.exit||"hold";S.draft["nb-side"]=sh.side||"model";
+  set("nb-lambda",sh.lambda);set("nb-stale",sh.stale_cost);set("nb-stale-sell",sh.stale_cost_sell);set("nb-tau-min",sh.tau_min);set("nb-tau-max",sh.tau_max);set("nb-band-min",sh.band_min);set("nb-band-max",sh.band_max);
+  set("nb-max-bets",sh.max_bets);set("nb-min-gap",sh.min_gap);set("nb-min-hold",sh.min_hold);set("nb-capture",sh.take_capture);set("nb-kappa",sh.kappa);set("nb-cap",sh.window_cap_bps?sh.window_cap_bps/100:0);set("nb-vol",sh.min_vol_ratio);
+  S.draft["nb-sizing"]=sh.sizing||"kelly";set("nb-base",sh.base_stake_cents?sh.base_stake_cents/100:0);set("nb-mult",sh.multiplier);set("nb-doublings",sh.max_doublings);S.draft["nb-control"]=sh.control?"on":""}
+function mountBuckets(el,rest){var ae=document.activeElement,typing=ae&&ae.closest&&ae.closest("#j-controls")&&(ae.tagName==="INPUT"||ae.tagName==="SELECT"||ae.tagName==="TEXTAREA");
   if(!$("j-controls"))setHTML(el,controlsHTML()+'<div id="bk-rest"></div>');
   else if(!typing){var box=$("j-controls");if(box)box.outerHTML=controlsHTML()}
   else{var m=$("ctl-msg");if(m)m.textContent=S.msg||"";var ol=$("ctl-orders");if(ol)ol.textContent=ordersLine((S.controls||{}).orders)}
@@ -740,13 +782,20 @@ $("p-buckets").addEventListener("click",function(e){var b=e.target.closest("[dat
 function bpsOf(id){var n=$(id);if(!n)return null;var raw=String(n.value).trim();if(raw==="")return null;var v=Number(raw);if(!isFinite(v))return null;return Math.round(v*100)}
 function say(m){S.msg=m||"";renderBuckets()}
 function refreshBooks(){due.buckets=0;busy.buckets=0;loadBuckets()}
-$("p-buckets").addEventListener("input",function(e){var k=e.target.getAttribute&&e.target.getAttribute("data-k");if(!k)return;S.draft[k]=e.target.value});
+$("p-buckets").addEventListener("input",function(e){var k=e.target.getAttribute&&e.target.getAttribute("data-k");if(!k)return;S.draft[k]=e.target.type==="checkbox"?(e.target.checked?"on":""):e.target.value});
+$("p-buckets").addEventListener("change",function(e){var t=e.target;if(!t||!t.getAttribute)return;var k=t.getAttribute("data-k");if(!k)return;
+  if(k==="nb-preset"){var p=null;arr(S.presets).forEach(function(x){if(x.key===t.value)p=x});S.draft["nb-preset"]=t.value;if(p)nbFill(p);S.nbOpen=true;renderBuckets();return}
+  S.draft[k]=t.type==="checkbox"?(t.checked?"on":""):t.value});
+$("p-buckets").addEventListener("toggle",function(e){if(e.target&&e.target.id==="nb")S.nbOpen=e.target.open},true);
 $("p-buckets").addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("[data-act]");if(!b||S.ctlBusy)return;var act=b.getAttribute("data-act");
   var fail=function(err){S.ctlBusy=0;say(err&&err.message?err.message:"The control did not go through.")};
   var done=function(m){S.ctlBusy=0;say(m);refreshBooks()};
   S.ctlBusy=1;
   if(act==="orders-on"||act==="orders-off"){post("api/controls/orders",{on:act==="orders-on"}).then(function(j){done(j.effective==="now"?(j.on?"New orders are on for the next look.":"New orders are off. The next look sends nothing."):(j.on?"Orders are on. The next start of the service places them.":"Orders are off. The next start keeps them off."))}).catch(fail);return}
   if(act==="approve"||act==="retire"){post("api/controls/version",{id:Number(b.getAttribute("data-id")),status:act==="approve"?"probation":"retired"},40000).then(function(j){done(afterLoad(j,act==="approve"?"Approved.":"Retired.",act==="approve"))}).catch(fail);return}
+  if(act==="build"){var sh=nbShape();if(sh.error){S.ctlBusy=0;say(sh.error);return}S.nbOpen=true;
+    post("api/controls/version/new",sh,20000).then(function(j){Object.keys(S.draft).forEach(function(k){if(k.indexOf("nb-")===0)delete S.draft[k]});
+      done("Registered "+(j.name||"the version")+" as a draft"+(j.control?", a negative control":"")+". Approve it above to seed $1,000; it trades on the next look. One more trial in the registry.")}).catch(fail);return}
   if(act==="policy"){var rates=["ctl-w","ctl-repl","ctl-tax","ctl-fee"].map(bpsOf);if(rates.some(function(n){return n==null})){S.ctlBusy=0;say("Enter each rate as a percentage.");return}post("api/controls/policy",{winnings_bps:rates[0],replenish_bps:rates[1],tax_bps:rates[2],fees_bps:rates[3],note:($("ctl-note")||{}).value||""}).then(function(){["ctl-w","ctl-repl","ctl-tax","ctl-fee","ctl-note"].forEach(function(k){delete S.draft[k]});done("Rates saved.")}).catch(fail);return}
   if(act==="reset"){post("api/controls/reset",{confirm:($("ctl-confirm")||{}).value||""},300000).then(function(j){delete S.draft["ctl-confirm"];var box=$("ctl-confirm");if(box)box.value="";var c=j.cleared||{};done(afterLoad(j,"Cleared "+(num(c.buckets)||0)+" buckets, "+(num(c.orders)||0)+" orders, and "+(num(c.transfers)||0)+" transfers.",true))}).catch(fail)}});
 /* afterLoad says what the engine did with the change: seeded and trading, held settle-only, empty, or healing on its own. */

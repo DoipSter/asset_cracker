@@ -27,7 +27,10 @@ const (
 	BlockedExitNoBook           = "an exit is wanted but no book can price it"
 	BlockedExitTooLate          = "an exit is wanted but it is too late: held to settlement"
 	BlockedExitNoProceeds       = "an exit is wanted but the sale could book nothing after the rounded fee: held to settlement"
+	BlockedSide                 = "the side with the edge is not the side this version buys"
+	BlockedQuietMarket          = "volatility under its trigger"
 	bindingKelly                = "kelly"
+	bindingMartingale           = "martingale"
 	bindingWindow               = "window"
 	bindingCap                  = "cap"
 	bindingCash                 = "cash"
@@ -55,6 +58,10 @@ type SizeInput struct {
 	// below counts it: a re-entry starts where the position stands, not from nothing, or each new
 	// order would begin the per-price taper again and spend a best-ask stake at the worst prices.
 	HeldCents int64
+	// FixedStakeCents, when above 0, replaces the Kelly stake: martingale sizing (Params.Sizing).
+	// The window budget, the cap and the cash still bound it, and the edge test still decides
+	// whether anything is bought at all; only the amount changes.
+	FixedStakeCents int64
 }
 
 // Sizing is the answer: the order's size and ceilings, and the working, which is stored with the
@@ -135,6 +142,11 @@ func Size(in SizeInput) Sizing {
 	s.BudgetCents = floorCents(in.Kappa, s.KWindow, in.EquityCents)
 	s.CapCents = in.CapBps * min(in.EquityCents, in.SeedCents) / 10000
 	s.RoomCents, s.Binding = s.BudgetCents-in.UsedCents, bindingWindow
+	if in.FixedStakeCents > 0 {
+		// A fixed stake is not a Kelly stake, so the Kelly budget does not bound it: that is what
+		// lets a martingale be one. The owner's cap and the cash still do.
+		s.RoomCents, s.Binding = s.CapCents-in.UsedCents, bindingCap
+	}
 	if r := s.CapCents - in.UsedCents; r < s.RoomCents {
 		s.RoomCents, s.Binding = r, bindingCap
 	}
@@ -147,13 +159,17 @@ func Size(in SizeInput) Sizing {
 		return s
 	}
 	held := max(0, in.HeldCents)
-	s.StakeCents = max(0, floorCents(in.Kappa, s.Kelly, in.EquityCents)-held)
+	wanted, binding := floorCents(in.Kappa, s.Kelly, in.EquityCents), bindingKelly
+	if in.FixedStakeCents > 0 {
+		wanted, binding = in.FixedStakeCents, bindingMartingale
+	}
+	s.StakeCents = max(0, wanted-held)
 	if s.StakeCents == 0 && held > 0 {
 		s.BlockedBy = BlockedHeldKelly
 		return s
 	}
 	if s.StakeCents <= s.RoomCents {
-		s.Binding = bindingKelly
+		s.Binding = binding
 	} else {
 		s.StakeCents = s.RoomCents
 	}
@@ -184,6 +200,9 @@ func Size(in SizeInput) Sizing {
 			break
 		}
 		at := max(0, floorCents(in.Kappa, kelly(in.PSide, t, in.StaleUnits), in.EquityCents)-held)
+		if in.FixedStakeCents > 0 { // a fixed stake does not taper with the price; the limit still ends it
+			at = max(0, in.FixedStakeCents-held)
+		}
 		s.Steps = append(s.Steps, broker.CostStep{UpTo: t, MaxCostCents: min(at, s.RoomCents)})
 	}
 	return s

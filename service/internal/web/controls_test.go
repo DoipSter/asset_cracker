@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,7 @@ type fakeControls struct {
 	statusSaved string
 	policySaved bool
 	steps       []string
+	created     []store.NewVersion3
 }
 
 func (f *fakeControls) OrdersSetting(context.Context) (bool, bool, error) {
@@ -44,6 +46,13 @@ func (f *fakeControls) SetVersionStatus(_ context.Context, id int64, status, _ s
 	}
 	f.statusSaved = status
 	return nil
+}
+func (f *fakeControls) CreateVersion3(_ context.Context, v store.NewVersion3) (int64, error) {
+	if v.Name == "Taken (conventions)" {
+		return 0, store.ErrVersionExists
+	}
+	f.created = append(f.created, v)
+	return int64(100 + len(f.created)), nil
 }
 func (f *fakeControls) SetSimPolicy(context.Context, int, int, int, int, string) error {
 	f.policySaved = true
@@ -100,6 +109,63 @@ func TestResetHoldsThenReleasesThenReloads(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, `"buckets":24`) || !strings.Contains(body, `"reloaded":true`) || !strings.Contains(body, `"held":2`) {
 		t.Fatalf("body %s", body)
+	}
+}
+
+// The builder: the engine (a fake here) builds and labels; the store registers as draft; a shape
+// the engine refuses, a missing hypothesis, and a taken name are refused with their reasons.
+func TestBuilderRegistersADraft(t *testing.T) {
+	f := &fakeControls{}
+	built := 0
+	mux := controlsMux(f, Control{
+		Version: "test",
+		Presets: func() []byte { return []byte(`[{"key":"value","title":"Value"}]`) },
+		Build: func(shape []byte) (Built, error) {
+			built++
+			var s struct {
+				Name   string  `json:"name"`
+				Lambda float64 `json:"lambda"`
+			}
+			_ = json.Unmarshal(shape, &s)
+			if s.Lambda <= 0 {
+				return Built{}, BuildRefused{"lambda must be above 0"}
+			}
+			return Built{Name: s.Name + " (conventions)", Blurb: "b", Params: []byte(`{"name":"x"}`), Parent: "Value"}, nil
+		},
+	})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/controls/presets", nil))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"key":"value"`) {
+		t.Fatalf("presets %d %s", rec.Code, rec.Body.String())
+	}
+	rec = postJSON(mux, "/api/controls/version/new", `{"name":"Late","exit":"hold","lambda":0.5,"hypothesis":"the market lags spot late"}`)
+	if rec.Code != 200 || len(f.created) != 1 || f.created[0].Name != "Late (conventions)" || f.created[0].Hypothesis != "the market lags spot late" || f.created[0].Parent != "Value" {
+		t.Fatalf("register %d %s created %+v", rec.Code, rec.Body.String(), f.created)
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"draft"`) || !strings.Contains(f.created[0].CodeRef, "test") {
+		t.Fatalf("body %s coderef %s", rec.Body.String(), f.created[0].CodeRef)
+	}
+	rec = postJSON(mux, "/api/controls/version/new", `{"name":"Zero","exit":"hold","lambda":0,"hypothesis":"x"}`)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "lambda must be above 0") || len(f.created) != 1 {
+		t.Fatalf("refused shape %d %s", rec.Code, rec.Body.String())
+	}
+	rec = postJSON(mux, "/api/controls/version/new", `{"name":"Quiet","exit":"hold","lambda":0.5}`)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "hypothesis") || len(f.created) != 1 {
+		t.Fatalf("no hypothesis %d %s", rec.Code, rec.Body.String())
+	}
+	rec = postJSON(mux, "/api/controls/version/new", `{"name":"Taken","exit":"hold","lambda":0.5,"hypothesis":"x"}`)
+	if rec.Code != 409 || len(f.created) != 1 {
+		t.Fatalf("taken name %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := postJSON(mux, "/api/controls/version/new", `not json`); rec.Code != 400 {
+		t.Fatalf("bad json %d", rec.Code)
+	}
+	if built != 3 {
+		t.Fatalf("the engine was asked %d times", built)
+	}
+	none := controlsMux(&fakeControls{}, Control{})
+	if rec := postJSON(none, "/api/controls/version/new", `{"name":"x","lambda":0.5,"hypothesis":"x"}`); rec.Code != 503 {
+		t.Fatalf("no builder in the process: %d", rec.Code)
 	}
 }
 

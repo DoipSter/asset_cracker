@@ -205,6 +205,9 @@ type View struct {
 	OffsetSamples int
 	OffsetSource  string  // "measured" once three recent settlements are in, else "constant"
 	PModel        float64 // the RAW model probability of Yes; what decision.model_prob stores
+	// VolRatio is the model's volatility over the coin's calibrated default, sqrt(Sigma2) /
+	// DefaultSigma: 1 is ordinary, 2 is twice as fast a market. Params.MinVolRatio reads it.
+	VolRatio float64
 
 	// Drift is the gate of plan 4.3: true when a live reference is supplied and the fork cannot
 	// be shown, this second, to be that model. While it is true no ENTRY is sent; exits go on.
@@ -222,7 +225,7 @@ func (v View) Journal() map[string]any {
 		return map[string]any{"v": 3, "ok": false}
 	}
 	out := map[string]any{"v": 3, "ok": true, "sigma2": v.Sigma2, "index_offset": v.Offset, "offset_samples": v.OffsetSamples,
-		"offset_source": v.OffsetSource, "p_model": v.PModel, "drift": v.Drift}
+		"offset_source": v.OffsetSource, "p_model": v.PModel, "drift": v.Drift, "vol_ratio": v.VolRatio}
 	if v.Drift {
 		out["drift_why"] = v.DriftWhy
 	}
@@ -344,6 +347,9 @@ func (m *Model) View(coin string, mk Market, price, now float64, ref *V2Inputs) 
 		v.OffsetSource = "constant"
 	}
 	v.PModel = ProbYes(price, mk.Strike, tau, c.Sigma2, known, offset, c.Cal.SDPct)
+	if c.Cal.DefaultSigma > 0 {
+		v.VolRatio = math.Sqrt(c.Sigma2) / c.Cal.DefaultSigma
+	}
 
 	switch {
 	case ref == nil:

@@ -12,8 +12,19 @@ without a process start (`Runner3.Reload`); set the four sustainment allocation 
 settlement from a bucket's gain above its high-water mark; and reset the simulated books, which
 empties them and starts again from the approved versions. A bucket that loses its last bet with
 less than the floor left is closed at that settlement: reaped into replenishment, frozen, not
-replaced. No version-3 strategy exists until `cmd/measure3` has measured its numbers
-(`docs/v3-measurement-protocol.md`), so the fund runs empty until then.
+replaced.
+
+**The strategy builder** (buckets page, "New strategy") makes a version-3 row from a shape:
+the exit rule (`hold` or `ev`), a side filter (whichever the belief favours, the favourite only,
+the longshot only), time gates, price band, bets per round, the Kelly fraction and window cap, a
+volatility trigger, and the sizing (Kelly, or a bounded martingale registered as a negative
+control). Eight presets fill the form: Value, Late, Favourite, Model, Scalper, Calm Scalper, Tail,
+Martingale control. Every number set is a `convention` the owner chose, every one left blank is
+`inherited` from the parent, the name carries "(conventions)", and `engine.Params.Validate` is
+the gate (`engine.FromShape`). No shape can make the engine buy where its belief has no edge after
+costs; the shapes decide when, which side, how much and how to leave. Registered as `draft`;
+Approve seeds it. Each is one more trial the leaderboard's threshold is corrected for. Versions
+whose four numbers were MEASURED come only from `cmd/measure3` (`docs/v3-measurement-protocol.md`).
 
 | Package | |
 |---|---|

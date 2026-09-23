@@ -28,6 +28,7 @@ type Store3 interface {
 	MarketResults(ctx context.Context, marketIDs []int64) (map[int64]string, error)
 	OrdersRecorded(ctx context.Context, clientIDs []string) (map[string]bool, error)
 	SettlementsRecorded(ctx context.Context, marketID int64, bucketIDs []int64) (map[[2]string]bool, error)
+	SettledStreak(ctx context.Context, bucketID int64) (int, error) // martingale sizing's state, from the ledger
 
 	RecordOrders(ctx context.Context, setup store.SimSetup, r store.StepRecord3) error
 	RecordSettlements(ctx context.Context, setup store.SimSetup, marketID int64, at time.Time, rows []store.SettlementRow) error

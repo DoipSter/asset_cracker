@@ -591,6 +591,26 @@ func (s *fakeStore) CloseBucket(ctx context.Context, setup store.SimSetup, b sto
 	return b, nil
 }
 
+func (s *fakeStore) SettledStreak(ctx context.Context, bucketID int64) (int, error) {
+	if b := s.hook(ctx, "SettledStreak"); b.err != nil {
+		return 0, b.err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for i := len(s.settlements) - 1; i >= 0; i-- { // appended in time order
+		x := s.settlements[i]
+		if x.row.BucketID != bucketID {
+			continue
+		}
+		if x.row.PayoutCents > 0 {
+			break
+		}
+		n++
+	}
+	return n, nil
+}
+
 func (s *fakeStore) HighWaterMark(ctx context.Context, bucketID int64) (int64, bool, error) {
 	if b := s.hook(ctx, "HighWaterMark"); b.err != nil {
 		return 0, false, b.err

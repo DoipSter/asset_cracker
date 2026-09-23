@@ -625,8 +625,8 @@ func TestParamsRefuseWhatIsNotMeasured(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for key := range p.numericFields() {
-			if _, has := p.Provenance[key]; !has && !(p.Exit == "hold" && exitOnlyFields[key]) {
+		for key, val := range p.numericFields() {
+			if _, has := p.Provenance[key]; !has && !(p.Exit == "hold" && exitOnlyFields[key]) && !(shapeFields[key] && val == 0) {
 				t.Errorf("%s: %s has no provenance", p.Name, key)
 			}
 		}

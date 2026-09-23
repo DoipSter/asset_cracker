@@ -326,11 +326,14 @@ func Run(version string) error {
 				cancel()
 				return doc
 			}, src, web.Control{
-				Key:    cfg.OperatorKey,
-				EnvOn:  cfg.V3,
-				Status: run3.OrdersStatus,
-				Apply:  run3.SetOrders,
-				Hold:   run3.HoldForReset,
+				Key:     cfg.OperatorKey,
+				Version: version,
+				Build:   buildVersion,
+				Presets: presetsJSON,
+				EnvOn:   cfg.V3,
+				Status:  run3.OrdersStatus,
+				Apply:   run3.SetOrders,
+				Hold:    run3.HoldForReset,
 				Release: func() {
 					run3.ReleaseAfterReset()
 					dropCapital() // the books are gone: the next snapshot reads the ledger, not last minute's figure

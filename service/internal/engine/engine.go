@@ -37,8 +37,31 @@ type Account struct {
 	MayOrder  bool
 	Exhausted bool // ran out: places no more orders
 	Bets      int  // buy orders with a fill
+	// LossStreak is the run of consecutive SETTLED positions that paid less than they cost, for
+	// martingale sizing (Params.Sizing). ApplySettlement moves it; a win resets it; an early sale
+	// does not count. The rebuild sets it from the ledger's settlements (store.SettledStreak), so
+	// live and rebuilt agree by the same rule.
+	LossStreak int
 
 	validated bool // the engine checked Params when it was built; without it Decide forms no order
+}
+
+// FixedStake is the martingale stake for the next entry, in cents: base times multiplier for
+// each consecutive loss, up to max_doublings. 0 for a version sized by Kelly.
+func (a *Account) FixedStake() int64 {
+	p := a.Params
+	if p.Sizing != SizingMartingale || p.BaseStakeCents <= 0 {
+		return 0
+	}
+	n := min(a.LossStreak, p.MaxDoublings)
+	stake := float64(p.BaseStakeCents)
+	for i := 0; i < n; i++ {
+		stake *= p.Multiplier
+	}
+	if stake > float64(p.SeedCents) {
+		stake = float64(p.SeedCents)
+	}
+	return int64(math.Floor(stake))
 }
 
 // NewAccount is an account holding cashCents and nothing else. The rebuild makes one per held
@@ -344,6 +367,7 @@ func (a *Account) decide(coin string, m Market, sides broker.Sides, v View, now 
 	var bestSide broker.Side
 	var bestAsks []broker.Price
 	bestEdge := math.Inf(-1)
+	sideBlocked := false                                        // a side the version does not buy had the edge
 	for _, side := range []broker.Side{broker.Yes, broker.No} { // the first of equals wins
 		if held != nil && held.Side != string(side) {
 			continue
@@ -352,7 +376,12 @@ func (a *Account) decide(coin string, m Market, sides broker.Sides, v View, now 
 		if len(asks) == 0 {
 			continue
 		}
-		if edge := sideProb(d.P, side) - dollars(buyUnitE10(asks[0], staleUnits)); edge > bestEdge {
+		edge := sideProb(d.P, side) - dollars(buyUnitE10(asks[0], staleUnits))
+		if !sideAllowed(prm.Side, side, tp.Mid) {
+			sideBlocked = sideBlocked || edge > 0
+			continue
+		}
+		if edge > bestEdge {
 			bestSide, bestAsks, bestEdge = side, asks, edge
 		}
 	}
@@ -372,6 +401,10 @@ func (a *Account) decide(coin string, m Market, sides broker.Sides, v View, now 
 		d.BlockedBy = BlockedTooLate
 	case tau > prm.TauMax:
 		d.BlockedBy = BlockedTooEarly
+	case prm.MinVolRatio > 0 && !(v.VolRatio >= prm.MinVolRatio):
+		d.BlockedBy = BlockedQuietMarket
+	case len(bestAsks) == 0 && sideBlocked:
+		d.BlockedBy = BlockedSide
 	case len(bestAsks) == 0:
 		d.BlockedBy = BlockedNoSize
 	case !(prm.BandMin <= c && c <= prm.BandMax):
@@ -396,7 +429,8 @@ func (a *Account) decide(coin string, m Market, sides broker.Sides, v View, now 
 		}
 		w := a.windowOrFresh(m.Close)
 		in := SizeInput{PSide: pSide, Asks: asks, StaleUnits: staleUnits, Kappa: prm.Kappa, CapBps: prm.WindowCapBps,
-			SeedCents: prm.SeedCents, EquityCents: w.EquityCents, KMax: w.KMax, UsedCents: w.Used(), CashCents: a.CashCents}
+			SeedCents: prm.SeedCents, EquityCents: w.EquityCents, KMax: w.KMax, UsedCents: w.Used(), CashCents: a.CashCents,
+			FixedStakeCents: a.FixedStake()}
 		if held != nil { // the same side: the loop above lets the account add only to the side it holds
 			in.HeldCents = held.CostCents
 		}
@@ -422,7 +456,24 @@ func (a *Account) decide(coin string, m Market, sides broker.Sides, v View, now 
 	in.Detail["kelly"], in.Detail["binding"], in.Detail["cost_steps"] = sz.Kelly, sz.Binding, steps
 	in.Detail["budget_cents"], in.Detail["cap_cents"], in.Detail["room_cents"] = sz.BudgetCents, sz.CapCents, sz.RoomCents
 	in.Detail["held_cents"] = heldCents // what the ceilings counted as already spent in this market
+	if fixed := a.FixedStake(); fixed > 0 {
+		in.Detail["martingale"] = map[string]any{"stake_cents": fixed, "loss_streak": a.LossStreak}
+	}
 	return []Decision{d}, []Intent{in}
+}
+
+// sideAllowed is the version's side filter (Params.Side) against the market's mid: the
+// favourite is the side priced above one half, the longshot the side under it. At exactly one
+// half there is no favourite, and neither filter lets a side through.
+func sideAllowed(rule string, side broker.Side, mid float64) bool {
+	pSide := sideProb(mid, side)
+	switch rule {
+	case SideFavourite:
+		return pSide > 0.5
+	case SideLongshot:
+		return pSide < 0.5
+	}
+	return true
 }
 
 // windowOrFresh is the window of this close as it stands, or what it would start as: E_w is the
@@ -982,6 +1033,11 @@ func (e *Engine) ApplySettlement(ticker, result string) []Event {
 		key := posKey{ticker, row.Side}
 		pos := a.Positions[key]
 		a.CashCents += row.PayoutCents
+		if row.PayoutCents < row.CostCents { // the martingale's streak: settled outcomes only
+			a.LossStreak++
+		} else {
+			a.LossStreak = 0
+		}
 		if w := a.Windows[windowKey(pos.Close)]; w != nil {
 			w.OpenCents -= row.CostCents
 			if short := row.CostCents - row.PayoutCents; short > 0 {

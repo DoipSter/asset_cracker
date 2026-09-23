@@ -82,6 +82,69 @@ func (s *Store) ListVersion3(ctx context.Context) ([]Version3, error) {
 	return out, rows.Err()
 }
 
+// ErrVersionExists is a builder submission whose strategy already has a version 3.
+var ErrVersionExists = errors.New("that strategy already has a version 3")
+
+// NewVersion3 is what the builder registers: a strategy row (made if absent) and its version-3
+// row, as draft, with the params the engine built and labelled.
+type NewVersion3 struct {
+	Name       string // the strategy's name; the params' name, with its label
+	Blurb      string // the strategy's description
+	Hypothesis string // what the version is meant to test; the registry's text
+	Params     []byte // engine.Params as JSON, already validated by the engine
+	Parent     string // the parent strategy's name whose version 2 this descends from ("Scalper" or "Value")
+	CodeRef    string // the release
+}
+
+// CreateVersion3 registers a builder's version as draft and returns its id. One more row in the
+// trials registry, which every significance figure is corrected for. The version is created by
+// the service actor: the page has no login, and the buckets page's operator key is the gate.
+func (s *Store) CreateVersion3(ctx context.Context, v NewVersion3) (int64, error) {
+	v.Name, v.Blurb, v.Hypothesis = strings.TrimSpace(v.Name), strings.TrimSpace(v.Blurb), strings.TrimSpace(v.Hypothesis)
+	switch {
+	case v.Name == "" || len(v.Name) > 80:
+		return 0, fmt.Errorf("the name must be 1 to 80 characters")
+	case len(v.Blurb) > 300:
+		return 0, fmt.Errorf("the blurb is too long")
+	case v.Hypothesis == "" || len(v.Hypothesis) > 2000:
+		return 0, fmt.Errorf("the hypothesis must be 1 to 2000 characters")
+	case len(v.Params) == 0:
+		return 0, fmt.Errorf("no params")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var strategyID int64
+	if err := tx.QueryRow(ctx, `
+		insert into strategy (family, name, description) values ('kalshi15m', $1, $2)
+		on conflict (family, name) do update set description = strategy.description
+		returning id`, v.Name, v.Blurb).Scan(&strategyID); err != nil {
+		return 0, err
+	}
+	var exists bool
+	if err := tx.QueryRow(ctx, `select exists (select 1 from strategy_version where strategy_id = $1 and version = 3)`, strategyID).Scan(&exists); err != nil {
+		return 0, err
+	}
+	if exists {
+		return 0, ErrVersionExists
+	}
+	var id int64
+	if err := tx.QueryRow(ctx, `
+		insert into strategy_version (strategy_id, version, params, code_ref, hypothesis, parent_version_id, created_by, status)
+		select $1, 3, $2::jsonb, $3, $4,
+		       (select v.id from strategy_version v join strategy p on p.id = v.strategy_id where p.family = 'kalshi15m' and p.name = $5 and v.version = 2),
+		       (select id from actor where handle = 'service'), 'draft'
+		returning id`, strategyID, v.Params, v.CodeRef, v.Hypothesis, v.Parent).Scan(&id); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
 // SetVersionStatus approves (probation or active) or retires one version-3 row.
 // A version that is not version 3 is left untouched.
 func (s *Store) SetVersionStatus(ctx context.Context, id int64, status, reason string) error {

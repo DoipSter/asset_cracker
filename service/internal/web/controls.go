@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -45,6 +46,7 @@ const reloadBudget = 30 * time.Second
 // no engine in this process: the saved switch still applies at the next start.
 type Control struct {
 	Key     string                                  // AC_OPERATOR_KEY: the passphrase every POST here needs; empty means none
+	Version string                                  // the build stamp, recorded as code_ref on a version the builder registers
 	EnvOn   bool                                    // AC_V3, used when the database has no orders row
 	Status  func() (placing bool, effective string) // this process, right now
 	Apply   func(on bool) string                    // "now" or "next-start"
@@ -55,7 +57,25 @@ type Control struct {
 	// held, rebuild. It runs after a reset and after every approval or retirement made here.
 	// held is how many buckets the engine now holds, ordering how many of them may order.
 	Reload func(ctx context.Context) (held, ordering int, err error)
+	// Build turns the builder's shape (engine.Shape as JSON) into a version the engine accepts,
+	// and Presets lists the standard shapes (engine.Presets as JSON). Both are the engine's;
+	// this package does not import it, so app hands them in. Nil means the page has no builder.
+	Build   func(shape []byte) (Built, error)
+	Presets func() []byte
 }
+
+// Built is a version the engine has built and validated from a shape.
+type Built struct {
+	Name, Blurb string
+	Params      []byte // engine.Params as JSON
+	Parent      string // "Scalper" or "Value": whose version 2 it descends from
+	Control     bool   // a negative control, registered to be caught
+}
+
+// BuildRefused is a shape the engine would not build; its text is shown on the page.
+type BuildRefused struct{ Why string }
+
+func (e BuildRefused) Error() string { return e.Why }
 
 // reload runs the engine's reload and reports it for the page. With no engine in this process
 // there is nothing to reload: the next start reads the database.
@@ -109,6 +129,7 @@ type controlStore interface {
 	SetOrdersSetting(ctx context.Context, on bool) error
 	ListVersion3(ctx context.Context) ([]store.Version3, error)
 	SetVersionStatus(ctx context.Context, id int64, status, reason string) error
+	CreateVersion3(ctx context.Context, v store.NewVersion3) (int64, error)
 	SetSimPolicy(ctx context.Context, winnings, replenish, tax, fees int, note string) error
 	CurrentSkimPolicy(ctx context.Context) (store.SkimPolicy, error)
 	ResetSim(ctx context.Context) (store.ResetCounts, error)
@@ -226,6 +247,76 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 			list.drop()
 		}
 		writeJSON(w, out)
+	}))
+
+	mux.HandleFunc("GET /api/controls/presets", func(w http.ResponseWriter, r *http.Request) {
+		if ctl.Presets == nil {
+			writeErr(w, http.StatusServiceUnavailable, "This process has no builder.")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write(ctl.Presets())
+	})
+
+	// The builder: a shape in, a draft version-3 row out. The engine builds and validates the
+	// params (every number labelled; nothing measured), the store registers the row, and the
+	// Approve button that already exists seeds it. One more trial in the registry.
+	mux.HandleFunc("POST /api/controls/version/new", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			writeErr(w, http.StatusServiceUnavailable, "The controls have no database.")
+			return
+		}
+		if ctl.Build == nil {
+			writeErr(w, http.StatusServiceUnavailable, "This process has no builder.")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 16384)
+		body, err := io.ReadAll(r.Body)
+		if err != nil || !json.Valid(body) {
+			writeErr(w, http.StatusBadRequest, "The request could not be read.")
+			return
+		}
+		var hyp struct {
+			Hypothesis string `json:"hypothesis"`
+		}
+		_ = json.Unmarshal(body, &hyp)
+		if strings.TrimSpace(hyp.Hypothesis) == "" {
+			writeErr(w, http.StatusBadRequest, "Say what this version is meant to test: the hypothesis goes in the registry.")
+			return
+		}
+		built, err := ctl.Build(body)
+		if err != nil {
+			var refused BuildRefused
+			if errors.As(err, &refused) {
+				writeErr(w, http.StatusBadRequest, refused.Why)
+				return
+			}
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+		defer cancel()
+		id, err := db.CreateVersion3(ctx, store.NewVersion3{Name: built.Name, Blurb: built.Blurb, Hypothesis: hyp.Hypothesis,
+			Params: built.Params, Parent: built.Parent, CodeRef: "built on the buckets page; release " + ctl.Version})
+		if err != nil {
+			if errors.Is(err, store.ErrVersionExists) {
+				writeErr(w, http.StatusConflict, built.Name+" already has a version 3. Give this one a different name.")
+				return
+			}
+			if strings.Contains(err.Error(), "must be") || strings.Contains(err.Error(), "too long") {
+				writeErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			slog.Error("controls: new version", "err", err)
+			writeErr(w, http.StatusInternalServerError, "The version was not registered.")
+			return
+		}
+		if list != nil {
+			list.drop()
+		}
+		slog.Info("buckets page: version registered as draft", "id", id, "name", built.Name, "control", built.Control)
+		writeJSON(w, map[string]any{"id": id, "name": built.Name, "status": "draft", "control": built.Control})
 	}))
 
 	mux.HandleFunc("POST /api/controls/policy", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
