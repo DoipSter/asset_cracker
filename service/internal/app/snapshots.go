@@ -56,8 +56,8 @@ func ledgerCapital(db *store.Store, held func() []int64) (read func() (store.Cap
 // every bucket and coin on each fifth minute of the hour. It refuses to write a row that might
 // be wrong, because a wrong row is there for good: the table is append-only, and a gap in the
 // chart is honest where a false step is not.
-func snapshotValues(ctx context.Context, db *store.Store, src web.Sources, run *runner.Runner3, now time.Time) error {
-	if run != nil {
+func snapshotValues(ctx context.Context, db *store.Store, src web.Sources, runs []*runner.Runner3, now time.Time) error {
+	for _, run := range runs {
 		hctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		safely("heal", func() { run.Heal(hctx) })
 		cancel()

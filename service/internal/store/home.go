@@ -236,6 +236,7 @@ func (s *Store) BucketCapitals(ctx context.Context, held []int64) ([]BucketCapit
 // worth right now comes from the engine's book, not from here.
 type BucketRow struct {
 	ID             int64
+	VersionID      int64 // strategy_version.id, so a close-out can find the live engine's reap
 	Name, Status   string
 	Strategy       string // the strategy's registered name, e.g. "Scalper" or "Anti Scalper"
 	Version        int
@@ -264,7 +265,7 @@ func LifeOf(name string) int {
 // fill every order whole, so for them this is every buy order, as it always was.
 func (s *Store) Buckets(ctx context.Context) ([]BucketRow, error) {
 	rows, err := s.pool.Query(ctx, `
-		select b.id, b.name, b.status, st.name, v.version, coalesce((v.params->>'anti')::boolean, false),
+		select b.id, v.id, b.name, b.status, st.name, v.version, coalesce((v.params->>'anti')::boolean, false),
 		       coalesce((select sum(e.amount_cents) from ledger_entry e where e.account_id = b.ledger_account_id), 0)::bigint,
 		       coalesce((select sum(e.amount_cents) from ledger_entry e join ledger_transfer t on t.id = e.transfer_id
 		                  where e.account_id = b.ledger_account_id and t.reason = 'seed'), 0)::bigint,
@@ -284,7 +285,7 @@ func (s *Store) Buckets(ctx context.Context) ([]BucketRow, error) {
 	out := []BucketRow{}
 	for rows.Next() {
 		var b BucketRow
-		if err := rows.Scan(&b.ID, &b.Name, &b.Status, &b.Strategy, &b.Version, &b.Anti, &b.CashCents, &b.SeedCents, &b.AllocatedCents, &b.Bets); err != nil {
+		if err := rows.Scan(&b.ID, &b.VersionID, &b.Name, &b.Status, &b.Strategy, &b.Version, &b.Anti, &b.CashCents, &b.SeedCents, &b.AllocatedCents, &b.Bets); err != nil {
 			return nil, err
 		}
 		b.Life = LifeOf(b.Name)

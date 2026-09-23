@@ -48,6 +48,40 @@ type CoinState struct {
 	offsets []offsetObs // at most 24: about six hours of rounds
 	ring    []secPrice  // at most 150
 	volRef  *secPrice
+
+	// longSigma2 is the per-second variance the model uses for a market more than LongHorizon
+	// seconds from its close (the daily and weekly ladders): the coin's realised volatility over
+	// the last weeks of daily candles, not the five-minute-halflife estimate above, which says
+	// what the market is doing now and nothing about a week. Zero means none was given, and a
+	// long market is then priced with Sigma2, as it would have been before this field existed.
+	longSigma2 float64
+}
+
+// LongHorizon is the time to close, in seconds, past which the model prices a market with the
+// coin's long volatility instead of the fast one. [CONVENTION: an hour]
+const LongHorizon = 3600.0
+
+// LongSigmaFromDaily is the per-sqrt-second volatility read from consecutive daily closes: the
+// standard deviation of their log returns, scaled by the seconds in a day. It needs at least
+// ten closes and returns 0 otherwise. Computed from the candle table at start, never learned
+// from an outcome.
+func LongSigmaFromDaily(closes []float64) float64 {
+	var rs []float64
+	for i := 0; i+1 < len(closes); i++ {
+		if a, b := closes[i], closes[i+1]; a > 0 && b > 0 {
+			rs = append(rs, math.Log(b/a))
+		}
+	}
+	if len(rs) < 10 {
+		return 0
+	}
+	mean := pyfloat.Sum(rs) / float64(len(rs))
+	var ss float64
+	for _, r := range rs {
+		ss += (r - mean) * (r - mean)
+	}
+	sd := math.Sqrt(ss / float64(len(rs)-1))
+	return sd / math.Sqrt(86400)
 }
 
 func pushBack[T any](s []T, v T, maxLen int) []T {
@@ -207,7 +241,11 @@ type View struct {
 	PModel        float64 // the RAW model probability of Yes; what decision.model_prob stores
 	// VolRatio is the model's volatility over the coin's calibrated default, sqrt(Sigma2) /
 	// DefaultSigma: 1 is ordinary, 2 is twice as fast a market. Params.MinVolRatio reads it.
+	// It is always the FAST volatility's ratio, whichever one priced the market.
 	VolRatio float64
+	// Horizon says which volatility priced this view: "fast" (the running estimate) or "long"
+	// (the coin's realised daily volatility, for a close more than LongHorizon away).
+	Horizon string
 
 	// Drift is the gate of plan 4.3: true when a live reference is supplied and the fork cannot
 	// be shown, this second, to be that model. While it is true no ENTRY is sent; exits go on.
@@ -226,6 +264,9 @@ func (v View) Journal() map[string]any {
 	}
 	out := map[string]any{"v": 3, "ok": true, "sigma2": v.Sigma2, "index_offset": v.Offset, "offset_samples": v.OffsetSamples,
 		"offset_source": v.OffsetSource, "p_model": v.PModel, "drift": v.Drift, "vol_ratio": v.VolRatio}
+	if v.Horizon == "long" {
+		out["horizon"] = v.Horizon
+	}
 	if v.Drift {
 		out["drift_why"] = v.DriftWhy
 	}
@@ -265,6 +306,16 @@ func (m *Model) SeedVol(coin string, closes []float64) {
 	defer m.mu.Unlock()
 	if c := m.coins[coin]; c != nil {
 		c.seedVol(closes)
+	}
+}
+
+// SetLongSigma gives a coin its long volatility per sqrt-second (LongSigmaFromDaily). Zero or
+// negative leaves the fast estimate in charge at every horizon.
+func (m *Model) SetLongSigma(coin string, sigma float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if c := m.coins[coin]; c != nil && sigma > 0 {
+		c.longSigma2 = sigma * sigma
 	}
 }
 
@@ -341,12 +392,19 @@ func (m *Model) View(coin string, mk Market, price, now float64, ref *V2Inputs) 
 	tau := mk.Close - now
 	known := c.knownAvg(mk.Close, tau)
 	offset, samples := c.offsetStatus(now)
-	v := View{Coin: coin, OK: true, Price: price, Tau: tau, Sigma2: c.Sigma2, Offset: offset, OffsetSamples: samples,
-		OffsetSource: "measured"}
+	// The volatility the probability is priced with: the fast estimate inside an hour of the
+	// close, the long one past it when the coin has one. The drift reference below always uses
+	// the fast one, as the archived engine did; it runs only on the 15-minute rounds.
+	sigma2, horizon := c.Sigma2, "fast"
+	if tau > LongHorizon && c.longSigma2 > 0 {
+		sigma2, horizon = c.longSigma2, "long"
+	}
+	v := View{Coin: coin, OK: true, Price: price, Tau: tau, Sigma2: sigma2, Offset: offset, OffsetSamples: samples,
+		OffsetSource: "measured", Horizon: horizon}
 	if samples < 3 {
 		v.OffsetSource = "constant"
 	}
-	v.PModel = ProbYes(price, mk.Strike, tau, c.Sigma2, known, offset, c.Cal.SDPct)
+	v.PModel = ProbYes(price, mk.Strike, tau, sigma2, known, offset, c.Cal.SDPct)
 	if c.Cal.DefaultSigma > 0 {
 		v.VolRatio = math.Sqrt(c.Sigma2) / c.Cal.DefaultSigma
 	}

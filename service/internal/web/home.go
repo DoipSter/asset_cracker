@@ -612,7 +612,17 @@ func homeRoutes(mux *http.ServeMux, db *store.Store, userAgent string, src Sourc
 			http.Error(w, "range must be 1H, 24H, 7D or ALL", http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, homeDoc(src, key, cache.get(db, key, length), time.Now(), moves.get(userAgent, src, key)))
+		doc := homeDoc(src, key, cache.get(db, key, length), time.Now(), moves.get(userAgent, src, key))
+		if db != nil {
+			bctx, bcancel := context.WithTimeout(r.Context(), time.Second)
+			if b, err := db.OpenBank(bctx); err != nil {
+				slog.Error("home: bank", "err", err)
+			} else if b.ID != 0 {
+				doc["bank"] = b
+			}
+			bcancel()
+		}
+		writeJSON(w, doc)
 	})
 
 	mux.HandleFunc("GET /api/asset", func(w http.ResponseWriter, r *http.Request) {
@@ -872,7 +882,7 @@ func bucketDocs(rows []store.BucketRow, books []runner.Book) []map[string]any {
 	}
 	out := []map[string]any{}
 	for _, row := range rows {
-		doc := map[string]any{"name": row.Name, "engine": fmt.Sprintf("v%d", row.Version), "strategy": strings.TrimPrefix(row.Strategy, "Anti "),
+		doc := map[string]any{"id": row.ID, "version_id": row.VersionID, "name": row.Name, "engine": fmt.Sprintf("v%d", row.Version), "strategy": strings.TrimPrefix(row.Strategy, "Anti "),
 			"world": "real", "status": row.Status, "life": row.Life, "seed_cents": row.SeedCents, "equity_cents": row.CashCents,
 			"cash_cents": row.CashCents, "at_risk_cents": int64(0), "high_water_cents": nil, "allocated_cents": row.AllocatedCents,
 			"bets": row.Bets, "unmarked_bets": 0}

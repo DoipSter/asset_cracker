@@ -100,6 +100,12 @@ type Params struct {
 	Multiplier     float64 `json:"multiplier,omitempty"`
 	MaxDoublings   int     `json:"max_doublings,omitempty"`
 
+	// Family is which markets the version trades: "" or "kalshi15m", the 15-minute rounds;
+	// "kalshiladder", the daily and weekly above/below ladders (many legs per coin open at once,
+	// hours to days from their close, priced with the coin's long volatility past an hour). The
+	// family decides which runner holds the version's bucket; the rules above are the same.
+	Family string `json:"family,omitempty"`
+
 	Levels     int  `json:"levels"`       // recorded levels an order may walk [FACT: five are recorded]
 	FeePerFill bool `json:"fee_per_fill"` // the pessimistic fee rounding; copied into the Paper by whoever builds it
 
@@ -133,7 +139,19 @@ const (
 
 	SizingKelly      = "kelly"
 	SizingMartingale = "martingale"
+
+	// The market families. FamilyRounds is the default and the empty string reads as it.
+	FamilyRounds  = "kalshi15m"
+	FamilyLadders = "kalshiladder"
 )
+
+// FamilyOf is a version's family with the default made explicit.
+func (p Params) FamilyOf() string {
+	if p.Family == "" {
+		return FamilyRounds
+	}
+	return p.Family
+}
 
 func inherited(v float64, note string) Provenance {
 	return Provenance{Kind: KindInherited, Value: v, Note: note}
@@ -382,6 +400,18 @@ func (p Params) validate(plumbing bool) error {
 	case "", SideModel, SideFavourite, SideLongshot:
 	default:
 		fail("side %q is not model, favourite or longshot", p.Side)
+	}
+	switch p.Family {
+	case "", FamilyRounds:
+	case FamilyLadders:
+		// A ladder leg is open for days; the round's default gate (900 s) would let a ladder
+		// version enter only in the last fifteen minutes of a week-long market, which is not
+		// what anyone building one means. The shape must say its window.
+		if p.TauMax <= LongHorizon {
+			fail("a %s version needs tau_max above %v seconds (an hour): its markets close hours to days out", FamilyLadders, LongHorizon)
+		}
+	default:
+		fail("family %q is not %s or %s", p.Family, FamilyRounds, FamilyLadders)
 	}
 	if !(p.MinVolRatio >= 0 && p.MinVolRatio <= 100) {
 		fail("min_vol_ratio %v is outside 0..100", p.MinVolRatio)

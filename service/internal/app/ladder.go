@@ -6,6 +6,7 @@ import (
 
 	"github.com/doipster/asset_cracker/service/internal/coinbase"
 	"github.com/doipster/asset_cracker/service/internal/kalshi"
+	"github.com/doipster/asset_cracker/service/internal/runner"
 	"github.com/doipster/asset_cracker/service/internal/store"
 )
 
@@ -38,6 +39,21 @@ func isLadder(in store.Instrument) bool {
 	return in.Kind == "binary_ladder" || flag
 }
 
+// ladderPrefix names the ladder runner's buckets ("kalshiladder3 Day Value (conventions) v3")
+// and the key its engine state is saved under.
+const ladderPrefix = "kalshiladder3"
+
+// knownCoin says whether the runners' coin list carries this underlying, so a ladder series of
+// it can be traded rather than only recorded.
+func knownCoin(coins []runner.Coin3, coin string) bool {
+	for _, c := range coins {
+		if c.Coin == coin {
+			return true
+		}
+	}
+	return false
+}
+
 // ladderSink writes one ladder series' markets, rows and results. It holds the database and the
 // instrument and NOTHING else: no engine can be reached from here, so a result is stored with the
 // first-writer-wins RecordResult and never settled against a bet.
@@ -59,7 +75,7 @@ func (s *ladderSink) SaveMarkets(ctx context.Context, ms []kalshi.LadderNew) (ma
 	return s.db.UpsertMarkets(ctx, s.instrumentID, out)
 }
 
-func (s *ladderSink) SaveRows(ctx context.Context, rows []kalshi.LadderRow) error {
+func (s *ladderSink) SaveRows(ctx context.Context, rows []kalshi.LadderRow) ([]int64, error) {
 	out := make([]store.EvaluationRow, len(rows))
 	for i, r := range rows {
 		out[i] = store.EvaluationRow{At: r.At, MarketID: r.MarketID, UnderlyingPrice: r.Price, Quotes: r.Quotes, Model: r.Model}

@@ -47,3 +47,8 @@ grant select, insert on analysis_result to assetcracker;
 -- function is the only way the service role deletes simulated books.
 grant update (value, set_at, set_by, note) on operator_setting to assetcracker;
 grant execute on function reset_sim(text) to assetcracker;
+
+-- A payday's next date moves forward when it pays, and it is turned off when it is stopped
+-- or when its bank closes. The service writes those two columns. Opening the next bank is
+-- inside reset_sim, which runs as its owner.
+grant update (next_at, enabled) on bank_event to assetcracker;

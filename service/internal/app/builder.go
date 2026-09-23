@@ -29,7 +29,7 @@ func buildVersion(shape []byte) (web.Built, error) {
 	if p.Exit == "ev" {
 		parent = "Scalper"
 	}
-	return web.Built{Name: p.Name, Blurb: p.Blurb, Params: params, Parent: parent, Control: s.Control}, nil
+	return web.Built{Name: p.Name, Blurb: p.Blurb, Params: params, Parent: parent, Family: p.FamilyOf(), Control: s.Control}, nil
 }
 
 // shapeOf reads a registered version's params back into the builder's shape, for Remix.

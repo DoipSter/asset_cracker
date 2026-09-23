@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -31,6 +32,56 @@ func TestToShapeRoundTrip(t *testing.T) {
 			q.BaseStakeCents != p.BaseStakeCents || q.TakeCapture != p.TakeCapture || q.MinHold != p.MinHold {
 			t.Fatalf("%s did not round-trip:\n%+v\n%+v", pr.Key, p, q)
 		}
+	}
+}
+
+// A ladder version must say its window; past an hour the model prices with the long sigma.
+func TestLadderFamily(t *testing.T) {
+	s := Shape{Name: "Day", Exit: "hold", Lambda: 0.5, Family: FamilyLadders}
+	if _, err := FromShape(s); err == nil || !strings.Contains(err.Error(), "tau_max") {
+		t.Fatalf("a ladder shape without tau_max must be refused: %v", err)
+	}
+	s.TauMin, s.TauMax = 10800, 108000
+	p, err := FromShape(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Family != FamilyLadders || p.FamilyOf() != FamilyLadders || (Params{}).FamilyOf() != FamilyRounds || ToShape(p).Family != FamilyLadders {
+		t.Fatalf("family: %+v", p)
+	}
+	if _, err := FromShape(Shape{Name: "x", Exit: "hold", Lambda: 0.5, Family: "spot"}); err == nil {
+		t.Fatal("an unknown family must be refused")
+	}
+
+	m, _ := NewModel([]string{"BTC"}, map[string]Calibration{"BTC": {DefaultSigma: 1e-4, Decimals: 2}}, 0)
+	m.Observe("BTC", 100000, 1000)
+	day := Market{Ticker: "D", Strike: 101000, Close: 1000 + 86400}
+	v := m.View("BTC", day, 100000, 1000, nil)
+	if v.Horizon != "fast" || v.Sigma2 != 1e-8 {
+		t.Fatalf("without a long sigma the fast one prices every horizon: %+v", v)
+	}
+	closes := make([]float64, 0, 31)
+	for i := 0; i < 31; i++ { // alternating ±2% days: a sd of about 2.8% a day
+		closes = append(closes, 100000*math.Pow(1.02, float64(i%2)))
+	}
+	long := LongSigmaFromDaily(closes)
+	if !(long > 5e-5 && long < 1.5e-4) {
+		t.Fatalf("long sigma per sqrt-second %v", long)
+	}
+	m.SetLongSigma("BTC", long)
+	v = m.View("BTC", day, 100000, 1000, nil)
+	if v.Horizon != "long" || math.Abs(v.Sigma2-long*long) > 1e-15 || v.Journal()["horizon"] != "long" {
+		t.Fatalf("a day out prices with the long sigma: %+v", v)
+	}
+	if v.PModel <= 0.2 || v.PModel >= 0.5 {
+		t.Fatalf("1%% above the strike a day out with ~2.8%% daily vol: p = %v", v.PModel)
+	}
+	near := m.View("BTC", Market{Ticker: "R", Strike: 101000, Close: 1000 + 600}, 100000, 1000, nil)
+	if near.Horizon != "fast" || near.Sigma2 != 1e-8 {
+		t.Fatalf("ten minutes out stays with the fast sigma: %+v", near)
+	}
+	if LongSigmaFromDaily(closes[:5]) != 0 {
+		t.Fatal("fewer than ten closes give no long sigma")
 	}
 }
 

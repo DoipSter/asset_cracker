@@ -56,22 +56,29 @@ type Version3 struct {
 	Version    int    `json:"version"`
 	Status     string `json:"status"`
 	Hypothesis string `json:"hypothesis"`
-	Params     []byte `json:"-"`     // engine.Params as stored; the page's Remix reads a shape from it
-	Held       bool   `json:"held"`  // a bucket of this version is not frozen: Reap applies
-	Lives      int    `json:"lives"` // buckets this version has had, frozen ones included: Restake applies when > 0 and not held
+	Params     []byte `json:"-"`      // engine.Params as stored; the page's Remix reads a shape from it
+	Family     string `json:"family"` // kalshi15m (the rounds) or kalshiladder (the daily and weekly ladders)
+	Held       bool   `json:"held"`   // a bucket of this version is not frozen: Reap applies
+	Lives      int    `json:"lives"`  // buckets this version has had, frozen ones included: Restake applies when > 0 and not held
 }
 
-// ListVersion3 is the version-3 rows of the kalshi15m family. An empty list is the
-// ordinary state: those versions are registered only after their measured numbers exist.
+// The market families a version may belong to. Each has its own runner and bucket prefix.
+const (
+	FamilyRounds  = "kalshi15m"
+	FamilyLadders = "kalshiladder"
+)
+
+// ListVersion3 is the version-3 rows of both families. An empty list is the ordinary state
+// before anything is registered.
 func (s *Store) ListVersion3(ctx context.Context) ([]Version3, error) {
 	rows, err := s.pool.Query(ctx, `
-		select v.id, st.name, v.version, v.status, v.hypothesis, v.params,
+		select v.id, st.name, st.family, v.version, v.status, v.hypothesis, v.params,
 		       exists (select 1 from bucket b where b.strategy_version_id = v.id and b.mode = 'sim' and b.status <> 'frozen'),
 		       (select count(*) from bucket b where b.strategy_version_id = v.id and b.mode = 'sim')
 		  from strategy_version v
 		  join strategy st on st.id = v.strategy_id
-		 where st.family = 'kalshi15m' and v.version = 3
-		 order by st.name`)
+		 where st.family in ($1, $2) and v.version = 3
+		 order by st.name`, FamilyRounds, FamilyLadders)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +86,7 @@ func (s *Store) ListVersion3(ctx context.Context) ([]Version3, error) {
 	out := []Version3{}
 	for rows.Next() {
 		var v Version3
-		if err := rows.Scan(&v.ID, &v.Name, &v.Version, &v.Status, &v.Hypothesis, &v.Params, &v.Held, &v.Lives); err != nil {
+		if err := rows.Scan(&v.ID, &v.Name, &v.Family, &v.Version, &v.Status, &v.Hypothesis, &v.Params, &v.Held, &v.Lives); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -99,6 +106,7 @@ type NewVersion3 struct {
 	Params     []byte // engine.Params as JSON, already validated by the engine
 	Parent     string // the parent strategy's name whose version 2 this descends from ("Scalper" or "Value")
 	CodeRef    string // the release
+	Family     string // FamilyRounds (the default) or FamilyLadders: which runner holds its bucket
 }
 
 // CreateVersion3 registers a builder's version as draft and returns its id. One more row in the
@@ -116,6 +124,13 @@ func (s *Store) CreateVersion3(ctx context.Context, v NewVersion3) (int64, error
 	case len(v.Params) == 0:
 		return 0, fmt.Errorf("no params")
 	}
+	switch v.Family {
+	case "":
+		v.Family = FamilyRounds
+	case FamilyRounds, FamilyLadders:
+	default:
+		return 0, fmt.Errorf("family must be %s or %s", FamilyRounds, FamilyLadders)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
@@ -124,9 +139,9 @@ func (s *Store) CreateVersion3(ctx context.Context, v NewVersion3) (int64, error
 	// The strategy row: found, or made. Not an upsert: `on conflict do update` needs UPDATE on
 	// the table, and the service role may add rows to strategy, never change them (db/grants.sql).
 	var strategyID int64
-	err = tx.QueryRow(ctx, `select id from strategy where family = 'kalshi15m' and name = $1`, v.Name).Scan(&strategyID)
+	err = tx.QueryRow(ctx, `select id from strategy where family = $1 and name = $2`, v.Family, v.Name).Scan(&strategyID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		err = tx.QueryRow(ctx, `insert into strategy (family, name, description) values ('kalshi15m', $1, $2) returning id`, v.Name, v.Blurb).Scan(&strategyID)
+		err = tx.QueryRow(ctx, `insert into strategy (family, name, description) values ($1, $2, $3) returning id`, v.Family, v.Name, v.Blurb).Scan(&strategyID)
 	}
 	if err != nil {
 		return 0, err

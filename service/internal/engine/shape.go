@@ -22,8 +22,9 @@ type Shape struct {
 	Blurb      string `json:"blurb,omitempty" jsonschema:"one line about it, for the pages; blank takes the parent's"`
 	Hypothesis string `json:"hypothesis,omitempty" jsonschema:"what this version is meant to test; strategy_register requires it, it goes in the trials registry"`
 
-	Exit string `json:"exit" jsonschema:"hold: every position is held to settlement (parent Value). ev: sells on value or once the bid covers take_capture of the way to a dollar (parent Scalper)"`
-	Side string `json:"side,omitempty" jsonschema:"which side it may buy: model (whichever the belief favours; the default), favourite (the side priced above one half only), longshot (under one half only)"`
+	Family string `json:"family,omitempty" jsonschema:"which markets it trades: kalshi15m (the 15-minute rounds; the default) or kalshiladder (the daily and weekly above/below ladders, many legs per coin at once, hours to days from the close; tau_min and tau_max are then hours-to-days in seconds and tau_max must exceed 3600)"`
+	Exit   string `json:"exit" jsonschema:"hold: every position is held to settlement (parent Value). ev: sells on value or once the bid covers take_capture of the way to a dollar (parent Scalper)"`
+	Side   string `json:"side,omitempty" jsonschema:"which side it may buy: model (whichever the belief favours; the default), favourite (the side priced above one half only), longshot (under one half only)"`
 
 	Lambda        float64 `json:"lambda" jsonschema:"weight on the model against the market, 0 to 1 exclusive of 0; the owner's convention is 0.5"`
 	StaleCost     float64 `json:"stale_cost,omitempty" jsonschema:"staleness cost in dollars charged to a buy; convention 0.0012"`
@@ -61,6 +62,11 @@ func FromShape(s Shape) (Params, error) {
 	if s.Exit != "hold" && s.Exit != "ev" {
 		return Params{}, fmt.Errorf("exit must be hold or ev")
 	}
+	switch s.Family {
+	case "", FamilyRounds, FamilyLadders:
+	default:
+		return Params{}, fmt.Errorf("family must be %s or %s", FamilyRounds, FamilyLadders)
+	}
 	if !(s.Lambda > 0) {
 		return Params{}, fmt.Errorf("lambda must be above 0 (the protocol's R1: a version at 0 is not registered)")
 	}
@@ -91,6 +97,10 @@ func FromShape(s Shape) (Params, error) {
 		p.Blurb = strings.Replace(p.Blurb, "the measured weight", "the owner's weight", 1)
 	}
 	p.Blurb += "; built on the buckets page, every number a convention"
+	if s.Family == FamilyLadders {
+		p.Family = FamilyLadders
+		p.Blurb += "; trades the daily and weekly ladders"
+	}
 	if s.Control {
 		p.Blurb += "; a NEGATIVE CONTROL, registered to be caught"
 	}
@@ -164,6 +174,7 @@ func ToShape(p Params) Shape {
 	return Shape{
 		Name:           strings.TrimSuffix(p.Name, ConventionSuffix),
 		Blurb:          "",
+		Family:         p.Family,
 		Exit:           p.Exit,
 		Side:           p.Side,
 		Lambda:         p.Lambda,
@@ -239,6 +250,27 @@ func Presets() []Preset {
 			func() Shape {
 				s := base("Martingale control", "hold")
 				s.Sizing, s.BaseStakeCents, s.Multiplier, s.MaxDoublings, s.Control = SizingMartingale, 1000, 2, 5, true
+				return s
+			}()},
+		// The ladders: the same belief against the ask, priced with the coin's realised daily
+		// volatility, on markets that close hours to days out. tau is in seconds: 3 h = 10800,
+		// 30 h = 108000, 7 d = 604800. One bet per leg; the window cap is per close date.
+		{"day-value", "Day Value (ladders)", "Value's rule on the daily ladders: buys a leg where the belief beats the ask after costs, between 30 and 3 hours before its 5 pm ET close, one bet a leg, held to settlement.",
+			func() Shape {
+				s := base("Day Value", "hold")
+				s.Family, s.TauMin, s.TauMax, s.BandMin, s.BandMax = FamilyLadders, 10800, 108000, 0.05, 0.95
+				return s
+			}()},
+		{"day-favourite", "Day Favourite (ladders)", "The favourite-longshot bias on the daily ladders: the side priced 0.60 to 0.90 only, between 30 and 3 hours before the close, one bet a leg, held.",
+			func() Shape {
+				s := base("Day Favourite", "hold")
+				s.Family, s.Side, s.TauMin, s.TauMax, s.BandMin, s.BandMax = FamilyLadders, SideFavourite, 10800, 108000, 0.60, 0.90
+				return s
+			}()},
+		{"week-value", "Week Value (ladders)", "Value's rule on the weekly ladders: legs one to seven days from the close, priced with the coin's realised daily volatility, one bet a leg, held.",
+			func() Shape {
+				s := base("Week Value", "hold")
+				s.Family, s.TauMin, s.TauMax, s.BandMin, s.BandMax = FamilyLadders, 86400, 604800, 0.05, 0.95
 				return s
 			}()},
 	}

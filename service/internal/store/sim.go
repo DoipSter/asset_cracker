@@ -268,6 +268,101 @@ var ErrBucketHeld = errors.New("that version's bucket is still held; reap it fir
 // ErrNoBucketEver is a RestakeBucket of a version that never had a bucket: approval seeds those.
 var ErrNoBucketEver = errors.New("that version has never had a bucket; approving it seeds one")
 
+// ErrNoSuchBucket is a close-out of an id that is not a simulated bucket.
+var ErrNoSuchBucket = errors.New("no such simulated bucket")
+
+// ErrAlreadyClosed is a close-out of a bucket that is already frozen. Its record is kept either way.
+var ErrAlreadyClosed = errors.New("that bucket is already closed")
+
+// OpenContracts is a close-out refused because the bucket still holds contracts. A settlement
+// into a frozen bucket has nowhere to go.
+type OpenContracts struct {
+	Name string
+	Lots int
+}
+
+func (e OpenContracts) Error() string {
+	return fmt.Sprintf("%s still holds %d contract(s); close it once they settle", e.Name, e.Lots)
+}
+
+// BucketRef is enough to decide how a bucket is closed: the live engine's own reap when it is
+// version 3 and the engine holds it, otherwise a close-out in the ledger alone.
+type BucketRef struct {
+	ID, VersionID int64
+	Version       int
+	Name, Status  string
+}
+
+// ClosedOut is a bucket taken off the books without a reset: frozen, its cash in replenishment,
+// its bets and fills and decisions still there.
+type ClosedOut struct {
+	Name        string
+	ReapedCents int64
+}
+
+// LookupBucket is the simulated bucket of that id.
+func (s *Store) LookupBucket(ctx context.Context, bucketID int64) (BucketRef, error) {
+	var b BucketRef
+	err := s.pool.QueryRow(ctx, `select b.id, b.strategy_version_id, v.version, b.name, b.status
+	                               from bucket b join strategy_version v on v.id = b.strategy_version_id
+	                              where b.id = $1 and b.mode = 'sim'`, bucketID).
+		Scan(&b.ID, &b.VersionID, &b.Version, &b.Name, &b.Status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return BucketRef{}, ErrNoSuchBucket
+	}
+	return b, err
+}
+
+// CloseOutBucket reaps one simulated bucket into replenishment and freezes it. Nothing it did is
+// deleted, and nothing is seeded in its place. It is how an old strategy leaves the books without
+// a reset. Refused while it still holds contracts, and when it is already frozen.
+func (s *Store) CloseOutBucket(ctx context.Context, bucketID int64) (ClosedOut, error) {
+	b, err := s.LookupBucket(ctx, bucketID)
+	if err != nil {
+		return ClosedOut{}, err
+	}
+	if b.Status == "frozen" {
+		return ClosedOut{}, ErrAlreadyClosed
+	}
+	var lots int
+	// A scalar subquery: no open side is NULL, and coalesce makes that zero. Summing the outer
+	// query would return no row at all when nothing is open.
+	err = s.pool.QueryRow(ctx, `
+		select coalesce((
+		    select sum(q) from (
+		        select sum(case when o.action = 'buy' then f.qty else -f.qty end) q
+		          from trade_order o join fill f on f.order_id = o.id
+		         where o.bucket_id = $1
+		         group by o.side
+		        having sum(case when o.action = 'buy' then f.qty else -f.qty end) > 0
+		    ) open_sides
+		), 0)::int`, bucketID).Scan(&lots)
+	if err != nil {
+		return ClosedOut{}, err
+	}
+	if lots > 0 {
+		return ClosedOut{}, OpenContracts{Name: b.Name, Lots: lots}
+	}
+	var actor, pool, ledger, cash int64
+	if err = s.pool.QueryRow(ctx, `select id from actor where handle = 'service'`).Scan(&actor); err != nil {
+		return ClosedOut{}, err
+	}
+	if err = s.pool.QueryRow(ctx, `select id from ledger_account where mode = 'sim' and name = 'common pool (sim)'`).Scan(&pool); err != nil {
+		return ClosedOut{}, fmt.Errorf("replenishment pool: %w", err)
+	}
+	if err = s.pool.QueryRow(ctx, `select ledger_account_id from bucket where id = $1`, b.ID).Scan(&ledger); err != nil {
+		return ClosedOut{}, err
+	}
+	if err = s.pool.QueryRow(ctx, `select coalesce(sum(amount_cents), 0) from ledger_entry where account_id = $1`, ledger).Scan(&cash); err != nil {
+		return ClosedOut{}, err
+	}
+	held := SimBucket{ID: b.ID, Name: b.Name, LedgerAccountID: ledger, VersionID: b.VersionID}
+	if _, err = s.CloseBucket(ctx, SimSetup{ActorID: actor, PoolLedgerID: pool}, held, "closed out by the operator", false, 0, 0); err != nil {
+		return ClosedOut{}, err
+	}
+	return ClosedOut{Name: b.Name, ReapedCents: cash}, nil
+}
+
 // RestakeBucket opens the next life of a version whose newest bucket is frozen (reaped by hand,
 // or run out), seeded from the replenishment pool. It is how a version comes back after a Reap
 // without a restake. The bucket trades if the version is approved, else it is held settle-only.

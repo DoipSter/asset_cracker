@@ -43,17 +43,17 @@ type EvaluationRow struct {
 	Model           any
 }
 
-// InsertEvaluations appends evaluation rows in one round trip. Nothing hangs decisions off them,
-// so no ids come back.
-func (s *Store) InsertEvaluations(ctx context.Context, rows []EvaluationRow) error {
+// InsertEvaluations appends evaluation rows in one round trip and returns their ids in the
+// rows' order: the ladder engine's decisions hang off them, as the rounds' do.
+func (s *Store) InsertEvaluations(ctx context.Context, rows []EvaluationRow) ([]int64, error) {
 	if len(rows) == 0 {
-		return nil
+		return nil, nil
 	}
 	batch := &pgx.Batch{}
 	for _, r := range rows {
 		q, err := json.Marshal(r.Quotes)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		model := r.Model
 		if model == nil {
@@ -61,12 +61,49 @@ func (s *Store) InsertEvaluations(ctx context.Context, rows []EvaluationRow) err
 		}
 		m, err := json.Marshal(model)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		batch.Queue(`insert into evaluation (at, market_id, underlying_price, quotes, model)
-		             values ($1, $2, nullif($3, '')::numeric, $4, $5)`, r.At, r.MarketID, r.UnderlyingPrice, q, m)
+		             values ($1, $2, nullif($3, '')::numeric, $4, $5) returning id`, r.At, r.MarketID, r.UnderlyingPrice, q, m)
 	}
-	return s.pool.SendBatch(ctx, batch).Close()
+	br := s.pool.SendBatch(ctx, batch)
+	defer br.Close()
+	ids := make([]int64, 0, len(rows))
+	for range rows {
+		var id int64
+		if err := br.QueryRow().Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// DailyCloses is the last n daily candle closes of a spot instrument (by symbol, e.g. BTC-USD),
+// oldest first: what the model's long volatility is read from at start.
+func (s *Store) DailyCloses(ctx context.Context, symbol string, n int) ([]float64, error) {
+	rows, err := s.pool.Query(ctx, `
+		select c.close::float8
+		  from candle c join instrument i on i.id = c.instrument_id
+		 where i.symbol = $1 and c.granularity_s = 86400
+		 order by c.at desc limit $2`, symbol, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var desc []float64
+	for rows.Next() {
+		var v float64
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		desc = append(desc, v)
+	}
+	out := make([]float64, len(desc))
+	for i, v := range desc {
+		out[len(desc)-1-i] = v
+	}
+	return out, rows.Err()
 }
 
 // UnsettledBetween lists an instrument's markets that closed in [since, before) with no result

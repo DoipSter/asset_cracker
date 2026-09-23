@@ -119,12 +119,29 @@ type LadderRow struct {
 	Model    map[string]any
 }
 
+// Quotes is the ladder's top of book in the shape the engine and the Paper read: the same
+// prices, the one displayed level per side the list endpoint gives.
+func (q LadderQuotes) Quotes() Quotes {
+	return Quotes{YesBid: q.YesBid, YesAsk: q.YesAsk, NoBid: q.NoBid, NoAsk: q.NoAsk, YesAskSize: q.YesAskSize,
+		YesBids: q.YesBids, NoBids: q.NoBids, YesLevels: len(q.YesBids), NoLevels: len(q.NoBids)}
+}
+
+// LadderEngine is a runner that trades this series' legs, in simulation: the third engine's
+// runner over the ladder family. The recorder hands it each leg's snapshot after the row is
+// written (Inputs for the model's view, then Step with the row's id), and each result after it
+// is stored. nil means the series is recorded and nothing trades it, as before 2026-09-23.
+type LadderEngine interface {
+	Inputs(coin string, info MarketInfo, closes, at time.Time, price string) map[string]any
+	Step(ctx context.Context, coin string, evalID int64, at time.Time, marketID int64, info MarketInfo, closes time.Time, q Quotes, price string)
+	Settled(ctx context.Context, coin string, marketID int64, info MarketInfo, closes time.Time)
+}
+
 // LadderSink is where the recorder writes. It reaches the database and nothing else.
 type LadderSink interface {
 	// SaveMarkets records markets first seen and returns their ids by ticker.
 	SaveMarkets(ctx context.Context, ms []LadderNew) (map[string]int64, error)
-	// SaveRows appends evaluation rows.
-	SaveRows(ctx context.Context, rows []LadderRow) error
+	// SaveRows appends evaluation rows and returns their ids, in order.
+	SaveRows(ctx context.Context, rows []LadderRow) ([]int64, error)
 	// SaveResult stores a result if none is stored yet (first writer wins).
 	SaveResult(ctx context.Context, marketID int64, m MarketInfo) (bool, error)
 	// Unsettled lists this series' markets that closed in [since, before) with no result.
@@ -402,6 +419,10 @@ type LadderRecorder struct {
 	Pace   *Pacer           // shared by every recorder; nil never waits
 	Start  time.Duration    // delay before the first pass, to stagger the series
 	Now    func() time.Time // for tests
+	// Coin is the series' underlying as the engine names it ("BTC"), and Engine the runner that
+	// trades its legs. Both empty or nil: record only.
+	Coin   string
+	Engine LadderEngine
 
 	open      map[string]ladderKnown // markets seen open, by ticker
 	waiting   map[string]*awaiting   // closed, result not stored yet
@@ -516,7 +537,9 @@ func (r *LadderRecorder) pass(ctx context.Context) error {
 	if r.Price != nil {
 		price = r.Price()
 	}
+	trading := r.Engine != nil && r.Coin != ""
 	rows := make([]LadderRow, 0, len(points))
+	var looks []ladderPoint // the points behind rows, in the rows' order, for the engine
 	for i, p := range points {
 		k, ok := r.open[p.mk.Ticker]
 		if !ok || !p.row {
@@ -526,20 +549,44 @@ func (r *LadderRecorder) pass(ctx context.Context) error {
 		if i == probeAt {
 			model["probe"] = probe
 		}
+		if trading && p.twoSided {
+			// The model's view of this leg, journaled with the row as the rounds' poller does
+			// (under "v3"), so any minute's decision can be recomputed from the row.
+			if view := r.Engine.Inputs(r.Coin, p.mk.info(), p.mk.Closes, at, price); view != nil {
+				model["v3"] = view
+			}
+		}
 		rows = append(rows, LadderRow{At: at, MarketID: k.id, Price: price, Quotes: p.quotes, Model: model})
+		looks = append(looks, p)
 	}
 	wctx, cancel := context.WithTimeout(ctx, ladderWriteTimeout)
-	err = r.Sink.SaveRows(wctx, rows)
+	ids, err := r.Sink.SaveRows(wctx, rows)
 	cancel()
 	if err != nil {
 		return fmt.Errorf("save rows: %w", err)
 	}
+	if trading && len(ids) == len(rows) {
+		// One look per two-sided leg, with the row's id behind it. Step holds the runner's lock
+		// briefly per leg and gives up when it is busy; a leg skipped this minute is looked at
+		// the next.
+		for i, p := range looks {
+			if !p.twoSided {
+				continue
+			}
+			r.Engine.Step(ctx, r.Coin, ids[i], at, rows[i].MarketID, p.mk.info(), p.mk.Closes, p.quotes.Quotes(), price)
+		}
+	}
 	if !r.reported {
 		r.reported = true
-		slog.Info("ladder recorder: recording", "series", r.Series, "open_markets", len(points), "rows", len(rows))
+		slog.Info("ladder recorder: recording", "series", r.Series, "open_markets", len(points), "rows", len(rows), "trading", trading)
 	}
 	r.settle(ctx, at)
 	return nil
+}
+
+// info is the leg as the engine's market: ticker, strike, close.
+func (m LadderNew) info() MarketInfo {
+	return MarketInfo{Ticker: m.Ticker, FloorStrike: m.Strike, CloseTime: m.Closes.UTC().Format(time.RFC3339Nano)}
 }
 
 // probe fetches one market's order book right after the list and compares the two.
@@ -604,6 +651,10 @@ func (r *LadderRecorder) settle(ctx context.Context, now time.Time) {
 			if err != nil {
 				slog.Warn("ladder recorder: result not stored", "series", r.Series, "ticker", t, "err", err)
 				return
+			}
+			if r.Engine != nil && r.Coin != "" {
+				// The result is stored: now the engine settles what its buckets hold in this leg.
+				r.Engine.Settled(ctx, r.Coin, w.id, m, w.closes)
 			}
 			delete(r.waiting, t)
 			continue

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -107,8 +108,10 @@ func Run(version string) error {
 	} else if set {
 		ordersOn = saved
 	}
-	// One runner, always: with nothing held it is observe-only, and the buckets page can
-	// reload it into a trial without a process start.
+	// One runner per market family, always: with nothing held a runner is observe-only, and the
+	// buckets page can reload it into a trial without a process start. run3 holds the
+	// 15-minute rounds; runL the daily and weekly ladders (2026-09-23), the same code over
+	// store.FamilyLadders, fed by the ladder recorders below instead of the round pollers.
 	run3, err := runner.NewRunner3(ctx, runner.WrapStore3(db, faults), coins, runner.Options3{On: ordersOn, DatabaseName: cfg.DatabaseName()})
 	if err != nil {
 		return err
@@ -116,6 +119,26 @@ func Run(version string) error {
 	run3.Seed(ctx, client, cfg.UserAgent)
 	wg.Add(1)
 	go func() { defer wg.Done(); run3.Run(ctx) }()
+	runL, err := runner.NewRunner3(ctx, runner.WrapStore3(db, faults), coins,
+		runner.Options3{On: ordersOn, DatabaseName: cfg.DatabaseName(), Family: store.FamilyLadders, Prefix: ladderPrefix})
+	if err != nil {
+		return fmt.Errorf("ladder runner: %w", err)
+	}
+	// The ladder model's long volatility, from the last sixty daily candles of each coin: what a
+	// leg hours to days from its close is priced with. A coin without enough candles keeps the
+	// fast estimate, and the log says so.
+	for _, c := range coins {
+		closes, err := db.DailyCloses(ctx, c.Product, 61)
+		if sigma := engine.LongSigmaFromDaily(closes); err == nil && sigma > 0 {
+			runL.SetLongSigma(c.Coin, sigma)
+			slog.Info("ladder model: long volatility set", "coin", c.Coin, "daily_closes", len(closes), "sigma_per_sqrt_s", sigma, "daily_pct", sigma*math.Sqrt(86400)*100)
+		} else {
+			slog.Warn("ladder model: no long volatility; long legs are priced with the fast estimate", "coin", c.Coin, "daily_closes", len(closes), "err", err)
+		}
+	}
+	runners := []*runner.Runner3{run3, runL}
+	wg.Add(1)
+	go func() { defer wg.Done(); runL.Run(ctx) }()
 
 	// The tracked assets: what the home page lists and the trade stream follows, from the
 	// instrument table, seeded and switched-on alike. Prints are RECORDED (price_tick) only
@@ -129,8 +152,8 @@ func Run(version string) error {
 		go func() {
 			defer wg.Done()
 			coinbase.Stream(ctx, cfg.UserAgent, assets.Products, latest, func(t coinbase.Trade) {
-				if run3 != nil {
-					safely("observe", func() { run3.Observe(t) })
+				for _, r := range runners {
+					safely("observe", func() { r.Observe(t) })
 				}
 				select {
 				case trades <- t:
@@ -168,10 +191,18 @@ func Run(version string) error {
 	pace := kalshi.NewPacer(200 * time.Millisecond)
 	for i, in := range ladders {
 		priceFrom, _ := in.Spec["price_from"].(string)
+		// A ladder series whose coin the runners know is traded by the ladder runner in
+		// simulation; one whose coin they do not (DOGE, switched off) is recorded only.
+		var eng kalshi.LadderEngine
+		if _, known := coinOf[in.Symbol]; known || knownCoin(coins, in.Underlying) {
+			eng = runL
+		}
 		rec := &kalshi.LadderRecorder{Client: client, Series: in.Symbol, Pace: pace,
-			Sink:  &ladderSink{db: db, instrumentID: in.ID},
-			Price: freshPrice(latest, strings.TrimPrefix(priceFrom, "coinbase:")),
-			Start: 5*time.Second + time.Duration(i)*12*time.Second}
+			Sink:   &ladderSink{db: db, instrumentID: in.ID},
+			Price:  freshPrice(latest, strings.TrimPrefix(priceFrom, "coinbase:")),
+			Start:  5*time.Second + time.Duration(i)*12*time.Second,
+			Coin:   in.Underlying,
+			Engine: eng}
 		wg.Add(1)
 		go func() { defer wg.Done(); rec.Run(ctx) }()
 	}
@@ -228,16 +259,27 @@ func Run(version string) error {
 	}
 
 	src := web.Sources{Release: version, Assets: assets.Assets}
-	capital, dropCapital := ledgerCapital(db, run3.BucketIDs) // asked each time: a reload changes the held set
+	heldIDs := func() []int64 { // every bucket some runner holds; a reload changes the set
+		var ids []int64
+		for _, r := range runners {
+			ids = append(ids, r.BucketIDs()...)
+		}
+		return ids
+	}
+	capital, dropCapital := ledgerCapital(db, heldIDs) // asked each time: a reload changes the held set
 	src.Books = func() ([]runner.Book, store.Capital, bool) {
 		cap, ok := capital()
-		book := runner.Book{Engine: "v3", Halted: "a panic escaped the engine's Book"}
-		safely("book", func() { book = run3.Book() })
-		return []runner.Book{book}, cap, ok
+		books := make([]runner.Book, 0, len(runners))
+		for _, r := range runners {
+			book := runner.Book{Engine: "v3", Halted: "a panic escaped the engine's Book"}
+			safely("book", func() { book = r.Book() })
+			books = append(books, book)
+		}
+		return books, cap, ok
 	}
 	src.Markers = func(coin string, since float64) []runner.Marker {
 		var out []runner.Marker
-		safely("markers", func() { out = run3.Markers(coin, since) })
+		safely("markers", func() { out = run3.Markers(coin, since) }) // the home page charts the rounds
 		return out
 	}
 	for _, in := range instruments {
@@ -298,7 +340,13 @@ func Run(version string) error {
 			case <-ctx.Done():
 				return
 			case now := <-t.C:
-				err := snapshotValues(ctx, db, src, run3, now)
+				if n, err := db.ApplyDuePaydays(ctx, now); err != nil {
+					slog.Error("payday not applied", "err", err)
+				} else if n > 0 {
+					dropCapital()
+					slog.Info("payday applied", "count", n)
+				}
+				err := snapshotValues(ctx, db, src, runners, now)
 				switch {
 				case errors.Is(err, runner.ErrAwaitingSettlement):
 					slog.Warn("value snapshot skipped", "why", err)
@@ -323,6 +371,7 @@ func Run(version string) error {
 				doc, _ := live(context.Background())
 				sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				doc["engine"] = run3.Snapshot(sctx)
+				doc["ladder_engine"] = runL.Snapshot(sctx)
 				cancel()
 				return doc
 			}, src, web.Control{
@@ -331,31 +380,67 @@ func Run(version string) error {
 				Build:   buildVersion,
 				Presets: presetsJSON,
 				Shape:   shapeOf,
+				// A version lives in one family, so one runner holds its bucket: Reap asks each in
+				// turn and the one that knows the version answers. Both refusing by name means no
+				// runner holds it and no restake was asked for.
+				Drop: dropCapital,
 				Reap: func(rctx context.Context, versionID int64, restake bool) (web.Reaped, error) {
-					rep, err := run3.Reap(rctx, versionID, restake)
-					dropCapital() // a bucket closed or opened: the next snapshot reads the ledger
-					if err != nil {
+					var last error
+					for _, r := range runners {
+						rep, err := r.Reap(rctx, versionID, restake)
+						if err == nil {
+							dropCapital() // a bucket closed or opened: the next snapshot reads the ledger
+							return web.Reaped{Bucket: rep.Bucket, ReapedCents: rep.ReapedCents, Next: rep.Next, Held: rep.Held, Ordering: rep.MayOrder}, nil
+						}
+						last = err
 						var open runner.OpenPositions
-						if errors.As(err, &open) || errors.Is(err, runner.ErrNoHeldBucket) {
+						if errors.As(err, &open) {
 							return web.Reaped{}, web.ReapRefused{Why: err.Error()}
 						}
-						return web.Reaped{}, err
+						if !errors.Is(err, runner.ErrNoHeldBucket) && !errors.Is(err, store.ErrNoBucketEver) && !errors.Is(err, store.ErrBucketHeld) {
+							return web.Reaped{}, err
+						}
 					}
-					return web.Reaped{Bucket: rep.Bucket, ReapedCents: rep.ReapedCents, Next: rep.Next, Held: rep.Held, Ordering: rep.MayOrder}, nil
+					if errors.Is(last, runner.ErrNoHeldBucket) {
+						return web.Reaped{}, web.ReapRefused{Why: last.Error()}
+					}
+					return web.Reaped{}, last
 				},
 				EnvOn:  cfg.V3,
-				Status: run3.OrdersStatus,
-				Apply:  run3.SetOrders,
-				Hold:   run3.HoldForReset,
+				Status: run3.OrdersStatus, // the switch is one row; both runners read it, and both apply it below
+				Apply: func(on bool) string {
+					eff := run3.SetOrders(on)
+					runL.SetOrders(on)
+					return eff
+				},
+				Hold: func() {
+					for _, r := range runners {
+						r.HoldForReset()
+					}
+				},
 				Release: func() {
-					run3.ReleaseAfterReset()
+					for _, r := range runners {
+						r.ReleaseAfterReset()
+					}
 					dropCapital() // the books are gone: the next snapshot reads the ledger, not last minute's figure
 				},
-				Abort: run3.AbortReset,
+				Abort: func() {
+					for _, r := range runners {
+						r.AbortReset()
+					}
+				},
 				Reload: func(rctx context.Context) (int, int, error) {
-					report, err := run3.Reload(rctx)
+					var held, ordering int
+					var firstErr error
+					for _, r := range runners {
+						report, err := r.Reload(rctx)
+						held, ordering = held+report.Held, ordering+report.MayOrder
+						if err != nil && firstErr == nil {
+							firstErr = err
+						}
+					}
 					dropCapital() // the held set changed: likewise
-					return report.Held, report.MayOrder, err
+					return held, ordering, firstErr
 				},
 			})
 			web.AnalysisRoutes(ctx, mux, db, gate)

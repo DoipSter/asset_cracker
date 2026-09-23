@@ -16,6 +16,23 @@ empties them and starts again from the approved versions. A bucket that loses it
 less than the floor left is closed at that settlement: reaped into replenishment, frozen, not
 replaced.
 
+**Two market families, one engine** (2026-09-23). A version belongs to `kalshi15m`, the
+15-minute rounds, or `kalshiladder`, Kalshi's daily and weekly above/below ladders (`KXBTCD` and
+friends: a strike every $500, each leg open about a week, closing 5 pm ET). Each family has its
+own `Runner3` instance over the same engine code, its own Paper and held set, and its own bucket
+prefix (`kalshi15m3`, `kalshiladder3`); the buckets page's controls span both. The ladder runner
+is fed by the ladder recorders (`kalshi.LadderRecorder` with an `Engine`): each minute, every
+two-sided leg gets the model's view journaled with its row and one look by the engine; each
+stored result settles what the buckets hold. A leg more than an hour from its close is priced
+with the coin's **long volatility**, the standard deviation of its last sixty daily candle
+returns per sqrt-second (`engine.LongSigmaFromDaily`, set at start), not the five-minute
+estimate that prices the rounds; the view says which (`horizon`). The builder's **Markets**
+choice picks the family; a ladder shape must set `tau_max` above an hour, tau is in seconds
+(3 h = 10800, 30 h = 108000, 7 d = 604800), and the window cap is per close date, because every
+leg closing at the same instant is one window. Presets: Day Value, Day Favourite, Week Value.
+Designed from the model side on purpose: `docs/longshot-protocol.md` reserves the price-band
+question on these horizons for its one look each.
+
 **The bucket's lifecycle by hand** (each version row): **Reap** closes the version's bucket once
 nothing is open, what it holds going to the common pool and the bucket frozen with its record
 (`Runner3.Reap`, refused while a bet is on); **Reap & restake** does that and seeds "`<name>

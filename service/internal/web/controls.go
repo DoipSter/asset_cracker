@@ -68,6 +68,8 @@ type Control struct {
 	// Reap closes a version's held bucket by the operator's hand, into the common pool; with
 	// restake, or with nothing held, a fresh life is seeded in its place. Nil means no engine.
 	Reap func(ctx context.Context, versionID int64, restake bool) (Reaped, error)
+	// Drop forgets the cached capital read, so the next value snapshot sees a bucket just closed.
+	Drop func()
 }
 
 // Reaped is what a Reap did, for the page.
@@ -89,6 +91,7 @@ type Built struct {
 	Name, Blurb string
 	Params      []byte // engine.Params as JSON
 	Parent      string // "Scalper" or "Value": whose version 2 it descends from
+	Family      string // store.FamilyRounds or store.FamilyLadders: which runner holds its bucket
 	Control     bool   // a negative control, registered to be caught
 }
 
@@ -155,6 +158,12 @@ type controlStore interface {
 	ResetSim(ctx context.Context) (store.ResetCounts, error)
 	SimAccounts(ctx context.Context) ([]store.SimAccount, error)
 	Transfer(ctx context.Context, t store.ManualTransfer) (store.Transferred, error)
+	LookupBucket(ctx context.Context, bucketID int64) (store.BucketRef, error)
+	CloseOutBucket(ctx context.Context, bucketID int64) (store.ClosedOut, error)
+	OpenBank(ctx context.Context) (store.Bank, error)
+	ListPaydays(ctx context.Context) ([]store.Payday, error)
+	SchedulePayday(ctx context.Context, amountCents int64, everyDays int, note string, now time.Time) (store.Payday, error)
+	StopPayday(ctx context.Context, id int64) error
 }
 
 // versionOut is a version-3 row as the page sees it: the store's fields and, when the process
@@ -209,6 +218,25 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 			}
 			outVersions = append(outVersions, o)
 		}
+		bank, err := db.OpenBank(ctx)
+		if err != nil {
+			slog.Error("controls: bank", "err", err)
+			writeErr(w, http.StatusInternalServerError, "The bank could not be read.")
+			return
+		}
+		paydays, err := db.ListPaydays(ctx)
+		if err != nil {
+			slog.Error("controls: paydays", "err", err)
+			writeErr(w, http.StatusInternalServerError, "The paydays could not be read.")
+			return
+		}
+		if paydays == nil {
+			paydays = []store.Payday{}
+		}
+		var bankOut any
+		if bank.ID != 0 {
+			bankOut = bank
+		}
 		writeJSON(w, map[string]any{
 			"simulated": true,
 			"locked":    ctl.Key != "", // the page asks for the operator key before its first change
@@ -218,6 +246,8 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 				"id": policy.ID, "since_at": policy.EffectiveAt.UTC().Format(time.RFC3339), "note": policy.Note,
 				"winnings_bps": policy.Winnings, "replenish_bps": policy.Replenish, "tax_bps": policy.Tax, "fees_bps": policy.Fees,
 			},
+			"bank":    bankOut,
+			"paydays": paydays,
 		})
 	})
 
@@ -323,6 +353,88 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 		}
 		slog.Info("bucket reaped from the buckets page", "version", body.ID, "bucket", out.Bucket, "reaped_cents", out.ReapedCents, "next", out.Next)
 		writeJSON(w, out)
+	}))
+
+	// Close out one bucket without a reset: its cash goes to replenishment, it is frozen, and its
+	// bets, fills and decisions stay. A version the live engine holds is closed by that engine's
+	// reap, so its memory and the ledger agree. An old engine's bucket is closed in the ledger
+	// alone; those engines are not running.
+	mux.HandleFunc("POST /api/controls/bucket/close", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			writeErr(w, http.StatusServiceUnavailable, "The controls have no database.")
+			return
+		}
+		var body struct {
+			ID int64 `json:"id"`
+		}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		if body.ID == 0 {
+			writeErr(w, http.StatusBadRequest, "Name the bucket to close.")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), reloadBudget)
+		defer cancel()
+		ref, err := db.LookupBucket(ctx, body.ID)
+		if err != nil {
+			if errors.Is(err, store.ErrNoSuchBucket) {
+				writeErr(w, http.StatusNotFound, "That bucket is not on the books.")
+				return
+			}
+			slog.Error("controls: close lookup", "err", err)
+			writeErr(w, http.StatusInternalServerError, "The bucket could not be read.")
+			return
+		}
+		// The live engine closes its own bucket, unless it does not hold one (already gone from
+		// memory, or never loaded): then the ledger close is the whole of it.
+		if ref.Version >= 3 && ctl.Reap != nil {
+			out, err := ctl.Reap(ctx, ref.VersionID, false)
+			if err == nil {
+				if list != nil {
+					list.drop()
+				}
+				if ctl.Drop != nil {
+					ctl.Drop()
+				}
+				writeJSON(w, map[string]any{"bucket": out.Bucket, "reaped_cents": out.ReapedCents, "kept": true})
+				return
+			}
+			var refused ReapRefused
+			if !errors.As(err, &refused) || !strings.Contains(refused.Why, "holds no bucket") {
+				if errors.As(err, &refused) {
+					writeErr(w, http.StatusConflict, refused.Why)
+					return
+				}
+				slog.Error("controls: close", "err", err)
+				writeErr(w, http.StatusInternalServerError, "The bucket was not closed: "+err.Error())
+				return
+			}
+		}
+		closed, err := db.CloseOutBucket(ctx, body.ID)
+		if err != nil {
+			var open store.OpenContracts
+			switch {
+			case errors.As(err, &open):
+				writeErr(w, http.StatusConflict, open.Error())
+			case errors.Is(err, store.ErrAlreadyClosed):
+				writeErr(w, http.StatusConflict, "That bucket is already closed. Its record is kept.")
+			case errors.Is(err, store.ErrNoSuchBucket):
+				writeErr(w, http.StatusNotFound, "That bucket is not on the books.")
+			default:
+				slog.Error("controls: close out", "err", err)
+				writeErr(w, http.StatusInternalServerError, "The bucket was not closed: "+err.Error())
+			}
+			return
+		}
+		if list != nil {
+			list.drop()
+		}
+		if ctl.Drop != nil {
+			ctl.Drop()
+		}
+		slog.Info("bucket closed out from the buckets page", "bucket", closed.Name, "reaped_cents", closed.ReapedCents)
+		writeJSON(w, map[string]any{"bucket": closed.Name, "reaped_cents": closed.ReapedCents, "kept": true})
 	}))
 
 	// The simulated accounts money can be moved between, with balances.
@@ -448,7 +560,7 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 		ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 		defer cancel()
 		id, err := db.CreateVersion3(ctx, store.NewVersion3{Name: built.Name, Blurb: built.Blurb, Hypothesis: hyp.Hypothesis,
-			Params: built.Params, Parent: built.Parent, CodeRef: origin + "; release " + ctl.Version})
+			Params: built.Params, Parent: built.Parent, Family: built.Family, CodeRef: origin + "; release " + ctl.Version})
 		if err != nil {
 			if errors.Is(err, store.ErrVersionExists) {
 				writeErr(w, http.StatusConflict, built.Name+" already has a version 3. Give this one a different name.")
@@ -500,6 +612,67 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true})
+	}))
+
+	mux.HandleFunc("POST /api/controls/payday", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			writeErr(w, http.StatusServiceUnavailable, "The controls have no database.")
+			return
+		}
+		var body struct {
+			Cents     int64  `json:"cents"`
+			EveryDays int    `json:"every_days"`
+			Note      string `json:"note"`
+		}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		defer cancel()
+		p, err := db.SchedulePayday(ctx, body.Cents, body.EveryDays, body.Note, time.Now())
+		if err != nil {
+			var refused store.PaydayRefused
+			switch {
+			case errors.As(err, &refused):
+				writeErr(w, http.StatusBadRequest, refused.Error())
+			case errors.Is(err, store.ErrNoOpenBank):
+				writeErr(w, http.StatusConflict, "No bank is open.")
+			default:
+				slog.Error("controls: payday", "err", err)
+				writeErr(w, http.StatusInternalServerError, "The payday was not scheduled.")
+			}
+			return
+		}
+		writeJSON(w, p)
+	}))
+
+	mux.HandleFunc("POST /api/controls/payday/stop", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			writeErr(w, http.StatusServiceUnavailable, "The controls have no database.")
+			return
+		}
+		var body struct {
+			ID int64 `json:"id"`
+		}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		if body.ID == 0 {
+			writeErr(w, http.StatusBadRequest, "Name the payday to stop.")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		defer cancel()
+		if err := db.StopPayday(ctx, body.ID); err != nil {
+			if errors.Is(err, store.ErrNoPayday) {
+				writeErr(w, http.StatusNotFound, "That payday is not on this bank.")
+				return
+			}
+			slog.Error("controls: stop payday", "err", err)
+			writeErr(w, http.StatusInternalServerError, "The payday was not stopped.")
+			return
+		}
+		writeJSON(w, map[string]any{"id": body.ID, "enabled": false})
 	}))
 
 	mux.HandleFunc("POST /api/controls/reset", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {

@@ -53,7 +53,7 @@ func TestRegister(t *testing.T) {
 		t.Fatalf("presets: %v %+v", err, res)
 	}
 	var pl PresetList
-	if err := json.Unmarshal(mustJSON(t, res.StructuredContent), &pl); err != nil || len(pl.Presets) != 8 {
+	if err := json.Unmarshal(mustJSON(t, res.StructuredContent), &pl); err != nil || len(pl.Presets) != 11 {
 		t.Fatalf("presets answer: %v %d", err, len(pl.Presets))
 	}
 	res, err = sess.CallTool(ctx, &mcp.CallToolParams{Name: "strategy_build", Arguments: map[string]any{"name": "Tail", "exit": "hold", "lambda": 0.5, "side": "longshot", "min_vol_ratio": 1.5}})

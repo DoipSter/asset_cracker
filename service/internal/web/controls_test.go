@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/doipster/asset_cracker/service/internal/store"
 )
@@ -24,6 +25,11 @@ type fakeControls struct {
 	policySaved bool
 	steps       []string
 	created     []store.NewVersion3
+	closed      []int64
+	bank        store.Bank
+	paydays     []store.Payday
+	scheduled   []store.Payday
+	stopped     []int64
 }
 
 func (f *fakeControls) OrdersSetting(context.Context) (bool, bool, error) {
@@ -67,6 +73,62 @@ func (f *fakeControls) ResetSim(context.Context) (store.ResetCounts, error) {
 }
 func (f *fakeControls) SimAccounts(context.Context) ([]store.SimAccount, error) {
 	return []store.SimAccount{{ID: 1, Kind: "common_pool", Name: "common pool (sim)", BalanceCents: 5000}, {ID: 7, Kind: "bucket", Name: "kalshi15m3 Value v3 cash", BalanceCents: 93242}}, nil
+}
+func (f *fakeControls) LookupBucket(_ context.Context, id int64) (store.BucketRef, error) {
+	switch id {
+	case 30:
+		return store.BucketRef{ID: 30, VersionID: 4, Version: 2, Name: "kalshi15m2 Model v2", Status: "active"}, nil
+	case 31:
+		return store.BucketRef{ID: 31, VersionID: 4, Version: 2, Name: "still open", Status: "active"}, nil
+	case 10:
+		return store.BucketRef{ID: 10, VersionID: 4, Version: 2, Name: "old", Status: "frozen"}, nil
+	case 50:
+		return store.BucketRef{ID: 50, VersionID: 19, Version: 3, Name: "kalshi15m3 Scalper v3", Status: "active"}, nil
+	}
+	return store.BucketRef{}, store.ErrNoSuchBucket
+}
+func (f *fakeControls) CloseOutBucket(_ context.Context, id int64) (store.ClosedOut, error) {
+	f.closed = append(f.closed, id)
+	switch id {
+	case 10:
+		return store.ClosedOut{}, store.ErrAlreadyClosed
+	case 31:
+		return store.ClosedOut{}, store.OpenContracts{Name: "still open", Lots: 2}
+	}
+	return store.ClosedOut{Name: "kalshi15m2 Model v2", ReapedCents: 4400}, nil
+}
+func (f *fakeControls) OpenBank(context.Context) (store.Bank, error) {
+	if f.bank.ID == 0 && f.bank.Name == "" {
+		return store.Bank{ID: 1, Name: "House"}, nil
+	}
+	return f.bank, nil
+}
+func (f *fakeControls) ListPaydays(context.Context) ([]store.Payday, error) {
+	if f.paydays == nil {
+		return []store.Payday{}, nil
+	}
+	return f.paydays, nil
+}
+func (f *fakeControls) SchedulePayday(_ context.Context, amountCents int64, everyDays int, note string, now time.Time) (store.Payday, error) {
+	if amountCents <= 0 {
+		return store.Payday{}, store.PaydayRefused{"The amount must be above zero."}
+	}
+	if everyDays < 1 || everyDays > 366 {
+		return store.Payday{}, store.PaydayRefused{"The rhythm is a whole number of days, from 1 to 366."}
+	}
+	if f.bank.Name == "closed" {
+		return store.Payday{}, store.ErrNoOpenBank
+	}
+	p := store.Payday{ID: int64(len(f.scheduled) + 1), BankID: 1, AmountCents: amountCents, EveryDays: everyDays, NextAt: now.AddDate(0, 0, everyDays), Note: note}
+	f.scheduled = append(f.scheduled, p)
+	return p, nil
+}
+func (f *fakeControls) StopPayday(_ context.Context, id int64) error {
+	if id != 4 {
+		return store.ErrNoPayday
+	}
+	f.stopped = append(f.stopped, id)
+	return nil
 }
 func (f *fakeControls) Transfer(_ context.Context, t store.ManualTransfer) (store.Transferred, error) {
 	if t.To == 7 {
@@ -135,6 +197,43 @@ func TestReapTransferAndShapes(t *testing.T) {
 	}
 }
 
+// Close-out is per bucket. An old engine is closed in the ledger and its record stays. A live-engine
+// bucket is handed to that engine's reap, and is not restaked.
+func TestCloseOutOneBucket(t *testing.T) {
+	f := &fakeControls{}
+	var reaped []int64
+	var dropped int
+	mux := controlsMux(f, Control{
+		Drop: func() { dropped++ },
+		Reap: func(_ context.Context, id int64, restake bool) (Reaped, error) {
+			if restake {
+				t.Fatal("close out must not restake")
+			}
+			reaped = append(reaped, id)
+			return Reaped{Bucket: "kalshi15m3 Scalper v3", ReapedCents: 100}, nil
+		},
+	})
+	rec := postJSON(mux, "/api/controls/bucket/close", `{"id":30}`)
+	if rec.Code != 200 || len(reaped) != 0 || len(f.closed) != 1 || f.closed[0] != 30 || dropped != 1 || !strings.Contains(rec.Body.String(), `"kept":true`) || !strings.Contains(rec.Body.String(), `"reaped_cents":4400`) {
+		t.Fatalf("old engine %d %s reaped %v closed %v", rec.Code, rec.Body.String(), reaped, f.closed)
+	}
+	if rec = postJSON(mux, "/api/controls/bucket/close", `{"id":50}`); rec.Code != 200 || len(reaped) != 1 || reaped[0] != 19 || len(f.closed) != 1 {
+		t.Fatalf("live engine %d %s reaped %v closed %v", rec.Code, rec.Body.String(), reaped, f.closed)
+	}
+	if rec = postJSON(mux, "/api/controls/bucket/close", `{"id":10}`); rec.Code != 409 || !strings.Contains(rec.Body.String(), "already closed") {
+		t.Fatalf("already closed %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = postJSON(mux, "/api/controls/bucket/close", `{"id":31}`); rec.Code != 409 || !strings.Contains(rec.Body.String(), "still holds") {
+		t.Fatalf("open contracts %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = postJSON(mux, "/api/controls/bucket/close", `{"id":99}`); rec.Code != 404 {
+		t.Fatalf("missing %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = postJSON(mux, "/api/controls/bucket/close", `{}`); rec.Code != 400 {
+		t.Fatalf("no id %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func controlsMux(f *fakeControls, ctl Control) *http.ServeMux {
 	mux := http.NewServeMux()
 	controlRoutes(mux, f, &bucketList{}, ctl)
@@ -199,7 +298,7 @@ func TestBuilderRegistersADraft(t *testing.T) {
 			if s.Lambda <= 0 {
 				return Built{}, BuildRefused{"lambda must be above 0"}
 			}
-			return Built{Name: s.Name + " (conventions)", Blurb: "b", Params: []byte(`{"name":"x"}`), Parent: "Value"}, nil
+			return Built{Name: s.Name + " (conventions)", Blurb: "b", Params: []byte(`{"name":"x"}`), Parent: "Value", Family: "kalshi15m"}, nil
 		},
 	})
 	rec := httptest.NewRecorder()
@@ -211,8 +310,8 @@ func TestBuilderRegistersADraft(t *testing.T) {
 	if rec.Code != 200 || len(f.created) != 1 || f.created[0].Name != "Late (conventions)" || f.created[0].Hypothesis != "the market lags spot late" || f.created[0].Parent != "Value" {
 		t.Fatalf("register %d %s created %+v", rec.Code, rec.Body.String(), f.created)
 	}
-	if !strings.Contains(rec.Body.String(), `"status":"draft"`) || f.created[0].CodeRef != "built on the buckets page; release test" {
-		t.Fatalf("body %s coderef %s", rec.Body.String(), f.created[0].CodeRef)
+	if !strings.Contains(rec.Body.String(), `"status":"draft"`) || f.created[0].CodeRef != "built on the buckets page; release test" || f.created[0].Family != "kalshi15m" {
+		t.Fatalf("body %s created %+v", rec.Body.String(), f.created[0])
 	}
 	rec = postJSON(mux, "/api/controls/version/new", `{"name":"Zero","exit":"hold","lambda":0,"hypothesis":"x"}`)
 	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "lambda must be above 0") || len(f.created) != 1 {
@@ -356,5 +455,38 @@ func TestOrdersVersionAndPolicy(t *testing.T) {
 	rec = postJSON(mux, "/api/controls/policy", `{"winnings_bps":2000,"replenish_bps":1000,"tax_bps":0,"fees_bps":0,"note":"first"}`)
 	if rec.Code != 200 || !f.policySaved {
 		t.Fatalf("policy save %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPaydaySchedule(t *testing.T) {
+	next := time.Date(2026, 10, 6, 15, 0, 0, 0, time.UTC)
+	f := &fakeControls{paydays: []store.Payday{{ID: 4, BankID: 1, AmountCents: 50000, EveryDays: 14, NextAt: next, Note: "wages"}}}
+	mux := controlsMux(f, Control{})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/controls", nil))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"name":"House"`) || !strings.Contains(rec.Body.String(), `"amount_cents":50000`) {
+		t.Fatalf("bank %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = postJSON(mux, "/api/controls/payday", `{"cents":25000,"every_days":14,"note":"payday"}`); rec.Code != 200 || len(f.scheduled) != 1 || f.scheduled[0].AmountCents != 25000 || !strings.Contains(rec.Body.String(), `"every_days":14`) {
+		t.Fatalf("schedule %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = postJSON(mux, "/api/controls/payday", `{"cents":0,"every_days":14}`); rec.Code != 400 || !strings.Contains(rec.Body.String(), "above zero") {
+		t.Fatalf("zero %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = postJSON(mux, "/api/controls/payday", `{"cents":100,"every_days":0}`); rec.Code != 400 {
+		t.Fatalf("rhythm %d %s", rec.Code, rec.Body.String())
+	}
+	closed := &fakeControls{bank: store.Bank{Name: "closed"}}
+	if rec = postJSON(controlsMux(closed, Control{}), "/api/controls/payday", `{"cents":100,"every_days":7}`); rec.Code != 409 {
+		t.Fatalf("no bank %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = postJSON(mux, "/api/controls/payday/stop", `{"id":4}`); rec.Code != 200 || len(f.stopped) != 1 || f.stopped[0] != 4 {
+		t.Fatalf("stop %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = postJSON(mux, "/api/controls/payday/stop", `{"id":9}`); rec.Code != 404 {
+		t.Fatalf("missing payday %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = postJSON(mux, "/api/controls/payday/stop", `{}`); rec.Code != 400 {
+		t.Fatalf("no id %d %s", rec.Code, rec.Body.String())
 	}
 }

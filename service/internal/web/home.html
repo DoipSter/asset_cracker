@@ -231,9 +231,10 @@ summary h2{flex:1}summary .f{font-size:13px;font-weight:600}
 .ctl .go.armed{background:var(--ink);color:var(--paper)}
 .ctl .go.bad.armed{background:var(--dn);border-color:var(--dn);color:var(--paper)}
 .ctl .rates input{max-width:none}
-.ctl .go,.rlsave .go{display:inline-block;margin:8px 8px 0 0;min-height:36px;padding:0 12px;border:1px solid var(--ink);font:600 11px/36px var(--sans);letter-spacing:.08em;text-transform:uppercase;background:transparent;color:var(--ink);cursor:pointer}
-.ctl .go[aria-pressed=true]{background:var(--ink);color:var(--paper)}
-.ctl .go.bad{border-color:var(--dn);color:var(--dn)}
+.ctl .go,.rlsave .go,.bk .go{display:inline-block;margin:8px 8px 0 0;min-height:36px;padding:0 12px;border:1px solid var(--ink);font:600 11px/36px var(--sans);letter-spacing:.08em;text-transform:uppercase;background:transparent;color:var(--ink);cursor:pointer}
+.ctl .go[aria-pressed=true],.bk .go.armed{background:var(--ink);color:var(--paper)}
+.ctl .go.bad,.bk .go.bad{border-color:var(--dn);color:var(--dn)}
+.ctl .go.bad.armed,.bk .go.bad.armed{background:var(--dn);border-color:var(--dn);color:var(--paper)}
 .ctl .msg{min-height:1.2em;margin:6px 0 0;font:12.5px/1.35 var(--sans)}
 .ctl .ver{padding:6px 0;border-bottom:1px solid var(--hair)}
 @media(min-width:800px){.ctl .grid{grid-template-columns:1fr 1fr}}
@@ -323,7 +324,7 @@ footer a{color:inherit;text-decoration:underline;text-underline-offset:2px}
         <div class="scl"><div class="chips" id="scale" role="group" aria-label="Time scale for earned"></div><div id="spark"></div></div>
         <hr class="dbl">
       </div>
-      <div id="comp" aria-label="Composition"></div>
+      <div id="comp" aria-label="The bank"></div>
     </div>
     <div class="mid">
       <div class="rail" id="rail" role="group" aria-label="Assets"></div>
@@ -498,9 +499,15 @@ function renderAlerts(){var h=S.home||{},out="",raw=arr(h.halted),hn=haltedNames
   if(S.home&&h.simulated!==true)out+='<div class="alert soft">The service did not confirm simulated: true.</div>';
   setHTML($("alerts"),out)}
 
-/* ---------- home: lede, composition, rail ---------- */
-/* words of the page's own for composition lines, by key; the label is the API's, these are only the fallback and the small note under a line */
-var COMP_LABELS={v3:"Live engine",legacy:"Archived engines"},COMP_NOTES={v3:"honest fills: only what the recorded book displayed",legacy:"v1 and v2, no longer trading"};
+/* ---------- home: lede, the bank, rail ---------- */
+/* The balance sheet is the open bank. Deployed capital is the live engine, marked to market, and
+   it was allocated from this bank. Replenishment, the fee reserve, taxes and winnings are the four
+   set-asides; with deployed capital they are the total. Fees paid has already gone to the venue,
+   so it is listed and is not in the sum. A line the page has no words for is still shown, under
+   its own label. A reset closes this bank and opens the next one. */
+var COMP_NOTES={v3:"honest fills: only what the recorded book displayed",legacy:"v1 and v2, no longer trading"};
+function compLine(label,earned,value,opt){opt=opt||{};var b=opt.buckets,note=opt.note||"";
+  return'<div class="row'+(opt.quiet?" quiet":"")+'"><span>'+esc(label)+(num(b)!=null?' <span class="n">'+b+"</span>":"")+'</span><span class="f e '+(opt.noEarn?"":cls(earned))+'">'+(opt.noEarn?"":fig(earned,0,1))+'</span><span class="f v">'+fig(value)+"</span>"+(note?'<span class="note">'+note+"</span>":"")+"</div>"}
 function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.total:{};renderDateline();renderAlerts();
   var v=num(t.value_cents);
   if(v==null)setHTML($("total"),"—");else{var s=grp(Math.abs(v)/100,2),i=s.lastIndexOf(".");setHTML($("total"),(v<0?"(":"")+'<span class="cur">$</span>'+s.slice(0,i)+"<small>"+s.slice(i)+(v<0?")":"")+"</small>")}
@@ -513,15 +520,23 @@ function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.to
   chips($("scale"),SCALES,S.scale,"s");
   var sp=sparkPath(h.series,300,34);
   setHTML($("spark"),sp?'<svg class="spark" viewBox="0 0 300 34" preserveAspectRatio="none" role="img" aria-label="Total value over the period"><line x1="0" x2="300" y1="'+sp.y0.toFixed(1)+'" y2="'+sp.y0.toFixed(1)+'" stroke="var(--rule)" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/><path d="'+sp.d+'" fill="none" stroke="var(--ink)" stroke-opacity=".55" stroke-width="1.25" vector-effect="non-scaling-stroke"/></svg>':"");
-  var rows='<div class="row hd"><span class="k">Composition</span><span class="k e">Earned</span><span class="k v">Value</span></div>';
-  /* the lines are whatever the API sends, in its order; a line the page has no words for still shows, under its label or key.
-     A group that has never had anything in it (the third engine before it is staked: no live bucket, value 0, earned 0) is a quiet line:
-     all grey, figures as sent. buckets counts LIVE buckets only, so a group whose buckets all ran out and were frozen also has 0 of them,
-     but its earned figure is its real result: that line is drawn normally, its loss in the loss colour, and says the buckets are closed */
-  rows+=objs(h.composition).map(function(r){var note=COMP_NOTES[r.key],b0=num(r.buckets)===0,none=b0&&!num(r.value_cents)&&!num(r.earned_cents),closed=b0&&!none;
-    return'<div class="row'+(none?" quiet":"")+'"><span>'+esc(r.label||COMP_LABELS[r.key]||r.key||"—")+(num(r.buckets)!=null?' <span class="n">'+r.buckets+"</span>":"")+'</span><span class="f e '+cls(r.earned_cents)+'">'+fig(r.earned_cents,0,1)+'</span><span class="f v">'+fig(r.value_cents)+"</span>"+(note?'<span class="note">'+note+(none&&r.key==="v3"?" · no buckets yet":closed?" · all buckets closed":"")+"</span>":"")+"</div>"}).join("");
+  var bank=h.bank&&typeof h.bank==="object"?h.bank:{},bankName=str(bank.name)||"The bank",opened=bank.opened_at?iso(bank.opened_at):"";
+  var rows='<div class="row hd"><span class="k">'+esc(bankName)+'</span><span class="k e">Earned</span><span class="k v">Value</span></div>';
+  rows+='<p class="what">'+(opened?"Opened "+esc(opened)+". ":"")+"Buckets are allocated from this bank.</p>";
+  var by={};objs(h.composition).forEach(function(r){if(r.key)by[r.key]=r});
+  var live=by.v3||{},b0=num(live.buckets)===0,none=b0&&!num(live.value_cents)&&!num(live.earned_cents),closed=b0&&!none;
+  /* buckets counts LIVE buckets only, so a group whose buckets all ran out still has 0 of them and a real earned figure: that line is drawn normally and says the buckets are closed */
+  rows+=compLine("Deployed capital",live.earned_cents,live.value_cents,{buckets:live.buckets,quiet:none,note:COMP_NOTES.v3+(none?" · no buckets yet":closed?" · all buckets closed":"")});
+  objs(h.composition).forEach(function(r){if(r.key==="v3"||r.key==="legacy"||r.key==="money")return;rows+=compLine(r.label||r.key||"—",r.earned_cents,r.value_cents,{buckets:r.buckets})});
+  /* Set-asides in the order they are talked about, then the fee reserve, which is the rest of the sum.
+     Fees paid has already left for the venue: it is listed and is not in the total. A zero is a quiet
+     line, not a hidden one. None of these earned anything of their own, so that column is left blank. */
+  var m=h.money&&typeof h.money==="object"?h.money:{};
+  [["Replenishment",m.replenishment_cents],["Fees paid",m.venue_fees_paid_cents,"paid to the venue, not in the total"],["Taxes",m.tax_reserve_cents],["Winnings",m.winnings_cents],["Fee reserve",m.fee_reserve_cents]].forEach(function(p){
+    rows+=compLine(p[0],null,p[1],{noEarn:true,quiet:num(p[1])===0,note:p[2]||""})});
   rows+='<div class="row sum"><span>Total value</span><span class="f e '+c+'">'+fig(e,0,1)+'</span><span class="f v">'+fig(t.value_cents,1)+'</span></div><hr class="dbl" style="margin:0">';
-  rows+='<p class="memo"><i>Memo, outside the sum:</i><span>at risk <span class="f">'+fig(t.at_risk_cents)+'</span></span><span>unrealised <span class="f '+cls(t.unrealized_cents)+'">'+fig(t.unrealized_cents,0,1)+'</span></span><span>venue fees paid <span class="f">'+fig((h.money||{}).venue_fees_paid_cents)+"</span></span></p>";
+  var arch=by.legacy,held=arch&&(num(arch.value_cents)||num(arch.buckets));
+  rows+='<p class="memo"><i>Memo, outside the sum:</i><span>at risk <span class="f">'+fig(t.at_risk_cents)+'</span></span><span>unrealised <span class="f '+cls(t.unrealized_cents)+'">'+fig(t.unrealized_cents,0,1)+"</span></span>"+(held?'<span>old engines still hold <span class="f">'+fig(arch.value_cents)+"</span> — close them out on Buckets; the record stays</span>":"")+"</p>";
   setHTML($("comp"),rows);renderRail()}
 /* rail rows are built once per coin list and then only re-inked, so a tap or keyboard focus is never lost to a poll */
 var railSig=null;
@@ -656,10 +671,12 @@ function bucketRow(b,D){var eq=num(b.equity_cents),seed=num(b.seed_cents),hw=num
   if(seed&&eq!=null){var pe=pos(eq);bar='<i class="'+(eq>=seed?"up":"dn")+'" style="left:'+Math.min(50,pe).toFixed(1)+"%;width:"+Math.abs(pe-50).toFixed(1)+'%"></i>'}
   bar+='<s style="left:50%"></s>';if(seed&&hw!=null&&hw>seed*1.002)bar+='<u style="left:'+pos(hw).toFixed(1)+'%"></u>';
   var stTag=st==="active"?"active":'<span class="tag '+(st==="tripped"?"bad":st==="winding_down"?"warn":"")+'" style="margin-left:0">'+esc(st.replace("_"," "))+"</span>";
+  var close="";
+  if(st!=="frozen"&&num(b.id)!=null){var armed=S.armed==="close:"+b.id;close='<button type="button" class="go bad'+(armed?" armed":"")+'" data-act="close" data-id="'+b.id+'">'+(armed?"Sure? Close out":"Close out")+"</button>"}
   return'<div class="bk'+(st==="frozen"?" frozen":"")+'"><div class="t"><b>'+esc(str(b.strategy)||str(b.name)||"—")+"</b>"+(coin?'<span class="k">'+esc(coin[1])+"</span>":"")+(num(b.life)>1?'<span class="tag">life '+b.life+"</span>":"")+
     '<span class="f">'+fig(eq)+'</span><span class="f d '+cls(d)+'">'+pct(d,1)+"</span></div>"+
     '<div class="bar" role="img" aria-label="Equity '+usd(eq)+", seed "+usd(seed)+", high-water "+usd(hw)+'">'+bar+"</div>"+
-    '<div class="m"><span>'+stTag+"</span><span>life "+(num(b.life)!=null?b.life:"—")+"</span><span>"+(num(b.bets)!=null?b.bets:"—")+" bets</span><span>seed <span class=\"f\">"+usd(seed)+"</span></span><span>high <span class=\"f\">"+usd(hw)+"</span></span><span>allocated <span class=\"f\">"+usd(b.allocated_cents)+"</span></span>"+(num(b.at_risk_cents)?"<span>at risk <span class=\"f\">"+usd(b.at_risk_cents)+"</span></span>":"")+"</div></div>"}
+    '<div class="m"><span>'+stTag+"</span><span>life "+(num(b.life)!=null?b.life:"—")+"</span><span>"+(num(b.bets)!=null?b.bets:"—")+" bets</span><span>seed <span class=\"f\">"+usd(seed)+"</span></span><span>high <span class=\"f\">"+usd(hw)+"</span></span><span>allocated <span class=\"f\">"+usd(b.allocated_cents)+"</span></span>"+(num(b.at_risk_cents)?"<span>at risk <span class=\"f\">"+usd(b.at_risk_cents)+"</span></span>":"")+"</div>"+close+"</div>"}
 function pc(bps){return(bps/100).toFixed(bps%100?2:0)+"%"}
 /* The operator key: with AC_OPERATOR_KEY set on the service, every change needs it. Asked for once, kept for this tab, asked again if refused. */
 function opKey(){try{return sessionStorage.getItem("ac.key")||""}catch(e){return""}}
@@ -735,8 +752,15 @@ function verButtons(v){var id=v.id,b=function(act,label,cls){var armed=S.armed==
   if(v.held){out+=b("reap","Reap","bad")+b("restake","Reap & restake")}else if(num(v.lives)>0)out+=b("restake","Restake");
   return out}
 function controlsHTML(){var c=S.controls||{},o=c.orders||{},p=c.policy||{},vs=objs(c.versions),pressed=S.controls?!!o.on:false;
-  var vers=vs.length?vs.map(function(v){return'<div class="ver"><b>'+esc(v.name)+'</b> <span class="tag">'+esc(v.status)+'</span>'+(v.held?'':(num(v.lives)>0?' <span class="tag">no bucket</span>':''))+'<div>'+verButtons(v)+'</div></div>'}).join(""):'<p class="what">No version-3 strategy is registered. Scalper and Value trade after their four measured numbers are on the version and you approve it. Approval seeds a fresh $1,000 bucket at once.</p>';
-  return'<div class="ctl sec" id="j-controls"><span class="k">Operator · simulated money</span><h2>Controls</h2><p class="msg" id="ctl-msg">'+esc(S.msg||"")+'</p><div class="grid"><div><span class="k">Live engine</span><h3>New orders</h3><p class="what" id="ctl-orders">'+esc(ordersLine(o))+'</p><button type="button" class="go" data-act="orders-on" aria-pressed="'+(pressed?"true":"false")+'">On</button><button type="button" class="go" data-act="orders-off" aria-pressed="'+(!S.controls||pressed?"false":"true")+'">Off</button><h3>Version 3</h3>'+vers+builderHTML()+'</div><div><span class="k">Simulated money</span>'+transferHTML()+'<h3>Reset</h3><p class="what">Empties the simulated ledger, every bucket, the sim orders, and the value chart, then starts again: every approved version-3 strategy gets a fresh $1,000 bucket. Candles, quotes, market results, and the strategy registry remain. This places no order.</p><label for="ctl-confirm">Type reset sim</label><input id="ctl-confirm" data-k="ctl-confirm" type="text" autocomplete="off" value="'+esc(draft("ctl-confirm",""))+'"><div><button type="button" class="go bad" data-act="reset">Reset sim books</button></div></div></div></div>'}
+  var vers=vs.length?vs.map(function(v){return'<div class="ver"><b>'+esc(v.name)+'</b> <span class="tag">'+esc(v.status)+'</span>'+(v.family==="kalshiladder"?' <span class="tag">ladders</span>':'')+(v.held?'':(num(v.lives)>0?' <span class="tag">no bucket</span>':''))+'<div>'+verButtons(v)+'</div></div>'}).join(""):'<p class="what">No version-3 strategy is registered. Scalper and Value trade after their four measured numbers are on the version and you approve it. Approval seeds a fresh $1,000 bucket at once.</p>';
+  return'<div class="ctl sec" id="j-controls"><span class="k">Operator · simulated money</span><h2>Controls</h2><p class="msg" id="ctl-msg">'+esc(S.msg||"")+'</p><div class="grid"><div><span class="k">Live engine</span><h3>New orders</h3><p class="what" id="ctl-orders">'+esc(ordersLine(o))+'</p><button type="button" class="go" data-act="orders-on" aria-pressed="'+(pressed?"true":"false")+'">On</button><button type="button" class="go" data-act="orders-off" aria-pressed="'+(!S.controls||pressed?"false":"true")+'">Off</button><h3>Version 3</h3>'+vers+builderHTML()+'</div><div><span class="k">Simulated money</span>'+transferHTML()+paydayHTML()+'<h3>Reset</h3><p class="what">Closes this bank and opens the next one, empty. Every approved version-3 strategy is then allocated a fresh $1,000 from that bank. Candles, quotes, market results, and the strategy registry stay. This bank’s simulated books do not: a reset is a new bank, not a way to close one strategy. Closing one bucket keeps its bets. This places no order.</p><label for="ctl-confirm">Type reset sim</label><input id="ctl-confirm" data-k="ctl-confirm" type="text" autocomplete="off" value="'+esc(draft("ctl-confirm",""))+'"><div><button type="button" class="go bad" data-act="reset">Reset sim books</button></div></div></div></div>'}
+function paydayHTML(){var c=S.controls||{},bank=c.bank||{},name=str(bank.name)||"this bank",rows=objs(c.paydays);
+  var list=rows.length?rows.map(function(p){return'<div class="ver"><b>'+usd(p.amount_cents)+"</b> every "+p.every_days+" day"+(Number(p.every_days)===1?"":"s")+' <span class="n">next '+esc(iso(p.next_at))+"</span>"+(str(p.note)?' <span class="n">'+esc(p.note)+"</span>":"")+'<div><button type="button" class="go" data-act="payday-stop" data-id="'+p.id+'">Stop</button></div></div>'}).join(""):'<p class="what">None scheduled.</p>';
+  return'<h3>Paydays</h3><p class="what">A payday deposits into replenishment, which is where a new bucket is allocated from. It runs while '+esc(name)+' is open. The first one lands the number of days below from now, then on that rhythm. A reset opens the next bank and this schedule does not follow it.</p>'+
+    '<div class="rates"><div><label for="pd-amt">Amount ($)</label><input id="pd-amt" data-k="pd-amt" type="number" inputmode="decimal" min="0.01" step="0.01" value="'+esc(draft("pd-amt",""))+'"></div>'+
+    '<div><label for="pd-days">Every (days)</label><input id="pd-days" data-k="pd-days" type="number" inputmode="numeric" min="1" max="366" step="1" value="'+esc(draft("pd-days","14"))+'"></div>'+
+    '<div><label for="pd-note">Note</label><input id="pd-note" data-k="pd-note" type="text" maxlength="200" value="'+esc(draft("pd-note",""))+'" placeholder="payday"></div></div>'+
+    '<div><button type="button" class="go" data-act="payday">Schedule</button></div>'+list}
 /* ---------- the strategy builder ---------- */
 /* Every field is one of the engine's parameters (engine.Shape). What you set is recorded as a convention you chose; what you leave blank is inherited from the parent shape. Nothing here is a measurement. */
 var NB=[["nb-name","Name","text",""],["nb-blurb","One line about it","text",""]];
@@ -753,21 +777,22 @@ function builderHTML(){var ps=arr(S.presets),cur=draft("nb-preset","");
   return'<details class="nb" id="nb"'+(S.nbOpen?" open":"")+'><summary><h3>New strategy</h3><span class="f">builder</span></summary>'+
     '<p class="what">Pick a shape to fill the form, change what you like, name it, and say what it tests. It is registered as a draft; Approve above seeds $1,000 and it trades on the next look. Every number you set is recorded as a convention you chose; every one you leave blank is inherited from the parent shape. Nothing here is a measurement, and no shape can make the engine buy where its belief has no edge after costs.</p>'+
     nbSelect("nb-preset","Shape",presetOpts,cur)+(chosen?'<p class="what nb-what">'+esc(chosen.what)+'</p>':"")+
-    '<div class="rates">'+nbSelect("nb-exit","Exit",[["hold","hold to settlement"],["ev","sell on value or capture (ev)"]],"hold")+nbSelect("nb-side","Side",[["model","whichever the belief favours"],["favourite","the favourite only (priced above ½)"],["longshot","the longshot only (under ½)"]],"model")+
+    '<div class="rates">'+nbSelect("nb-family","Markets",[["kalshi15m","the 15-minute rounds"],["kalshiladder","the daily and weekly ladders (hours to days out; tau in seconds: 3 h = 10800, 1 d = 86400)"]],"kalshi15m")+
+    nbSelect("nb-exit","Exit",[["hold","hold to settlement"],["ev","sell on value or capture (ev)"]],"hold")+nbSelect("nb-side","Side",[["model","whichever the belief favours"],["favourite","the favourite only (priced above ½)"],["longshot","the longshot only (under ½)"]],"model")+
     NB.map(function(f){return nbField(f[0],f[1],f[3],f[2])}).join("")+NB_NUM.map(function(f){return nbField(f[0],f[1],f[2],"number")}).join("")+
     nbSelect("nb-sizing","Sizing",[["kelly","Kelly fraction of the edge"],["martingale","martingale: fixed stake, multiplied after each settled loss (a negative control)"]],"kelly")+'</div>'+
     '<label for="nb-hyp">Hypothesis: what this version is meant to test</label><textarea id="nb-hyp" data-k="nb-hyp" rows="3" maxlength="2000">'+esc(draft("nb-hyp",""))+'</textarea>'+
     '<label><input type="checkbox" id="nb-control" data-k="nb-control"'+(draft("nb-control","")==="on"?" checked":"")+'> Register as a negative control, expected to be caught, not to win</label>'+
     '<div><button type="button" class="go" data-act="build">Register as draft</button></div></details>'}
 function nbShape(){var g=function(id){var n=$(id);return n?String(n.value).trim():""},f=function(id){var v=g(id);if(v==="")return 0;var x=Number(v);return isFinite(x)?x:NaN};
-  var s={name:g("nb-name"),blurb:g("nb-blurb"),hypothesis:g("nb-hyp"),exit:g("nb-exit")||"hold",side:g("nb-side")||"model",
+  var s={name:g("nb-name"),blurb:g("nb-blurb"),hypothesis:g("nb-hyp"),family:g("nb-family")||"kalshi15m",exit:g("nb-exit")||"hold",side:g("nb-side")||"model",
     lambda:f("nb-lambda"),stale_cost:f("nb-stale"),stale_cost_sell:f("nb-stale-sell"),tau_min:f("nb-tau-min"),tau_max:f("nb-tau-max"),band_min:f("nb-band-min"),band_max:f("nb-band-max"),
     max_bets:Math.round(f("nb-max-bets")),min_gap:f("nb-min-gap"),min_hold:f("nb-min-hold"),take_capture:f("nb-capture"),kappa:f("nb-kappa"),window_cap_bps:Math.round(f("nb-cap")*100),
     min_vol_ratio:f("nb-vol"),sizing:g("nb-sizing")||"kelly",base_stake_cents:Math.round(f("nb-base")*100),multiplier:f("nb-mult"),max_doublings:Math.round(f("nb-doublings")),control:!!($("nb-control")&&$("nb-control").checked)};
   for(var k in s)if(typeof s[k]==="number"&&isNaN(s[k]))return{error:"A number could not be read: "+k.replace(/_/g," ")+"."};
   return s}
 function nbFill(p){var sh=(p&&p.shape)||{};var set=function(k,v){if(v==null||v===0||v==="")delete S.draft[k];else S.draft[k]=String(v)};
-  set("nb-name",sh.name);set("nb-blurb",sh.blurb);set("nb-hyp",sh.hypothesis||(p?p.what:""));S.draft["nb-exit"]=sh.exit||"hold";S.draft["nb-side"]=sh.side||"model";
+  set("nb-name",sh.name);set("nb-blurb",sh.blurb);set("nb-hyp",sh.hypothesis||(p?p.what:""));S.draft["nb-family"]=sh.family||"kalshi15m";S.draft["nb-exit"]=sh.exit||"hold";S.draft["nb-side"]=sh.side||"model";
   set("nb-lambda",sh.lambda);set("nb-stale",sh.stale_cost);set("nb-stale-sell",sh.stale_cost_sell);set("nb-tau-min",sh.tau_min);set("nb-tau-max",sh.tau_max);set("nb-band-min",sh.band_min);set("nb-band-max",sh.band_max);
   set("nb-max-bets",sh.max_bets);set("nb-min-gap",sh.min_gap);set("nb-min-hold",sh.min_hold);set("nb-capture",sh.take_capture);set("nb-kappa",sh.kappa);set("nb-cap",sh.window_cap_bps?sh.window_cap_bps/100:0);set("nb-vol",sh.min_vol_ratio);
   S.draft["nb-sizing"]=sh.sizing||"kelly";set("nb-base",sh.base_stake_cents?sh.base_stake_cents/100:0);set("nb-mult",sh.multiplier);set("nb-doublings",sh.max_doublings);S.draft["nb-control"]=sh.control?"on":""}
@@ -779,13 +804,14 @@ function mountBuckets(el,rest){var ae=document.activeElement,field=ae&&ae.closes
   setHTML($("bk-rest"),rest||"")}
 function renderBuckets(){var el=$("p-buckets"),d=S.buckets;
   if(!d){mountBuckets(el,'<p class="empty" style="margin-top:14px">'+(S.fail.buckets?"No answer from api/buckets yet. Trying again shortly.":"Reading the buckets…")+"</p>");return}
-  var bs=objs(d.buckets),G=[["v3","Live engine","honest fills",[]],["legacy","Archived engines","v1 and v2, frozen",[]]],D=.1;
+  var bs=objs(d.buckets),G=[["v3","Live engine","honest fills",[]],["legacy","Old engines","record kept",[]]],D=.1;
   bs.forEach(function(b){G[b.engine==="v3"?0:1][3].push(b);var s=num(b.seed_cents);if(s&&b.status!=="frozen"){[b.equity_cents,b.high_water_cents].forEach(function(v){if(num(v)!=null)D=Math.max(D,Math.abs(v/s-1))})}});
   var cut=D*1.05>.5;D=Math.min(.5,Math.ceil(D*1.05*20)/20);
   var out='<div class="lede"><span class="k">The money story</span><h2 style="font-size:26px;margin-top:3px">Buckets</h2><p class="what">Bar: equity against seed. The centre tick <b style="font-style:normal">|</b> is the seed, the fill runs from it to equity, and the bracket <b style="font-style:normal">]</b> marks high water. Every bar spans ±'+Math.round(D*100)+"% of seed"+(cut?"; a bar that reaches the edge is cut off there":"")+". “Allocated” is the sustainment allocation taken to date.</p>"+[d.buckets_error,d.capital_error].filter(str).map(function(m){return'<p class="what"><b>Not current.</b> '+esc(m)+"</p>"}).join("")+
     '<div class="jump" role="group" aria-label="Jump to">'+[["controls","Controls"],["g0","Live engine"]].concat(G[1][3].length?[["g1","Archived"]]:[],[["rule","Allocation rule"],["money","Set aside"],["ev","Notices"]]).map(function(j){return'<button type="button" data-k="j'+j[0]+'" data-j="j-'+j[0]+'">'+j[1]+"</button>"}).join("")+'</div></div><div class="cols">';
   G.forEach(function(g,gi){if(g[0]==="legacy"&&!g[3].length)return;var eq=0,seed=0,al=0,live=0,fz=0;g[3].forEach(function(b){al+=num(b.allocated_cents)||0;if(b.status==="frozen"){fz++;return}live++;eq+=num(b.equity_cents)||0;seed+=num(b.seed_cents)||0});
     out+='<details class="grp sec" id="j-g'+gi+'" data-g="'+g[0]+'"'+(S.fold[g[0]]?"":" open")+'><summary data-k="sum'+gi+'"><h2>'+g[1]+(g[2]?" <small>"+g[2]+"</small>":"")+'</h2><span class="f">'+(g[3].length?usd(eq):"—")+"</span></summary>"+
+      (g[0]==="legacy"&&live?'<p class="what">Close one out on its own. What it holds goes to replenishment, and its bets stay, so the record is still there to learn from. This is not a reset.</p>':"")+
       (g[3].length?g[3].map(function(b){return bucketRow(b,D)}).join("")+'<div class="gsum"><span>'+live+" live bucket"+(live===1?"":"s")+(fz?" · "+fz+" closed":"")+"<small>live seed "+usd(seed)+" · allocated to date "+usd(al)+'</small></span><span class="f">'+usd(eq)+"</span></div>":'<p class="empty">None deployed.</p>')+"</details>"});
   out+="</div>";
   /* the rule in force */
@@ -837,8 +863,9 @@ $("p-buckets").addEventListener("click",function(e){var b=e.target.closest&&e.ta
   var fail=function(err){S.ctlBusy=0;say(err&&err.message?err.message:"The control did not go through.")};
   var done=function(m){S.ctlBusy=0;say(m);refreshBooks()};
   /* Reap and restake close a bucket: the first click arms the button, the second acts. Any other click disarms. */
-  if(act==="reap"||act==="restake"){var key=act+":"+b.getAttribute("data-id");if(S.armed!==key){S.armed=key;say(act==="reap"?"Reap closes the bucket: what it holds goes to the common pool and it is frozen with its record. Click again to do it.":"A fresh $1,000 life is seeded from the common pool (the owners cover any shortfall). Click again to do it.");return}S.armed=null}else if(S.armed){S.armed=null}
+  if(act==="reap"||act==="restake"||act==="close"){var key=act+":"+b.getAttribute("data-id");if(S.armed!==key){S.armed=key;say(act==="restake"?"A fresh $1,000 life is seeded from the common pool (the owners cover any shortfall). Click again to do it.":act==="close"?"Close out sends what this bucket holds to replenishment and freezes it. Its bets and record stay. Click again to do it.":"Reap closes the bucket: what it holds goes to the common pool and it is frozen with its record. Click again to do it.");return}S.armed=null}else if(S.armed){S.armed=null}
   S.ctlBusy=1;
+  if(act==="close"){post("api/controls/bucket/close",{id:Number(b.getAttribute("data-id"))},40000).then(function(j){done("Closed out "+(j.bucket||"the bucket")+": "+usd(j.reaped_cents)+" to replenishment. Its bets and record stay.")}).catch(fail);return}
   if(act==="reap"||act==="restake"){post("api/controls/version/reap",{id:Number(b.getAttribute("data-id")),restake:act==="restake"},40000).then(function(j){var m=j.bucket?"Reaped "+j.bucket+": "+usd(j.reaped_cents)+" to the common pool, frozen with its record.":"";if(j.next)m+=(m?" ":"")+"Seeded "+j.next+" with $1,000"+(num(j.ordering)>0?"; it trades on the next look if its version is approved.":"; held settle-only until its version is approved.");done(m||"Done.")}).catch(fail);return}
   if(act==="remix"){var v=null;objs((S.controls||{}).versions).forEach(function(x){if(String(x.id)===b.getAttribute("data-id"))v=x});if(!v||!v.shape){S.ctlBusy=0;say("That version has no shape to remix.");return}
     var sh=JSON.parse(JSON.stringify(v.shape));sh.name=(sh.name||"")+" remix";nbFill({shape:sh,what:""});S.draft["nb-hyp"]="";S.draft["nb-preset"]="";S.nbOpen=true;S.ctlBusy=0;say("The builder holds "+v.name+"'s numbers. Change what you think went wrong, name it, say what the remix tests, and register it.");
@@ -856,7 +883,11 @@ $("p-buckets").addEventListener("click",function(e){var b=e.target.closest&&e.ta
   if(act==="policy"){var rates=["rl-w","rl-repl","rl-tax","rl-fee"].map(bpsOf);if(rates.some(function(n){return n==null})){S.ctlBusy=0;say("Enter each rate as a percentage.");return}
     if(rates.reduce(function(a,b){return a+b},0)>10000){S.ctlBusy=0;say("The four rates add up to more than 100%.");return}
     post("api/controls/policy",{winnings_bps:rates[0],replenish_bps:rates[1],tax_bps:rates[2],fees_bps:rates[3],note:($("rl-note")||{}).value||""}).then(function(){["rl-w","rl-repl","rl-tax","rl-fee","rl-note"].forEach(function(k){delete S.draft[k]});unfocus();done("The rule is set; it applies from the next settlement of a bucket above its high water.")}).catch(fail);return}
-  if(act==="reset"){post("api/controls/reset",{confirm:($("ctl-confirm")||{}).value||""},300000).then(function(j){delete S.draft["ctl-confirm"];var box=$("ctl-confirm");if(box)box.value="";var c=j.cleared||{};done(afterLoad(j,"Cleared "+(num(c.buckets)||0)+" buckets, "+(num(c.orders)||0)+" orders, and "+(num(c.transfers)||0)+" transfers.",true))}).catch(fail)}});
+  if(act==="payday"){var cents=Math.round(Number(String(($("pd-amt")||{}).value||"").trim())*100),days=Math.round(Number(($("pd-days")||{}).value||""));
+    if(!(cents>0)){S.ctlBusy=0;say("Enter the payday in dollars.");return}if(!(days>=1)){S.ctlBusy=0;say("Enter how many days between paydays.");return}
+    post("api/controls/payday",{cents:cents,every_days:days,note:($("pd-note")||{}).value||""},20000).then(function(j){["pd-amt","pd-note"].forEach(function(k){delete S.draft[k]});done("Payday scheduled: "+usd(j.amount_cents)+" every "+j.every_days+" day"+(Number(j.every_days)===1?"":"s")+", first on "+iso(j.next_at)+".")}).catch(fail);return}
+  if(act==="payday-stop"){post("api/controls/payday/stop",{id:Number(b.getAttribute("data-id"))},20000).then(function(){done("That payday is stopped. It will not pay again.")}).catch(fail);return}
+  if(act==="reset"){post("api/controls/reset",{confirm:($("ctl-confirm")||{}).value||""},300000).then(function(j){delete S.draft["ctl-confirm"];var box=$("ctl-confirm");if(box)box.value="";var c=j.cleared||{};done(afterLoad(j,"Closed this bank and opened the next one. Cleared "+(num(c.buckets)||0)+" buckets, "+(num(c.orders)||0)+" orders, and "+(num(c.transfers)||0)+" transfers.",true))}).catch(fail)}});
 /* afterLoad says what the engine did with the change: seeded and trading, held settle-only, empty, or healing on its own. */
 function afterLoad(j,lead,starting){j=j||{};var held=num(j.held)||0,ord=num(j.ordering)||0;
   if(j.effective==="next-start")return lead+" This process has no engine; the next start of the service loads it.";

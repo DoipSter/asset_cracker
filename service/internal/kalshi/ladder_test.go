@@ -227,9 +227,34 @@ func (f *ladderFake) SaveMarkets(_ context.Context, ms []LadderNew) (map[string]
 	}
 	return out, nil
 }
-func (f *ladderFake) SaveRows(_ context.Context, rows []LadderRow) error {
+func (f *ladderFake) SaveRows(_ context.Context, rows []LadderRow) ([]int64, error) {
 	f.rows = append(f.rows, rows)
-	return nil
+	ids := make([]int64, len(rows))
+	for i := range rows {
+		f.next++
+		ids[i] = f.next
+	}
+	return ids, nil
+}
+
+// engineFake records what the recorder hands an engine: one Inputs and one Step per two-sided
+// leg with the row's id, and a Settled per stored result.
+type engineFake struct {
+	inputs, steps []string
+	stepIDs       []int64
+	settled       []string
+}
+
+func (e *engineFake) Inputs(coin string, info MarketInfo, closes, at time.Time, price string) map[string]any {
+	e.inputs = append(e.inputs, coin+"|"+info.Ticker+"|"+price)
+	return map[string]any{"v": 3, "ok": true, "p_model": 0.5}
+}
+func (e *engineFake) Step(_ context.Context, coin string, evalID int64, at time.Time, marketID int64, info MarketInfo, closes time.Time, q Quotes, price string) {
+	e.steps = append(e.steps, coin+"|"+info.Ticker+"|"+q.YesBid+"/"+q.NoBid)
+	e.stepIDs = append(e.stepIDs, evalID)
+}
+func (e *engineFake) Settled(_ context.Context, coin string, marketID int64, info MarketInfo, closes time.Time) {
+	e.settled = append(e.settled, coin+"|"+info.Ticker+"|"+info.Result)
 }
 func (f *ladderFake) SaveResult(_ context.Context, id int64, m MarketInfo) (bool, error) {
 	_, had := f.results[id]
@@ -279,8 +304,9 @@ func TestLadderPassesRecordProbeAndSettle(t *testing.T) {
 	client := NewClient("test")
 	client.base = srv.URL
 	sink := &ladderFake{results: map[int64]string{}}
+	eng := &engineFake{}
 	r := &LadderRecorder{Client: client, Sink: sink, Series: "KXBTCD", Price: func() string { return "115000.5" },
-		Now: func() time.Time { return now }}
+		Now: func() time.Time { return now }, Coin: "BTC", Engine: eng}
 	ctx := context.Background()
 
 	if err := r.pass(ctx); err != nil {
@@ -291,6 +317,14 @@ func TestLadderPassesRecordProbeAndSettle(t *testing.T) {
 	}
 	if len(sink.rows) != 1 || len(sink.rows[0]) != 1 {
 		t.Fatalf("first pass wrote %d rows, want 1 (TWO: only a two-sided book gets a row)", len(sink.rows[0]))
+	}
+	// The engine saw the one two-sided leg: its view is journaled with the row, and it was
+	// stepped with that row's id and the top of book in the engine's shape.
+	if len(eng.inputs) != 1 || eng.inputs[0] != "BTC|TWO|115000.5" || len(eng.steps) != 1 || eng.steps[0] != "BTC|TWO|0.4000/0.5500" {
+		t.Fatalf("engine inputs %v steps %v", eng.inputs, eng.steps)
+	}
+	if v, ok := sink.rows[0][0].Model["v3"].(map[string]any); !ok || v["p_model"] != 0.5 || eng.stepIDs[0] != sink.next {
+		t.Fatalf("row model %v, step id %v (rows' last id %d)", sink.rows[0][0].Model, eng.stepIDs, sink.next)
 	}
 	probes := 0
 	for _, row := range sink.rows[0] {
@@ -331,6 +365,9 @@ func TestLadderPassesRecordProbeAndSettle(t *testing.T) {
 	}
 	if len(sink.rows[2]) != 0 {
 		t.Errorf("wrote %d rows for closed markets", len(sink.rows[2]))
+	}
+	if len(eng.settled) != 5 || eng.settled[0][:4] != "BTC|" || !strings.HasSuffix(eng.settled[0], "|yes") {
+		t.Errorf("the engine settled %v, want the five results", eng.settled)
 	}
 	if len(sink.results) != 5 || len(r.waiting) != 0 || len(r.open) != 0 {
 		t.Errorf("results %v, still waiting on %d, open %d; want all five stored", sink.results, len(r.waiting), len(r.open))

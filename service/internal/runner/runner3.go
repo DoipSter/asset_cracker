@@ -57,6 +57,27 @@ type Options3 struct {
 	DatabaseName string
 	// Now is the clock, for tests. nil means time.Now.
 	Now func() time.Time
+	// Family is the strategy family this runner holds, and Prefix the bucket-name prefix its
+	// buckets carry (also the key its engine state is saved under). Empty means the 15-minute
+	// rounds, kalshi15m / kalshi15m3, as before there were two runners. The ladder runner is
+	// the same code over store.FamilyLadders with prefix "kalshiladder3": a second instance, a
+	// second Paper, a second held set, one engine package.
+	Family, Prefix string
+}
+
+// family and prefix are the options with their defaults made explicit.
+func (o Options3) family() string {
+	if o.Family == "" {
+		return family3
+	}
+	return o.Family
+}
+
+func (o Options3) prefix() string {
+	if o.Prefix == "" {
+		return engine3
+	}
+	return o.Prefix
 }
 
 const (
@@ -265,7 +286,7 @@ func (o Options3) load(ctx context.Context, db Store3, on bool) (*loaded3, error
 	plumb := map[int64]bool{}
 	var names []string
 	if on {
-		versions, err := db.TradableVersions(ctx, family3, version3)
+		versions, err := db.TradableVersions(ctx, o.family(), version3)
 		if err != nil {
 			return nil, fmt.Errorf("v3 tradable versions: %w", err)
 		}
@@ -282,14 +303,14 @@ func (o Options3) load(ctx context.Context, db Store3, on bool) (*loaded3, error
 	}
 	// ALWAYS, in every mode: a settlement cannot be written without the service actor and the
 	// venue's ledger id, and this is the only function that returns them.
-	setup, err := db.EnsureSimSetup(ctx, engine3, family3, version3, names, seed3Cents)
+	setup, err := db.EnsureSimSetup(ctx, o.prefix(), o.family(), version3, names, seed3Cents)
 	if err != nil {
 		return nil, fmt.Errorf("v3 sim setup: %w", err)
 	}
 	l.setup = setup
 
 	// 2. What is held: every sim bucket of the family's version 3 that is not frozen.
-	held, err := db.HeldBuckets(ctx, family3, version3)
+	held, err := db.HeldBuckets(ctx, o.family(), version3)
 	if err != nil {
 		return nil, fmt.Errorf("v3 held buckets: %w", err)
 	}
@@ -392,7 +413,7 @@ func NewRunner3(ctx context.Context, db Store3, coins []Coin3, opts Options3) (*
 		return nil, fmt.Errorf("v3 model: %w", err)
 	}
 	var saved savedState3
-	if found, err := db.LoadEngineState(ctx, engine3, &saved); err != nil {
+	if found, err := db.LoadEngineState(ctx, opts.prefix(), &saved); err != nil {
 		slog.Warn("v3 could not load its learned offsets; it starts from the constants", "err", err) // costs no money (plan 5.4, step 6)
 	} else if found {
 		for coin, offsets := range saved.Offsets {
@@ -828,6 +849,10 @@ func (r *Runner3) Inputs(coin string, info kalshi.MarketInfo, closes, at time.Ti
 	r.coinMu.Unlock()
 	return view.Journal()
 }
+
+// SetLongSigma gives a coin's model its long volatility (engine.LongSigmaFromDaily), the one a
+// market more than an hour from its close is priced with. The model's mutex only.
+func (r *Runner3) SetLongSigma(coin string, sigma float64) { r.model.SetLongSigma(coin, sigma) }
 
 // Observe takes a trade print for whichever coin uses that product. The model's mutex only.
 func (r *Runner3) Observe(t coinbase.Trade) {
@@ -1551,7 +1576,7 @@ func (r *Runner3) saveState(ctx context.Context) {
 	}
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeBudget3)
 	defer cancel()
-	if err := r.db.SaveEngineState(wctx, engine3, state); err != nil {
+	if err := r.db.SaveEngineState(wctx, r.opts.prefix(), state); err != nil {
 		r.stateDirty.Store(true)                                                                 // try again next tick
 		slog.Warn("v3 could not save its learned offsets; no money depends on them", "err", err) // plan 5.4, step 6
 	}
@@ -1918,7 +1943,7 @@ func (r *Runner3) restartNotes(ctx context.Context) (notes []string) {
 	qctx, cancel := context.WithTimeout(ctx, writeBudget3)
 	defer cancel()
 	notes = []string{}
-	tradable, err := r.db.TradableVersions(qctx, family3, version3)
+	tradable, err := r.db.TradableVersions(qctx, r.opts.family(), version3)
 	if err != nil {
 		return append(notes, "the versions' statuses could not be read: "+err.Error())
 	}
