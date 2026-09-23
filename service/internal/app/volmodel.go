@@ -83,19 +83,34 @@ func (v *volModel) refresh(ctx context.Context) {
 			slog.Warn("vol model: no forecast", "coin", c.Coin, "err", err)
 			continue
 		}
-		sigma := engine.SigmaPerSqrtSecond(f)
+		// The sixty-day mean the ladders used before, as the alternative the holdout judges.
+		lo := max(0, len(rv)-60)
+		naive := 0.0
+		for _, x := range rv[lo:] {
+			naive += x
+		}
+		naive /= float64(len(rv) - lo)
+		// The holdout chooses: whichever forecast did better on the last ninety days the fit
+		// never saw is the one the ladders are priced with. On the record the first fit
+		// (2026-09-23) won on BTC and lost on ETH, so this is not a formality.
+		chosen, method := f, "har"
+		attrs := []any{"coin", c.Coin, "days", len(rv), "har_c", h.C, "har_day", h.Bd, "har_week", h.Bw, "har_month", h.Bm, "r2_in_sample", h.R2,
+			"har_daily_pct", math.Sqrt(f) * 100, "naive60_daily_pct", math.Sqrt(naive) * 100}
+		if ho, err := engine.HoldoutHAR(rv, volHoldout); err == nil {
+			attrs = append(attrs, "holdout_days", ho.Days, "holdout_mae_log_har", ho.HAR, "holdout_mae_log_naive60", ho.Naive)
+			if ho.Naive < ho.HAR && naive > 0 {
+				chosen, method = naive, "naive60"
+			}
+		}
+		sigma := engine.SigmaPerSqrtSecond(chosen)
 		v.mu.Lock()
-		v.forecast[c.Coin], v.har[c.Coin] = f, h
+		v.forecast[c.Coin], v.har[c.Coin] = chosen, h
 		v.mu.Unlock()
 		if v.target != nil {
 			v.target.SetLongSigma(c.Coin, sigma)
 		}
-		attrs := []any{"coin", c.Coin, "days", len(rv), "har_c", h.C, "har_day", h.Bd, "har_week", h.Bw, "har_month", h.Bm, "r2_in_sample", h.R2,
-			"forecast_daily_pct", math.Sqrt(f) * 100, "sigma_per_sqrt_s", sigma}
-		if ho, err := engine.HoldoutHAR(rv, volHoldout); err == nil {
-			attrs = append(attrs, "holdout_days", ho.Days, "holdout_mae_log_har", ho.HAR, "holdout_mae_log_naive60", ho.Naive)
-		}
-		slog.Info("vol model: HAR-RV fitted; the ladder runner's long volatility is the forecast", attrs...)
+		attrs = append(attrs, "chosen", method, "forecast_daily_pct", math.Sqrt(chosen)*100, "sigma_per_sqrt_s", sigma)
+		slog.Info("vol model: fitted; the ladder runner's long volatility is the forecast the holdout preferred", attrs...)
 	}
 }
 
