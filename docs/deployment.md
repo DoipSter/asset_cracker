@@ -42,7 +42,9 @@ Database roles in prod:
 | `assetcracker` | select and insert; update only the columns listed in `db/grants.sql`. No delete, no truncate, no DDL, so it cannot disable the triggers that keep the ledger append-only |
 | `assetcracker_ro` | read-only. Analysis and the MCP server. `acdeploy` is a member and connects only to take this role |
 
-The agent works only as `acdeploy`. Admin steps are handed to Brad as a command to run.
+The agent works only as `acdeploy`. Admin steps are handed to Brad as a command to run. A prod
+release is the agent's to run, at Brad's word, through `deploy/pi/deploy.sh prod` and its
+pre-flight (below); until 2026-09-23 the rule was that only Brad released, and TSK-37 said so.
 
 ## One-time setup
 
