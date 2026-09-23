@@ -131,7 +131,8 @@ func (s *Store) AnalysisModelVersions(ctx context.Context) ([]int64, error) {
 func (s *Store) AnalysisBuckets(ctx context.Context) ([]AnalysisBucket, error) {
 	rows, err := s.pool.Query(ctx, `
 		select b.id, b.strategy_version_id, st.name, v.version, coalesce((v.params->>'anti')::boolean, false),
-		       b.status = 'frozen', b.replaced_by_bucket_id is not null, b.ledger_account_id
+		       b.status = 'frozen', b.replaced_by_bucket_id is not null, b.ledger_account_id,
+		       coalesce((select sum(k.winnings_cents + k.replenish_cents + k.tax_cents + k.fees_cents) from bucket_skim k where k.bucket_id = b.id), 0)::bigint
 		  from bucket b join strategy_version v on v.id = b.strategy_version_id join strategy st on st.id = v.strategy_id
 		 where b.mode = 'sim' and st.family = 'kalshi15m' order by b.id`)
 	if err != nil {
@@ -141,7 +142,7 @@ func (s *Store) AnalysisBuckets(ctx context.Context) ([]AnalysisBucket, error) {
 	var out []AnalysisBucket
 	for rows.Next() {
 		var b AnalysisBucket
-		if err := rows.Scan(&b.ID, &b.VersionID, &b.Strategy, &b.Version, &b.Anti, &b.Frozen, &b.Replaced, &b.LedgerAccount); err != nil {
+		if err := rows.Scan(&b.ID, &b.VersionID, &b.Strategy, &b.Version, &b.Anti, &b.Frozen, &b.Replaced, &b.LedgerAccount, &b.AllocatedCents); err != nil {
 			return nil, err
 		}
 		out = append(out, b)

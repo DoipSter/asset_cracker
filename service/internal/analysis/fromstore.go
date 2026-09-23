@@ -31,7 +31,7 @@ func BucketsFrom(rows []store.AnalysisBucket) ([]Bucket, map[int64]int64) {
 	out := make([]Bucket, 0, len(rows))
 	ledger := map[int64]int64{}
 	for _, r := range rows {
-		b := Bucket{ID: r.ID, VersionID: r.VersionID, Strategy: r.Strategy, Frozen: r.Frozen, Replaced: r.Replaced,
+		b := Bucket{ID: r.ID, VersionID: r.VersionID, Strategy: r.Strategy, Frozen: r.Frozen, Replaced: r.Replaced, AllocatedCents: r.AllocatedCents,
 			Engine: fmt.Sprintf("v%d", r.Version), World: "real"}
 		if r.Anti {
 			b.World, b.Strategy = "anti", strings.TrimPrefix(r.Strategy, "Anti ")

@@ -18,6 +18,8 @@ type Bucket struct {
 	World         string // "real" or "anti"
 	Frozen        bool
 	Replaced      bool // ran out and was staked again: the next life is another bucket
+	// AllocatedCents is the sustainment allocation taken from this bucket to date.
+	AllocatedCents int64
 }
 
 // Coverage says how much of the settled history the figures rest on. The per-market aggregates
@@ -111,12 +113,16 @@ type Fills struct {
 }
 
 type LeaderRow struct {
-	VersionID          int64    `json:"strategy_version_id"`
-	Strategy           string   `json:"strategy"`
-	Engine             string   `json:"engine"`
-	World              string   `json:"world"`
-	Lives              int      `json:"lives"`
-	BookCents          int64    `json:"book_cents"` // cash plus open bets AT COST. Not equity: api/buckets marks the same bets at the bid
+	VersionID int64  `json:"strategy_version_id"`
+	Strategy  string `json:"strategy"`
+	Engine    string `json:"engine"`
+	World     string `json:"world"`
+	Lives     int    `json:"lives"`
+	BookCents int64  `json:"book_cents"` // cash plus open bets AT COST. Not equity: api/buckets marks the same bets at the bid
+	// AllocatedCents is the sustainment allocation taken from the version's buckets to date,
+	// every life. lifetime_pnl_cents is what the strategy earned; less this is what its buckets
+	// kept, which is what the bar on the buckets page moves by.
+	AllocatedCents     int64    `json:"allocated_cents"`
 	LifetimePnLCents   int64    `json:"lifetime_pnl_cents"`
 	Bets               int      `json:"bets"`
 	Windows            int      `json:"windows"`
@@ -205,6 +211,7 @@ const (
 		"Proceeds and cost are the recorded ones pro rata, fees inside; the fee's round-up to a cent is not recomputed, so a sale can be off by under a cent."
 	leaderboardWhat = "Per strategy version. Windows are the independent sample, not bets. Lifetime includes every earlier life of a strategy that ran out. " +
 		"lifetime_pnl_cents is realised trading P&L on settled windows (payouts and sale proceeds less what the bets cost, fees inside), before any sustainment allocation; " +
+		"allocated_cents is that allocation, taken from the version's buckets to date, so lifetime_pnl_cents less allocated_cents is what the buckets kept; " +
 		"bets and windows count the same settled windows. It is not book or equity less the seed. " +
 		"book_cents is the live buckets' ledger cash plus their open bets AT COST; 0 if no bucket is live. It is not equity: api/buckets equity_cents marks the same bets at the bid. " +
 		"A first-engine version spans its BTC and ETH buckets, which api/buckets lists apart. " +
@@ -579,6 +586,7 @@ func buildLeaderboard(facts []MarketFacts, buckets []Bucket, book map[int64]int6
 			if b.Replaced {
 				row.Lives++
 			}
+			row.AllocatedCents += b.AllocatedCents
 			if !b.Frozen {
 				live = true
 				row.BookCents += book[b.ID]

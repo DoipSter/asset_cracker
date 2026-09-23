@@ -19,6 +19,9 @@ type AnalysisBucket struct {
 	Strategy                     string
 	Version                      int
 	Anti, Frozen, Replaced       bool
+	// AllocatedCents is the sustainment allocation taken from this bucket to date (bucket_skim):
+	// the bridge between what a strategy earned and what its bucket kept.
+	AllocatedCents int64
 }
 
 // AnalysisTrade is one filled order of a window, plus the bid ladder at that second for a sale.
