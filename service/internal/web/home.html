@@ -501,15 +501,17 @@ function renderAlerts(){var h=S.home||{},out="",raw=arr(h.halted),hn=haltedNames
 
 /* ---------- home: lede, the bank, rail ---------- */
 /* The balance sheet is the open bank. Deployed capital is the live engine, marked to market, and
-   it was allocated from this bank. Replenishment, the fee reserve, taxes and winnings are the four
-   set-asides; with deployed capital they are the total. Fees paid has already gone to the venue,
-   so it is listed and is not in the sum. A line the page has no words for is still shown, under
-   its own label. A reset closes this bank and opens the next one. */
+   it was allocated from this bank. Replenishment, the fee reserve, taxes and winnings are what
+   the bank still holds. Fees paid is a debit: it is in the total, in parentheses. A line the
+   page has no words for is still shown, under its own label. A reset closes this bank and opens
+   the next one. */
 var COMP_NOTES={v3:"honest fills: only what the recorded book displayed",legacy:"v1 and v2, no longer trading"};
 function compLine(label,earned,value,opt){opt=opt||{};var b=opt.buckets,note=opt.note||"";
-  return'<div class="row'+(opt.quiet?" quiet":"")+'"><span>'+esc(label)+(num(b)!=null?' <span class="n">'+b+"</span>":"")+'</span><span class="f e '+(opt.noEarn?"":cls(earned))+'">'+(opt.noEarn?"":fig(earned,0,1))+'</span><span class="f v">'+fig(value)+"</span>"+(note?'<span class="note">'+note+"</span>":"")+"</div>"}
-function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.total:{};renderDateline();renderAlerts();
-  var v=num(t.value_cents);
+  return'<div class="row'+(opt.quiet?" quiet":"")+'"><span>'+esc(label)+(num(b)!=null?' <span class="n">'+b+"</span>":"")+'</span><span class="f e '+(opt.noEarn?"":cls(earned))+'">'+(opt.noEarn?"":fig(earned,0,1))+'</span><span class="f v'+(num(value)<0?" dn":"")+'">'+fig(value)+"</span>"+(note?'<span class="note">'+note+"</span>":"")+"</div>"}
+function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.total:{},money=h.money&&typeof h.money==="object"?h.money:{};renderDateline();renderAlerts();
+  /* Fees paid is a debit in this total. The mark itself is what is still held, already net of
+     the fee that left the bucket; the debit records that departure on the sheet. */
+  var feesPaid=num(money.venue_fees_paid_cents)||0,v=num(t.value_cents);if(v!=null)v-=feesPaid;
   if(v==null)setHTML($("total"),"—");else{var s=grp(Math.abs(v)/100,2),i=s.lastIndexOf(".");setHTML($("total"),(v<0?"(":"")+'<span class="cur">$</span>'+s.slice(0,i)+"<small>"+s.slice(i)+(v<0?")":"")+"</small>")}
   var e=num(t.earned_cents),c=cls(e),rg=str(t.range)||S.scale,when,nohist=cleanPts(h.series).length<2,p=num(t.earned_pct);
   if(t.window_complete===false){var just=num(t.since)!=null&&num(h.as_of)!=null&&h.as_of-t.since<120;
@@ -518,7 +520,8 @@ function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.to
   else when=SCALE_WORDS[rg]||rg;
   setHTML($("earn"),'<span class="f '+c+'">'+sgn(e)+'</span><span class="f '+c+'">'+pct(p)+"</span><em>earned "+esc(when)+"</em>"+(num(t.unmarked_bets)>0?"<em> · "+t.unmarked_bets+" open bet"+(t.unmarked_bets>1?"s have":" has")+" no bid right now, counted at $0, so the total reads low until "+(t.unmarked_bets>1?"they settle":"it settles")+"</em>":""));
   chips($("scale"),SCALES,S.scale,"s");
-  var sp=sparkPath(h.series,300,34);
+  var series=h.series;if(feesPaid)series=arr(series).map(function(p){return p&&num(p[1])!=null?[p[0],p[1]-feesPaid]:p});
+  var sp=sparkPath(series,300,34);
   setHTML($("spark"),sp?'<svg class="spark" viewBox="0 0 300 34" preserveAspectRatio="none" role="img" aria-label="Total value over the period"><line x1="0" x2="300" y1="'+sp.y0.toFixed(1)+'" y2="'+sp.y0.toFixed(1)+'" stroke="var(--rule)" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/><path d="'+sp.d+'" fill="none" stroke="var(--ink)" stroke-opacity=".55" stroke-width="1.25" vector-effect="non-scaling-stroke"/></svg>':"");
   var bank=h.bank&&typeof h.bank==="object"?h.bank:{},bankName=str(bank.name)||"The bank",opened=bank.opened_at?iso(bank.opened_at):"";
   var rows='<div class="row hd"><span class="k">'+esc(bankName)+'</span><span class="k e">Earned</span><span class="k v">Value</span></div>';
@@ -528,13 +531,13 @@ function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.to
   /* buckets counts LIVE buckets only, so a group whose buckets all ran out still has 0 of them and a real earned figure: that line is drawn normally and says the buckets are closed */
   rows+=compLine("Deployed capital",live.earned_cents,live.value_cents,{buckets:live.buckets,quiet:none,note:COMP_NOTES.v3+(none?" · no buckets yet":closed?" · all buckets closed":"")});
   objs(h.composition).forEach(function(r){if(r.key==="v3"||r.key==="legacy"||r.key==="money")return;rows+=compLine(r.label||r.key||"—",r.earned_cents,r.value_cents,{buckets:r.buckets})});
-  /* Set-asides in the order they are talked about, then the fee reserve, which is the rest of the sum.
-     Fees paid has already left for the venue: it is listed and is not in the total. A zero is a quiet
-     line, not a hidden one. None of these earned anything of their own, so that column is left blank. */
-  var m=h.money&&typeof h.money==="object"?h.money:{};
-  [["Replenishment",m.replenishment_cents],["Fees paid",m.venue_fees_paid_cents,"paid to the venue, not in the total"],["Taxes",m.tax_reserve_cents],["Winnings",m.winnings_cents],["Fee reserve",m.fee_reserve_cents]].forEach(function(p){
-    rows+=compLine(p[0],null,p[1],{noEarn:true,quiet:num(p[1])===0,note:p[2]||""})});
-  rows+='<div class="row sum"><span>Total value</span><span class="f e '+c+'">'+fig(e,0,1)+'</span><span class="f v">'+fig(t.value_cents,1)+'</span></div><hr class="dbl" style="margin:0">';
+  /* Set-asides in the order they are talked about. Fees paid is a debit, so it is negative and
+     in the total. A zero is a quiet line, not a hidden one. None of these earned anything of
+     their own, so that column is left blank. */
+  var m=money;
+  [["Replenishment",m.replenishment_cents],["Fees paid",feesPaid?-feesPaid:0],["Taxes",m.tax_reserve_cents],["Winnings",m.winnings_cents],["Fee reserve",m.fee_reserve_cents]].forEach(function(p){
+    rows+=compLine(p[0],null,p[1],{noEarn:true,quiet:num(p[1])===0})});
+  rows+='<div class="row sum"><span>Total value</span><span class="f e '+c+'">'+fig(e,0,1)+'</span><span class="f v'+(v<0?" dn":"")+'">'+fig(v,1)+'</span></div><hr class="dbl" style="margin:0">';
   var arch=by.legacy,held=arch&&(num(arch.value_cents)||num(arch.buckets));
   rows+='<p class="memo"><i>Memo, outside the sum:</i><span>at risk <span class="f">'+fig(t.at_risk_cents)+'</span></span><span>unrealised <span class="f '+cls(t.unrealized_cents)+'">'+fig(t.unrealized_cents,0,1)+"</span></span>"+(held?'<span>old engines still hold <span class="f">'+fig(arch.value_cents)+"</span> — close them out on Buckets; the record stays</span>":"")+"</p>";
   setHTML($("comp"),rows);renderRail()}
