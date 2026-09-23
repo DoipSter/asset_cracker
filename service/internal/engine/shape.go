@@ -15,39 +15,40 @@ import (
 // knobs decide when, which side, how much and how to leave; the belief decides whether.
 
 // Shape is one strategy as the builder describes it. Zero fields take the parent's defaults
-// (common, scalper, value); the presets show the usual settings.
+// (common, scalper, value); the presets show the usual settings. The jsonschema tags are the
+// field descriptions the MCP proposal tools publish (internal/proposals); the engine reads none.
 type Shape struct {
-	Name       string `json:"name"`       // shown everywhere; " (conventions)" is added if absent
-	Blurb      string `json:"blurb"`      // one line, for the pages
-	Hypothesis string `json:"hypothesis"` // what this version is meant to test, for the registry
+	Name       string `json:"name" jsonschema:"the version's name, shown everywhere; \" (conventions)\" is added if absent. One version 3 per name"`
+	Blurb      string `json:"blurb,omitempty" jsonschema:"one line about it, for the pages; blank takes the parent's"`
+	Hypothesis string `json:"hypothesis,omitempty" jsonschema:"what this version is meant to test; strategy_register requires it, it goes in the trials registry"`
 
-	Exit string `json:"exit"` // "hold" or "ev"
-	Side string `json:"side"` // "", "model", "favourite" or "longshot"
+	Exit string `json:"exit" jsonschema:"hold: every position is held to settlement (parent Value). ev: sells on value or once the bid covers take_capture of the way to a dollar (parent Scalper)"`
+	Side string `json:"side,omitempty" jsonschema:"which side it may buy: model (whichever the belief favours; the default), favourite (the side priced above one half only), longshot (under one half only)"`
 
-	Lambda        float64 `json:"lambda"`
-	StaleCost     float64 `json:"stale_cost"`
-	StaleCostSell float64 `json:"stale_cost_sell"` // ev only
+	Lambda        float64 `json:"lambda" jsonschema:"weight on the model against the market, 0 to 1 exclusive of 0; the owner's convention is 0.5"`
+	StaleCost     float64 `json:"stale_cost,omitempty" jsonschema:"staleness cost in dollars charged to a buy; convention 0.0012"`
+	StaleCostSell float64 `json:"stale_cost_sell,omitempty" jsonschema:"staleness cost in dollars charged to a sale; ev only"`
 
-	TauMin  float64 `json:"tau_min"`
-	TauMax  float64 `json:"tau_max"`
-	BandMin float64 `json:"band_min"`
-	BandMax float64 `json:"band_max"`
-	MaxBets int     `json:"max_bets"`
-	MinGap  float64 `json:"min_gap"`
-	MinHold float64 `json:"min_hold"`     // ev only
-	Capture float64 `json:"take_capture"` // ev only
+	TauMin  float64 `json:"tau_min,omitempty" jsonschema:"no entry with fewer seconds than this to the close; 0 inherits the parent's"`
+	TauMax  float64 `json:"tau_max,omitempty" jsonschema:"no entry with more seconds than this to the close; 0 inherits the parent's"`
+	BandMin float64 `json:"band_min,omitempty" jsonschema:"the lowest ask it buys at, 0 to 1"`
+	BandMax float64 `json:"band_max,omitempty" jsonschema:"the highest ask it buys at, 0 to 1"`
+	MaxBets int     `json:"max_bets,omitempty" jsonschema:"filled buys per round, at most"`
+	MinGap  float64 `json:"min_gap,omitempty" jsonschema:"seconds between filled buys in one market"`
+	MinHold float64 `json:"min_hold,omitempty" jsonschema:"seconds after the last buy before it may sell; ev only"`
+	Capture float64 `json:"take_capture,omitempty" jsonschema:"sell once the bid covers this share (0 to 1) of the way to a dollar; ev only"`
 
-	Kappa        float64 `json:"kappa"`
-	WindowCapBps int64   `json:"window_cap_bps"`
-	MinVolRatio  float64 `json:"min_vol_ratio"`
+	Kappa        float64 `json:"kappa,omitempty" jsonschema:"the Kelly fraction staked, 0 to 1; a risk preference"`
+	WindowCapBps int64   `json:"window_cap_bps,omitempty" jsonschema:"the most one window may use, in basis points of min(equity, seed); a limit"`
+	MinVolRatio  float64 `json:"min_vol_ratio,omitempty" jsonschema:"entries only while the model's volatility is at least this many times the coin's default; 0 means no trigger"`
 
-	Sizing         string  `json:"sizing"` // "", "kelly" or "martingale"
-	BaseStakeCents int64   `json:"base_stake_cents"`
-	Multiplier     float64 `json:"multiplier"`
-	MaxDoublings   int     `json:"max_doublings"`
+	Sizing         string  `json:"sizing,omitempty" jsonschema:"kelly (the default: a fraction of the edge) or martingale (a fixed stake multiplied after each settled loss; bounded by the window cap and cash; registered as a negative control)"`
+	BaseStakeCents int64   `json:"base_stake_cents,omitempty" jsonschema:"martingale only: the first stake in cents, 100 to the seed"`
+	Multiplier     float64 `json:"multiplier,omitempty" jsonschema:"martingale only: the stake is multiplied by this after each settled loss, 1 to 4"`
+	MaxDoublings   int     `json:"max_doublings,omitempty" jsonschema:"martingale only: the most consecutive multiplications, 0 to 10"`
 
 	// Control marks a version registered to be caught, not to win: the pages say so.
-	Control bool `json:"control"`
+	Control bool `json:"control,omitempty" jsonschema:"a negative control: registered to show the checks catch it, not to win; the pages say so"`
 }
 
 // FromShape builds the version. Every number the shape sets is a convention that names the

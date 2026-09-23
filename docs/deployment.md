@@ -106,6 +106,9 @@ The page is served by the Pi. Three roads lead to it; pick by who else can reach
   read it (simulated figures); a change on the buckets page or the assets dialog asks for the
   passphrase once per tab and sends it as `X-Operator-Key`. Without `AC_OPERATOR_KEY` the
   controls are open to whoever can reach the port: fine on localhost or a tailnet, not on a LAN.
+  The MCP server's `strategy_register` sends the same header; its copy of the key lives in
+  `~acdeploy/.config/assetcracker/operator_key` (mode 600), put there once by the owner, see
+  `docs/mcp-read-surface.md`, "The operator key". The service's copy stays in the env file.
 - **Tailscale** (anywhere, your devices only): `deploy/pi/install-tailscale.sh`, an admin step run
   once, puts the Pi on your tailnet and publishes the port with `tailscale serve`. The page is
   then `https://rpi-v5-1.<tailnet>.ts.net/` over HTTPS from the laptop or the phone, and

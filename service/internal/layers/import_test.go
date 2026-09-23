@@ -27,6 +27,7 @@ func TestImportDirection(t *testing.T) {
 		"catalogue":         {"store"},
 		"runner":            {"broker", "coinbase", "engine", "kalshi", "store"},
 		"readsurface":       {"store"},
+		"proposals":         {"engine"},
 		"web":               {"analysis", "candles", "catalogue", "coinbase", "kalshi", "runner", "store"},
 		"app":               {"analysis", "candles", "catalogue", "coinbase", "config", "engine", "health", "kalshi", "runner", "store", "web"},
 		"legacy/kalshi15m":  {"pyfloat"},
@@ -74,11 +75,12 @@ func TestImportDirection(t *testing.T) {
 		}
 	}
 
-	// The live binary's main package is wiring only: app, config, the read surface, store.
+	// The live binary's main package is wiring only: app, config, the two MCP surfaces, store.
 	cmd := filepath.Join(findServiceRoot(t), "cmd", "assetcracker")
 	cmdAllow := map[string]bool{
 		moduleInternal + "app":         true,
 		moduleInternal + "config":      true,
+		moduleInternal + "proposals":   true,
 		moduleInternal + "readsurface": true,
 		moduleInternal + "store":       true,
 	}

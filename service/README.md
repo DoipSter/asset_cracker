@@ -46,6 +46,7 @@ whose four numbers were MEASURED come only from `cmd/measure3` (`docs/v3-measure
 | `internal/web` | The status page, and the buckets-page controls (orders, version-3 approval, allocation, sim reset) |
 | `internal/health` | `GET /healthz` on localhost: prices, rounds, counts; 503 if anything is stale |
 | `internal/readsurface` | The agents' read-only door: the MCP tools of `assetcracker mcp`. Windowed, capped, paged reads of candles, prints, the book and markets, and in-database summaries (returns, vol profile, momentum grid, features, stored analyses). Every call in a READ ONLY transaction with a timeout. `docs/mcp-read-surface.md` |
+| `internal/proposals` | The agents' door to the strategy builder, on the same MCP server: presets, a dry run through the engine, registration of a draft through the running service's route and operator key, the registry. Imports the engine only |
 
 What it watches comes from the `instrument` table (`db/migrations/0002_seed_sources.sql`), so
 adding a coin is a row, not a code change.
@@ -71,15 +72,19 @@ them. The Python widget stays as it is (INT-10). Not ported: the bankruptcy post
 `market`). Not carried over by choice: Pause all and Reset all (the page is read-only), the
 amber glow after a bet, and dragging a frameless window.
 
-## Reading it from an agent
+## Reading it from an agent, and proposing a strategy
 
-    assetcracker mcp       # the read surface on stdin/stdout; nothing else runs
+    assetcracker mcp       # the read surface and the proposal tools on stdin/stdout; nothing else runs
 
 The repository's `.cursor/mcp.json` runs that over SSH against the record (`assetcracker`) on
 the Pi, as `assetcracker_ro`, so Cursor's agent can call `instruments`, `candles`, `bars`,
 `book`, `markets`, `returns_summary`, `vol_profile`, `momentum_grid`, `features` and
-`analysis_results` directly. It uses the release binary. What each tool returns, and what it
-deliberately cannot do, is in `docs/mcp-read-surface.md`.
+`analysis_results` directly. It uses the release binary. The same server carries the strategy
+builder as four tools: `strategy_presets`, `strategy_build` (a dry run, every number labelled),
+`strategy_register` (a draft, through the running service's route and operator key; Approve
+stays a click on the buckets page) and `strategy_versions` (the registry). The key comes from
+`~/.config/assetcracker/operator_key` on the Pi, put there once by the owner. What each tool
+returns, and what it deliberately cannot do, is in `docs/mcp-read-surface.md`.
 
 ## Settings
 

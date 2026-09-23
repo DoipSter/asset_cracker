@@ -279,11 +279,20 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 		}
 		var hyp struct {
 			Hypothesis string `json:"hypothesis"`
+			Via        string `json:"via"` // who sent it, when not the page: "mcp"; recorded in code_ref
 		}
 		_ = json.Unmarshal(body, &hyp)
 		if strings.TrimSpace(hyp.Hypothesis) == "" {
 			writeErr(w, http.StatusBadRequest, "Say what this version is meant to test: the hypothesis goes in the registry.")
 			return
+		}
+		origin := "built on the buckets page"
+		if via := strings.TrimSpace(hyp.Via); via != "" {
+			if len(via) > 40 || strings.ContainsAny(via, "\n\r\t") {
+				writeErr(w, http.StatusBadRequest, "via must be one short word, such as mcp.")
+				return
+			}
+			origin = "proposed via " + via
 		}
 		built, err := ctl.Build(body)
 		if err != nil {
@@ -298,7 +307,7 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 		ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 		defer cancel()
 		id, err := db.CreateVersion3(ctx, store.NewVersion3{Name: built.Name, Blurb: built.Blurb, Hypothesis: hyp.Hypothesis,
-			Params: built.Params, Parent: built.Parent, CodeRef: "built on the buckets page; release " + ctl.Version})
+			Params: built.Params, Parent: built.Parent, CodeRef: origin + "; release " + ctl.Version})
 		if err != nil {
 			if errors.Is(err, store.ErrVersionExists) {
 				writeErr(w, http.StatusConflict, built.Name+" already has a version 3. Give this one a different name.")
@@ -315,7 +324,7 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 		if list != nil {
 			list.drop()
 		}
-		slog.Info("buckets page: version registered as draft", "id", id, "name", built.Name, "control", built.Control)
+		slog.Info("version registered as draft", "id", id, "name", built.Name, "control", built.Control, "origin", origin)
 		writeJSON(w, map[string]any{"id": id, "name": built.Name, "status": "draft", "control": built.Control})
 	}))
 

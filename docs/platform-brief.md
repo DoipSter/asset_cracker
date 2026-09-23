@@ -46,7 +46,7 @@ hard-coded strategies, and the engine inside the window.
 | Host | Brad's Raspberry Pi 5, 16 GB, 1 TB NVMe (measured, section 12). Postgres lives only here, never on a laptop. | Decided |
 | Client | **Flutter/Dart**: desktop and mobile, a client only | Decided |
 | Client API | HTTP + JSON, with a WebSocket for live updates; described by an OpenAPI file the Dart client is generated from | Proposed |
-| Agent access | MCP server inside the Go service, read-only at first | Started 2026-09-21: market data and analysis results, `docs/mcp-read-surface.md` |
+| Agent access | MCP server inside the Go service, read-only at first | Started 2026-09-21: market data and analysis results; 2026-09-22: the first proposal tool drafts a strategy version, `docs/mcp-read-surface.md` |
 | Heavy analysis | SQL and Python against Postgres, outside the service. Doipster's `research/` fits here. | Proposed |
 
 Why Go: a single static binary cross-compiled for the Pi, low memory, strong types, good at
@@ -213,7 +213,9 @@ proposal waits for a person. No tool moves capital or places orders.
 The first piece exists (2026-09-21): `assetcracker mcp`, a subcommand of the service binary,
 serves the market data and the analyses computed from it, windowed and read-only, over stdio; a
 laptop reaches it through SSH so the data stays on the Pi. `docs/mcp-read-surface.md`. The
-ledger and journal tools, then proposals, are TSK-42 and join the same server.
+first proposal tool followed (2026-09-22): `strategy_register` drafts a strategy version from a
+shape through the running service's builder route and operator key; Approve stays a person's
+click. The ledger and journal tools are TSK-42 and join the same server.
 
 ## 10. The app (Flutter)
 

@@ -1,10 +1,12 @@
-# The read surface: `assetcracker mcp`
+# The agents' door: `assetcracker mcp`
 
 How an agent, or a script driving one, reads the recorded market data and the analyses computed
-from it, without reading whole tables. It is the first piece of "Agent access (MCP)" in
-`platform-brief.md` section 9: market data and analysis results, read-only. The ledger, the
-journal, the metrics and the strategy registry (TSK-42) are not here yet; they will join under the
-same server.
+from it, without reading whole tables; and, since 2026-09-22, how it proposes a strategy. It is
+"Agent access (MCP)" in `platform-brief.md` section 9: the read surface (market data and
+analysis results, read-only), and the first proposal tool (draft a strategy version, which waits
+for a person). The ledger, the journal and the metrics (TSK-42) are not here yet; they will join
+under the same server. The proposal tools are in their own section, [The proposal door](#the-proposal-door-strategies),
+because they are the one part of this server that can change anything.
 
 Brad asked for it on 2026-09-21: a surface to query the data in a windowed, efficient pattern,
 so static parsers can summarise it without the full set, and a way to read the derivative, the
@@ -20,6 +22,9 @@ authentication. Code: `service/internal/readsurface` (the tools), `service/inter
 (the transaction they run in), `service/cmd/assetcracker/mcp.go` (the subcommand).
 
 ### Guarantees
+
+These hold for the ten read tools. The four `strategy_*` tools are a client of the running
+service and are described in their own section below; one of them registers a draft.
 
 - **Read-only by the database, not by convention.** Every call runs in a `READ ONLY` transaction:
   Postgres itself refuses any insert, update, delete or DDL inside one, whatever the role. In the
@@ -115,12 +120,68 @@ first two rows in dev were written on 2026-09-21 by an `insert ... select` that 
 intraday vol profile and the daily momentum grid in the database and stored what it computed,
 with `source` naming the exploratory SQL that produced them.
 
+## The proposal door: strategies
+
+Added 2026-09-22, when the strategy builder landed on the buckets page (`service/README.md`,
+"The strategy builder"). Brad: "and now we want the mcp tool to be able to do that." Code:
+`service/internal/proposals`.
+
+| Tool | Does | Touches |
+|---|---|---|
+| `strategy_presets` | The eight standard shapes (Value, Late, Favourite, Model, Scalper, Calm Scalper, Tail, Martingale control), each with what it tests | The engine in this binary; nothing else |
+| `strategy_build` | A dry run: the shape in, the version the engine would register out, every number labelled `convention` (you set it), `inherited` (the parent's), `limit` or `fact`; refuses exactly as registration would | The engine in this binary; nothing else |
+| `strategy_register` | Registers the shape as a **draft** version 3 | The running service, over HTTP on the Pi's loopback |
+| `strategy_versions` | The registry as the buckets page shows it: every version 3 with status and hypothesis, the new-orders switch, the allocation rule | The running service, a read |
+
+### How a registration happens, and why that way
+
+`strategy_register` does not write to the database. It builds the shape with the engine first
+(so a refusal comes back with its reason before anything leaves the process), then POSTs it to
+`http://127.0.0.1:8377/api/controls/version/new`, the route the buckets page uses, with the body
+field `via: "mcp"`. The service builds and validates it again, inserts the strategy and its
+version-3 row as `draft` with `code_ref` = `proposed via mcp; release <sha>`, and answers with
+the id. Three reasons for the detour:
+
+- **One write path, one gate.** The service holds the operator key and the write grants
+  (`db/grants.sql`); the MCP process runs as `acdeploy`, which reads the record only as
+  `assetcracker_ro` and can insert nothing. There is no second door to widen.
+- **A draft trades nothing.** Seeding is the Approve click on the buckets page, which stays a
+  person's (brief §9: "each proposal waits for a person"). No tool here approves, retires, moves
+  money or places an order.
+- **The registry says who.** `code_ref` records the origin; every registration is one more trial
+  the leaderboard's threshold is corrected for, whoever made it.
+
+### The operator key
+
+When the service runs with `AC_OPERATOR_KEY` (it does, since the page went on the LAN), the
+POST must carry it. The MCP process looks, at call time, in `AC_OPERATOR_KEY`, then in the file
+named by `AC_OPERATOR_KEY_FILE`, then in `~/.config/assetcracker/operator_key` of the user
+running it. The key never appears in a tool's answer, a log line, git, chat or Agora. Putting it
+in place is one command by the owner, once, typed on the Pi's side of an SSH session:
+
+```sh
+ssh acdeploy@rpi-v5-1.local 'umask 077; mkdir -p ~/.config/assetcracker; read -rs k; printf "%s\n" "$k" > ~/.config/assetcracker/operator_key'
+```
+
+(type the key, Enter; nothing echoes). Until it is there, `strategy_register` returns the
+service's 401 and says where the key goes; the three other tools work regardless. The service's
+own copy stays in `/etc/assetcracker/env`, readable by root and the service only; the deploy user
+is not given that file, because exchange keys will live in it one day.
+
+`AC_SERVICE_URL` moves the target off the loopback default; nothing sets it on the Pi.
+
+### Checking it
+
+`cd service && go test ./internal/proposals/` runs a client against the server over an in-memory
+transport (the SDK validates every answer against the schema it derived, which is how a
+`required` field that should not have been was found), the dry run's labelling, and the HTTP
+side against a stand-in service: the key header, the `via` field, the 401 and 409 texts.
+
 ## What is not here
 
-- Writes of any kind, proposals, raw SQL. Not planned for this surface; proposals are TSK-42's
-  second half and go through a person.
-- The ledger, journal, metrics, commentary, strategy versions (TSK-42's first half). Same server,
-  later.
+- Approval, retirement, the orders switch, the rates, the reset: clicks on the buckets page, a
+  person's. Raw SQL, writes to any table.
+- The ledger, journal, metrics, commentary (TSK-42's first half). Same server, later.
 - Fifteen-minute candles: not stored. `bars` builds any bucket from the trade prints, but only
   from the day recording started.
 - Prod access from a laptop (see Connecting).

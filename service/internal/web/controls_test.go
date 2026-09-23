@@ -142,7 +142,7 @@ func TestBuilderRegistersADraft(t *testing.T) {
 	if rec.Code != 200 || len(f.created) != 1 || f.created[0].Name != "Late (conventions)" || f.created[0].Hypothesis != "the market lags spot late" || f.created[0].Parent != "Value" {
 		t.Fatalf("register %d %s created %+v", rec.Code, rec.Body.String(), f.created)
 	}
-	if !strings.Contains(rec.Body.String(), `"status":"draft"`) || !strings.Contains(f.created[0].CodeRef, "test") {
+	if !strings.Contains(rec.Body.String(), `"status":"draft"`) || f.created[0].CodeRef != "built on the buckets page; release test" {
 		t.Fatalf("body %s coderef %s", rec.Body.String(), f.created[0].CodeRef)
 	}
 	rec = postJSON(mux, "/api/controls/version/new", `{"name":"Zero","exit":"hold","lambda":0,"hypothesis":"x"}`)
@@ -162,6 +162,16 @@ func TestBuilderRegistersADraft(t *testing.T) {
 	}
 	if built != 3 {
 		t.Fatalf("the engine was asked %d times", built)
+	}
+	// A registration from the MCP proposal tool says so in code_ref; a via that is not one
+	// short word is refused before the engine is asked.
+	rec = postJSON(mux, "/api/controls/version/new", `{"name":"Tail","exit":"hold","lambda":0.5,"hypothesis":"h","via":"mcp"}`)
+	if rec.Code != 200 || len(f.created) != 2 || f.created[1].CodeRef != "proposed via mcp; release test" {
+		t.Fatalf("via %d %s created %+v", rec.Code, rec.Body.String(), f.created)
+	}
+	rec = postJSON(mux, "/api/controls/version/new", `{"name":"Tail2","exit":"hold","lambda":0.5,"hypothesis":"h","via":"a\nb"}`)
+	if rec.Code != 400 || len(f.created) != 2 || built != 4 {
+		t.Fatalf("a via with a newline must be refused: %d %s", rec.Code, rec.Body.String())
 	}
 	none := controlsMux(&fakeControls{}, Control{})
 	if rec := postJSON(none, "/api/controls/version/new", `{"name":"x","lambda":0.5,"hypothesis":"x"}`); rec.Code != 503 {
