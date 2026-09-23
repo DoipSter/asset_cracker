@@ -16,9 +16,13 @@ type Config struct {
 	// the local unix socket and is authenticated as its operating-system user, so there is
 	// no password to configure.
 	DatabaseURL string
-	// HTTPAddr is where the health endpoint listens. Localhost only by default: the service
-	// is never exposed to the network directly.
+	// HTTPAddr is where the pages and the health endpoint listen. Localhost only by default;
+	// the Pi's LAN address puts the page on the house network, and then OperatorKey should be set.
 	HTTPAddr string
+	// OperatorKey, from AC_OPERATOR_KEY, is the passphrase the buckets page's controls and the
+	// assets dialog's switch require in the X-Operator-Key header. Empty means no passphrase:
+	// right for localhost or a tailnet, where reaching the page is the login. Reads never need it.
+	OperatorKey string
 	// UserAgent is sent with every request to a venue.
 	UserAgent string
 	// V3 is the switch for the live engine's NEW ORDERS, from AC_V3. The default is on (unset or
@@ -92,6 +96,7 @@ func Load() Config {
 	c := Config{
 		DatabaseURL: env("AC_DATABASE_URL", "postgres:///assetcracker?host=/var/run/postgresql"),
 		HTTPAddr:    env("AC_HTTP_ADDR", "127.0.0.1:8377"),
+		OperatorKey: strings.TrimSpace(os.Getenv("AC_OPERATOR_KEY")),
 		UserAgent:   env("AC_USER_AGENT", "asset-cracker/0.1"),
 		V3:          os.Getenv("AC_V3") != "off",
 	}

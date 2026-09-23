@@ -634,8 +634,15 @@ function bucketRow(b,D){var eq=num(b.equity_cents),seed=num(b.seed_cents),hw=num
     '<div class="bar" role="img" aria-label="Equity '+usd(eq)+", seed "+usd(seed)+", high-water "+usd(hw)+'">'+bar+"</div>"+
     '<div class="m"><span>'+stTag+"</span><span>life "+(num(b.life)!=null?b.life:"—")+"</span><span>"+(num(b.bets)!=null?b.bets:"—")+" bets</span><span>seed <span class=\"f\">"+usd(seed)+"</span></span><span>high <span class=\"f\">"+usd(hw)+"</span></span><span>allocated <span class=\"f\">"+usd(b.allocated_cents)+"</span></span>"+(num(b.at_risk_cents)?"<span>at risk <span class=\"f\">"+usd(b.at_risk_cents)+"</span></span>":"")+"</div></div>"}
 function pc(bps){return(bps/100).toFixed(bps%100?2:0)+"%"}
-function post(u,body,ms){var ac=window.AbortController?new AbortController():null,to=setTimeout(function(){if(ac)ac.abort()},ms||8000),o={method:"POST",cache:"no-store",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)};if(ac)o.signal=ac.signal;
-  return fetch(u,o).then(function(r){return r.json().then(function(j){if(!r.ok)throw new Error((j&&j.error)||("request failed ("+r.status+")")) ;return j})}).then(function(j){clearTimeout(to);return j},function(e){clearTimeout(to);throw e})}
+/* The operator key: with AC_OPERATOR_KEY set on the service, every change needs it. Asked for once, kept for this tab, asked again if refused. */
+function opKey(){try{return sessionStorage.getItem("ac.key")||""}catch(e){return""}}
+function askKey(again){var k=window.prompt(again?"That operator key was refused. The operator key:":"This page is open to the network, so a change needs the operator key (AC_OPERATOR_KEY on the service):");
+  if(k==null)return null;k=k.trim();try{sessionStorage.setItem("ac.key",k)}catch(e){}return k}
+function post(u,body,ms,retried){var ac=window.AbortController?new AbortController():null,to=setTimeout(function(){if(ac)ac.abort()},ms||8000),h={"Content-Type":"application/json"},k=opKey();if(k)h["X-Operator-Key"]=k;
+  var o={method:"POST",cache:"no-store",headers:h,body:JSON.stringify(body)};if(ac)o.signal=ac.signal;
+  return fetch(u,o).then(function(r){return r.json().then(function(j){
+      if(r.status===401&&!retried){clearTimeout(to);var nk=askKey(!!k);if(nk==null)throw new Error("No operator key given; nothing changed.");return post(u,body,ms,true)}
+      if(!r.ok)throw new Error((j&&j.error)||("request failed ("+r.status+")"));return j})}).then(function(j){clearTimeout(to);return j},function(e){clearTimeout(to);throw e})}
 /* ---------- the assets dialog ---------- */
 var A={q:"",source:"",frequency:"",data:null,seq:0,timer:null,msg:"",bad:false,busy:false,poll:null};
 var FREQ_WORDS={fifteen_min:"15-minute",hourly:"hourly",daily:"daily",weekly:"weekly",monthly:"monthly",annual:"annual",one_off:"one-off",custom:"custom",continuous:"spot"};

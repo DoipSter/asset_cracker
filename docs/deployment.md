@@ -98,14 +98,19 @@ and `select sum(balance_cents) from ledger_balance` (must be 0 per mode).
 
 ## Watching it
 
-The page is meant to be read from your own devices and no others. The service listens on the
-Pi's localhost only, and two roads lead to it:
+The page is served by the Pi. Three roads lead to it; pick by who else can reach the network.
 
-- **Tailscale** (the intended one): `deploy/pi/install-tailscale.sh`, an admin step run once,
-  puts the Pi on your tailnet and publishes the port with `tailscale serve`. The page is then
-  `https://rpi-v5-1.<tailnet>.ts.net/` from the laptop or the phone, anywhere, over HTTPS, and
-  unreachable from everything else. The buckets page has no login of its own; the tailnet is the
-  login. Never `tailscale funnel`: that is the public internet, and Reset is one click.
+- **The house network** (the plain one): in `/etc/assetcracker/env` set
+  `AC_HTTP_ADDR=0.0.0.0:8377` and `AC_OPERATOR_KEY=<a passphrase>`, then restart the unit. The
+  page is `http://rpi-v5-1.local:8377/` from any browser in the house. Anyone on the Wi-Fi can
+  read it (simulated figures); a change on the buckets page or the assets dialog asks for the
+  passphrase once per tab and sends it as `X-Operator-Key`. Without `AC_OPERATOR_KEY` the
+  controls are open to whoever can reach the port: fine on localhost or a tailnet, not on a LAN.
+- **Tailscale** (anywhere, your devices only): `deploy/pi/install-tailscale.sh`, an admin step run
+  once, puts the Pi on your tailnet and publishes the port with `tailscale serve`. The page is
+  then `https://rpi-v5-1.<tailnet>.ts.net/` over HTTPS from the laptop or the phone, and
+  unreachable from everything else; the tailnet is the login. Never `tailscale funnel`: that is
+  the public internet, and Reset is one click.
 - **An SSH tunnel** (the fallback): `tools/view.sh` forwards a local port and opens the browser.
 
 By hand:

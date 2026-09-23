@@ -326,6 +326,7 @@ func Run(version string) error {
 				cancel()
 				return doc
 			}, src, web.Control{
+				Key:    cfg.OperatorKey,
 				EnvOn:  cfg.V3,
 				Status: run3.OrdersStatus,
 				Apply:  run3.SetOrders,

@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -15,12 +16,35 @@ import (
 // resetBudget is how long the reset request may take in the database. The page waits as long.
 const resetBudget = 5 * time.Minute
 
+// operatorHeader carries the passphrase for anything that changes the books or the recording.
+const operatorHeader = "X-Operator-Key"
+
+// operator wraps a handler that changes something: with a key set, the request must carry it in
+// operatorHeader, compared in constant time; without one it refuses with 401 and the page asks
+// the reader for the key. An empty key means no passphrase (localhost, a tailnet). Reads are never
+// wrapped: the figures are simulated money and the page is meant to be looked at.
+func operator(key string, h http.HandlerFunc) http.HandlerFunc {
+	if key == "" {
+		return h
+	}
+	want := []byte(key)
+	return func(w http.ResponseWriter, r *http.Request) {
+		got := []byte(strings.TrimSpace(r.Header.Get(operatorHeader)))
+		if len(got) == 0 || subtle.ConstantTimeCompare(got, want) != 1 {
+			writeErr(w, http.StatusUnauthorized, "The operator key is missing or wrong.")
+			return
+		}
+		h(w, r)
+	}
+}
+
 // reloadBudget is the engine's start-up budget: the seeding, the reads and the rebuild.
 const reloadBudget = 30 * time.Second
 
 // Control is how the buckets page reaches the running engine. A nil func means there is
 // no engine in this process: the saved switch still applies at the next start.
 type Control struct {
+	Key     string                                  // AC_OPERATOR_KEY: the passphrase every POST here needs; empty means none
 	EnvOn   bool                                    // AC_V3, used when the database has no orders row
 	Status  func() (placing bool, effective string) // this process, right now
 	Apply   func(on bool) string                    // "now" or "next-start"
@@ -127,6 +151,7 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 		placing, effective := ctl.status()
 		writeJSON(w, map[string]any{
 			"simulated": true,
+			"locked":    ctl.Key != "", // the page asks for the operator key before its first change
 			"orders":    map[string]any{"on": on, "source": source, "placing": placing, "effective": effective},
 			"versions":  versions,
 			"policy": map[string]any{
@@ -136,7 +161,7 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 		})
 	})
 
-	mux.HandleFunc("POST /api/controls/orders", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/controls/orders", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
 		if db == nil {
 			writeErr(w, http.StatusServiceUnavailable, "The controls have no database.")
 			return
@@ -155,9 +180,9 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 			return
 		}
 		writeJSON(w, map[string]any{"on": body.On, "effective": ctl.apply(body.On)})
-	})
+	}))
 
-	mux.HandleFunc("POST /api/controls/version", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/controls/version", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
 		if db == nil {
 			writeErr(w, http.StatusServiceUnavailable, "The controls have no database.")
 			return
@@ -201,9 +226,9 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 			list.drop()
 		}
 		writeJSON(w, out)
-	})
+	}))
 
-	mux.HandleFunc("POST /api/controls/policy", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/controls/policy", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
 		if db == nil {
 			writeErr(w, http.StatusServiceUnavailable, "The controls have no database.")
 			return
@@ -234,9 +259,9 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true})
-	})
+	}))
 
-	mux.HandleFunc("POST /api/controls/reset", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/controls/reset", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
 		if db == nil {
 			writeErr(w, http.StatusServiceUnavailable, "The controls have no database.")
 			return
@@ -289,7 +314,7 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 			list.drop()
 		}
 		writeJSON(w, out)
-	})
+	}))
 }
 
 func readJSON(w http.ResponseWriter, r *http.Request, dst any) bool {

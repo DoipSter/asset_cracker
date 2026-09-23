@@ -75,7 +75,8 @@ deliberately cannot do, is in `docs/mcp-read-surface.md`.
 | Variable | Default |
 |---|---|
 | `AC_DATABASE_URL` | `postgres:///assetcracker?host=/var/run/postgresql` (unix socket, peer auth, no password) |
-| `AC_HTTP_ADDR` | `127.0.0.1:8377` |
+| `AC_HTTP_ADDR` | `127.0.0.1:8377`. `0.0.0.0:8377` puts the page on the house network; set the key below with it |
+| `AC_OPERATOR_KEY` | unset: no passphrase. Set, every change on the buckets page and the assets dialog needs it (`X-Operator-Key`); reads never do |
 | `AC_USER_AGENT` | `asset-cracker/0.1` |
 | `AC_V3` | on unless exactly `off`. The buckets page can override this; with no saved switch, off means settle-only |
 | `AC_GATE_MIN_EDGE` | `0.02`: the after-fee return per dollar staked the promotion gate's sample floor is sized to find |

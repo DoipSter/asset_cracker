@@ -42,7 +42,7 @@ func startAssets(ctx context.Context, wg *sync.WaitGroup, mux *http.ServeMux, db
 	wg.Add(2)
 	go func() { defer wg.Done(); refreshCatalogue(ctx, db, paced, cfg.UserAgent, categories) }()
 	go func() { defer wg.Done(); sup.run(ctx) }()
-	web.CatalogueRoutes(mux, db, web.Catalogue{Max: max, Running: sup.status, Changed: sup.poke})
+	web.CatalogueRoutes(mux, db, web.Catalogue{Key: cfg.OperatorKey, Max: max, Running: sup.status, Changed: sup.poke})
 	slog.Info("assets page", "path", "/assets", "kalshi_categories", strings.Join(categories, ","), "max_selected", max)
 }
 

@@ -103,6 +103,40 @@ func TestResetHoldsThenReleasesThenReloads(t *testing.T) {
 	}
 }
 
+// With an operator key set, every change needs it in the header; reads never do. Without a key
+// set, nothing is asked (localhost, a tailnet).
+func TestOperatorKeyGatesChanges(t *testing.T) {
+	f := &fakeControls{}
+	mux := controlsMux(f, Control{Key: "open sesame", Apply: func(bool) string { return "now" }})
+	get := httptest.NewRecorder()
+	mux.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/controls", nil))
+	if get.Code != 200 || !strings.Contains(get.Body.String(), `"locked":true`) {
+		t.Fatalf("a read needs no key and says the page is locked: %d %s", get.Code, get.Body.String())
+	}
+	rec := postJSON(mux, "/api/controls/orders", `{"on":false}`)
+	if rec.Code != 401 || f.ordersSaved != nil {
+		t.Fatalf("no key: %d saved %v", rec.Code, f.ordersSaved)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/controls/orders", strings.NewReader(`{"on":false}`))
+	req.Header.Set(operatorHeader, "wrong")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 || f.ordersSaved != nil {
+		t.Fatalf("wrong key: %d saved %v", rec.Code, f.ordersSaved)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/controls/orders", strings.NewReader(`{"on":false}`))
+	req.Header.Set(operatorHeader, " open sesame ")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 || f.ordersSaved == nil {
+		t.Fatalf("the key: %d %s", rec.Code, rec.Body.String())
+	}
+	open := controlsMux(&fakeControls{}, Control{Apply: func(bool) string { return "now" }})
+	if rec := postJSON(open, "/api/controls/orders", `{"on":true}`); rec.Code != 200 {
+		t.Fatalf("no key set means no gate: %d", rec.Code)
+	}
+}
+
 // With no engine in the process the reset still empties the books; the next start seeds.
 func TestResetWithoutAnEngine(t *testing.T) {
 	f := &fakeControls{reset: store.ResetCounts{Buckets: 1}}

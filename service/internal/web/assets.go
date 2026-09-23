@@ -41,6 +41,7 @@ type RecorderState struct {
 // Catalogue is how the assets page reaches the supervisor (app/assets.go). A nil func is a
 // process without one: a switch is saved and applies at the next start.
 type Catalogue struct {
+	Key     string                         // AC_OPERATOR_KEY: the passphrase the switch needs; empty means none
 	Max     int                            // the most selected at once
 	Running func() map[int64]RecorderState // the selected instruments being recorded now, by id
 	Changed func()                         // re-read the selection now, not at the next minute
@@ -95,7 +96,7 @@ func CatalogueRoutes(mux *http.ServeMux, db catalogueStore, c Catalogue) {
 		writeJSON(w, catalogueDoc(hits, summary, recorded, c))
 	})
 
-	mux.HandleFunc("POST /api/controls/asset", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/controls/asset", operator(c.Key, func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Source string `json:"source"`
 			Code   string `json:"code"`
@@ -156,7 +157,7 @@ func CatalogueRoutes(mux *http.ServeMux, db catalogueStore, c Catalogue) {
 		}
 		writeJSON(w, map[string]any{"instrument_id": res.InstrumentID, "record": res.Record, "changed": res.Changed,
 			"selected": res.Selected, "max": c.Max, "effective": effective, "seeded": res.Seeded})
-	})
+	}))
 }
 
 type catalogueRecorded struct {
