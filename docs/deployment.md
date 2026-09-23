@@ -98,7 +98,17 @@ and `select sum(balance_cents) from ledger_balance` (must be 0 per mode).
 
 ## Watching it
 
-`tools/view.sh` opens the status page from the Mac through an SSH tunnel. Or, by hand:
+The page is meant to be read from your own devices and no others. The service listens on the
+Pi's localhost only, and two roads lead to it:
+
+- **Tailscale** (the intended one): `deploy/pi/install-tailscale.sh`, an admin step run once,
+  puts the Pi on your tailnet and publishes the port with `tailscale serve`. The page is then
+  `https://rpi-v5-1.<tailnet>.ts.net/` from the laptop or the phone, anywhere, over HTTPS, and
+  unreachable from everything else. The buckets page has no login of its own; the tailnet is the
+  login. Never `tailscale funnel`: that is the public internet, and Reset is one click.
+- **An SSH tunnel** (the fallback): `tools/view.sh` forwards a local port and opens the browser.
+
+By hand:
 
 ```
 ssh acdeploy@rpi-v5-1.local curl -s http://127.0.0.1:8377/healthz
