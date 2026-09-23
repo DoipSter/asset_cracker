@@ -149,12 +149,17 @@ replenishment first; only the shortfall is brought in from outside, as its own r
 Still to decide: the rates themselves. (The twins question closed with version 2; the live
 engine has no anti-world.)
 
-**Bucket lifecycle in the live engine, as of 2026-09-22:** approval on the buckets page seeds
-a $1,000 bucket from replenishment at once (`Runner3.Reload`, no process start); a bucket that
+**Bucket lifecycle in the live engine, as of 2026-09-23:** a bucket is deployed from the
+buckets page, with the seed and its source chosen there, replenishment or the bank
+(`Runner3.Deploy`, no process start; $1,000 is the default, so the lines compare); an approval
+made through the API alone still seeds $1,000 from the bank at the next load. A bucket that
 loses its last bet with less than the floor left is closed at that settlement, reaped into
-replenishment, frozen, not replaced. The reset on the buckets page empties every simulated
-book and starts again from the approved versions. Not built: circuit breakers on drawdown or a
-run of losses, and a bench that hands a freed slot to a different strategy.
+replenishment, frozen, not replaced; the operator closes one out with the × on its row, and
+deploys the version again for its next life. The reset, on the home page from the bank's own
+row, closes the bank and opens the next one, seeded from the approved versions. The home page
+also moves money between the accounts and schedules paydays, from each account's row. Not
+built: circuit breakers on drawdown or a run of losses, and a bench that hands a freed slot to
+a different strategy.
 
 The earlier sketch of these flows, kept for the parts not built yet:
 

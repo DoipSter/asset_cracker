@@ -206,18 +206,30 @@ func (s *Store) CloseBucket(ctx context.Context, setup SimSetup, b SimBucket, re
 	next := b
 	next.Frozen, next.CashCents = true, 0
 	if restake {
-		if next, err = seedLife(ctx, tx, setup, b, life, seedCents); err != nil {
+		if next, err = seedLife(ctx, tx, setup, b, life, seedCents, seedPoolThenOwners); err != nil {
 			return b, err
 		}
 	}
 	return next, tx.Commit(ctx)
 }
 
-// seedLife opens "<base> life N" for the same version as the frozen bucket `prev`, seeded from
-// the replenishment pool, and marks prev as replaced by it. Restarting a dead bucket is what the
-// pool is for; only what it cannot cover is brought in from outside, and that shortfall is
-// recorded as its own deposit. Inside the caller's transaction.
-func seedLife(ctx context.Context, tx pgx.Tx, setup SimSetup, prev SimBucket, life int, seedCents int64) (SimBucket, error) {
+// Where a seed is drawn from. The page names two: replenishment (the common pool) and the bank
+// (the owners, outside). The engine's own restake has a third way, the pool with the owners
+// covering a shortfall, which is what the pool is for when a bucket runs out on its own.
+const (
+	SeedFromReplenishment = "replenishment"
+	SeedFromBank          = "bank"
+	seedPoolThenOwners    = "pool-then-owners" // not a choice on the page
+)
+
+// SeedSources are the choices the page offers, in order.
+var SeedSources = []string{SeedFromReplenishment, SeedFromBank}
+
+// fundSeed books the cash of one seed into a bucket's account, by source, and says in the memo
+// where it came from: the memo is what the bucket list reads the source back from (Buckets).
+// Replenishment alone is refused when it is short; the bank puts the whole seed into the pool
+// first, so the pool's books still show every dollar that ever went into a bucket passing through.
+func fundSeed(ctx context.Context, tx pgx.Tx, setup SimSetup, name string, account, seedCents int64, source string) error {
 	transfer := func(reason, memo string, from, to, cents int64) error {
 		var id int64
 		if err := tx.QueryRow(ctx, `insert into ledger_transfer (mode, reason, memo, created_by) values ('sim', $1, $2, $3) returning id`,
@@ -228,6 +240,38 @@ func seedLife(ctx context.Context, tx pgx.Tx, setup SimSetup, prev SimBucket, li
 			id, from, -cents, to, cents)
 		return err
 	}
+	var inPool int64
+	if err := tx.QueryRow(ctx, `select coalesce(sum(amount_cents), 0) from ledger_entry where account_id = $1`, setup.PoolLedgerID).Scan(&inPool); err != nil {
+		return err
+	}
+	switch source {
+	case SeedFromBank:
+		if err := transfer("deposit", "bank funds for "+name, setup.OwnersLedgerID, setup.PoolLedgerID, seedCents); err != nil {
+			return err
+		}
+		return transfer("seed", "seed "+name+" from the bank", setup.PoolLedgerID, account, seedCents)
+	case SeedFromReplenishment:
+		if inPool < seedCents {
+			return DeployRefused{fmt.Sprintf("Replenishment holds $%.2f; the deploy asks for $%.2f. Pull from the bank instead, or deploy less.", float64(inPool)/100, float64(seedCents)/100)}
+		}
+		return transfer("seed", "seed "+name+" from replenishment", setup.PoolLedgerID, account, seedCents)
+	case seedPoolThenOwners:
+		if short := seedCents - inPool; short > 0 {
+			if err := transfer("deposit", fmt.Sprintf("replenishment short by %d cents for %s", short, name), setup.OwnersLedgerID, setup.PoolLedgerID, short); err != nil {
+				return err
+			}
+		}
+		return transfer("seed", "seed "+name+" from replenishment", setup.PoolLedgerID, account, seedCents)
+	}
+	return DeployRefused{"Pull the seed from replenishment or from the bank."}
+}
+
+// seedLife opens "<base> life N" for the same version as the frozen bucket `prev`, seeded by
+// `source` (fundSeed), and marks prev as replaced by it. The engine's own restake draws on the
+// pool with the owners covering a shortfall: restarting a dead bucket is what the pool is for,
+// and only what it cannot cover is brought in from outside, recorded as its own deposit. Inside
+// the caller's transaction.
+func seedLife(ctx context.Context, tx pgx.Tx, setup SimSetup, prev SimBucket, life int, seedCents int64, source string) (SimBucket, error) {
 	base := prev.Name
 	if i := strings.Index(base, " life "); i >= 0 {
 		base = base[:i]
@@ -240,16 +284,7 @@ func seedLife(ctx context.Context, tx pgx.Tx, setup SimSetup, prev SimBucket, li
 	                           values ($1, 'sim', $2, $3, $4, '{}', 0) returning id`, next.Name, setup.venueAccountID, next.LedgerAccountID, next.VersionID).Scan(&next.ID); err != nil {
 		return next, err
 	}
-	var inPool int64
-	if err := tx.QueryRow(ctx, `select coalesce(sum(amount_cents), 0) from ledger_entry where account_id = $1`, setup.PoolLedgerID).Scan(&inPool); err != nil {
-		return next, err
-	}
-	if short := seedCents - inPool; short > 0 {
-		if err := transfer("deposit", fmt.Sprintf("replenishment short by %d cents for %s", short, next.Name), setup.OwnersLedgerID, setup.PoolLedgerID, short); err != nil {
-			return next, err
-		}
-	}
-	if err := transfer("seed", "seed "+next.Name+" from replenishment", setup.PoolLedgerID, next.LedgerAccountID, seedCents); err != nil {
+	if err := fundSeed(ctx, tx, setup, next.Name, next.LedgerAccountID, seedCents, source); err != nil {
 		return next, err
 	}
 	if _, err := tx.Exec(ctx, `insert into bucket_event (bucket_id, kind, detail, actor_id) values ($1, 'seeded', jsonb_build_object('note', $2::text), $3)`,
@@ -260,6 +295,99 @@ func seedLife(ctx context.Context, tx pgx.Tx, setup SimSetup, prev SimBucket, li
 		return next, err
 	}
 	return next, nil
+}
+
+// Deploy is what the operator asks for on the buckets page: a bucket for a version, seeded
+// with SeedCents drawn from Source.
+type Deploy struct {
+	VersionID int64
+	SeedCents int64
+	Source    string // SeedFromReplenishment or SeedFromBank
+}
+
+// DeployRefused is a deploy the rules do not allow; its text is shown to the operator.
+type DeployRefused struct{ Why string }
+
+func (e DeployRefused) Error() string { return e.Why }
+
+// ErrOtherFamily is a deploy of a version that belongs to another market family, so another
+// runner's. app asks each runner in turn; the one whose family it is answers.
+var ErrOtherFamily = errors.New("that version belongs to another market family")
+
+// DeployBucket opens a bucket for a version by the operator's hand: the first life, named as
+// EnsureSimSetup names it, or the next life of a version whose newest bucket is frozen. The seed
+// is the amount asked for, from the source asked for, and a draft or retired version is put on
+// probation in the same transaction, so the reload that follows finds a bucket already seeded
+// and a version that may order; EnsureSimSetup, finding the bucket, seeds nothing more. Refused
+// while the version holds a bucket (close it first), and when replenishment is asked for more
+// than it has.
+func (s *Store) DeployBucket(ctx context.Context, setup SimSetup, prefix, family string, version int, d Deploy) (SimBucket, error) {
+	switch {
+	case d.SeedCents <= 0:
+		return SimBucket{}, DeployRefused{"The seed must be above zero."}
+	case d.SeedCents > 100_000_000:
+		return SimBucket{}, DeployRefused{"A seed is at most $1,000,000."}
+	case d.Source != SeedFromReplenishment && d.Source != SeedFromBank:
+		return SimBucket{}, DeployRefused{"Pull the seed from replenishment or from the bank."}
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return SimBucket{}, err
+	}
+	defer tx.Rollback(ctx)
+	var name, vFamily, status string
+	var vVersion int
+	err = tx.QueryRow(ctx, `select st.name, st.family, v.version, v.status from strategy_version v join strategy st on st.id = v.strategy_id where v.id = $1`, d.VersionID).
+		Scan(&name, &vFamily, &vVersion, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SimBucket{}, ErrVersionNotFound
+	}
+	if err != nil {
+		return SimBucket{}, err
+	}
+	if vFamily != family || vVersion != version {
+		return SimBucket{}, ErrOtherFamily
+	}
+	var prev SimBucket
+	err = tx.QueryRow(ctx, `select id, name, ledger_account_id, strategy_version_id, status = 'frozen' from bucket
+	                          where strategy_version_id = $1 and mode = 'sim' order by id desc limit 1`, d.VersionID).
+		Scan(&prev.ID, &prev.Name, &prev.LedgerAccountID, &prev.VersionID, &prev.Frozen)
+	var next SimBucket
+	switch {
+	case err == nil && !prev.Frozen:
+		return SimBucket{}, ErrBucketHeld
+	case err == nil:
+		if next, err = seedLife(ctx, tx, setup, prev, LifeOf(prev.Name)+1, d.SeedCents, d.Source); err != nil {
+			return SimBucket{}, err
+		}
+	case errors.Is(err, pgx.ErrNoRows):
+		next = SimBucket{Name: fmt.Sprintf("%s %s v%d", prefix, name, version), VersionID: d.VersionID, CashCents: d.SeedCents}
+		if _, err = tx.Exec(ctx, `insert into ledger_account (kind, mode, name) values ('bucket', 'sim', $1) on conflict (mode, name) do nothing`, next.Name+" cash"); err != nil {
+			return SimBucket{}, err
+		}
+		if err = tx.QueryRow(ctx, `select id from ledger_account where mode = 'sim' and name = $1`, next.Name+" cash").Scan(&next.LedgerAccountID); err != nil {
+			return SimBucket{}, err
+		}
+		if err = tx.QueryRow(ctx, `insert into bucket (name, mode, venue_account_id, ledger_account_id, strategy_version_id, limits, tax_rate_bps)
+		                           values ($1, 'sim', $2, $3, $4, '{}', 0) returning id`, next.Name, setup.venueAccountID, next.LedgerAccountID, next.VersionID).Scan(&next.ID); err != nil {
+			return SimBucket{}, err
+		}
+		if err = fundSeed(ctx, tx, setup, next.Name, next.LedgerAccountID, d.SeedCents, d.Source); err != nil {
+			return SimBucket{}, err
+		}
+		if _, err = tx.Exec(ctx, `insert into bucket_event (bucket_id, kind, detail, actor_id) values ($1, 'seeded', jsonb_build_object('cents', $2::bigint, 'source', $3::text), $4)`,
+			next.ID, d.SeedCents, d.Source, setup.ActorID); err != nil {
+			return SimBucket{}, err
+		}
+	default:
+		return SimBucket{}, err
+	}
+	if status == "draft" || status == "retired" {
+		if _, err = tx.Exec(ctx, `update strategy_version set status = 'probation', retired_at = null, retired_reason = '' where id = $1`, d.VersionID); err != nil {
+			return SimBucket{}, err
+		}
+	}
+	return next, tx.Commit(ctx)
 }
 
 // ErrBucketHeld is a RestakeBucket of a version whose newest bucket is not frozen.
@@ -391,7 +519,7 @@ func (s *Store) RestakeBucket(ctx context.Context, setup SimSetup, versionID int
 			life = n
 		}
 	}
-	next, err := seedLife(ctx, tx, setup, prev, life+1, seedCents)
+	next, err := seedLife(ctx, tx, setup, prev, life+1, seedCents, seedPoolThenOwners)
 	if err != nil {
 		return SimBucket{}, err
 	}

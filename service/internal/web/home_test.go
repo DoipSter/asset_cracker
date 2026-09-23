@@ -349,8 +349,8 @@ func TestPagesAndBadRequests(t *testing.T) {
 		mux.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
 		return rec.Code, rec.Body.String()
 	}
-	if code, body := get("/"); code != 200 || !strings.Contains(body, `href="widget"`) || !strings.Contains(body, `id="j-controls"`) {
-		t.Errorf("/ answered %d, or the buckets page has no controls", code)
+	if code, body := get("/"); code != 200 || !strings.Contains(body, `href="widget"`) || !strings.Contains(body, `id="j-deploy"`) {
+		t.Errorf("/ answered %d, or the buckets page has no deploy form", code)
 	}
 	if code, body := get("/widget"); code != 200 || !strings.Contains(body, `fetch("/api/status"`) {
 		t.Errorf("/widget answered %d, or no longer asks for /api/status by absolute path", code)

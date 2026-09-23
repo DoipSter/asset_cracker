@@ -95,7 +95,7 @@ const (
 // Every number here is a CONVENTION, not a measurement. None of them gates a trade: they are
 // budgets and retry cadences. S5 measures whether the budgets are enough on the Pi.
 const (
-	seed3Cents     = 100000           // [CONVENTION] the same $1,000 as v2, so the lines compare
+	seed3Cents     = 100000           // [CONVENTION] the same $1,000 as v2, so the lines compare: what the engine seeds when nobody chose. A bucket the operator deploys at another figure holds and sizes off its own seed (store.HeldBucket.SeedCents, engine.Account.Seed)
 	writeBudget3   = 2 * time.Second  // [CONVENTION] one step's or one settlement's write, its last look included; a failed settlement write's lookup gets a fresh budget of the same size
 	healDelay3     = 10 * time.Second // [CONVENTION] no rebuild sooner after an unknown outcome: a late commit must have landed or died
 	tick3          = 10 * time.Second // [CONVENTION] Run's cadence: rebuild if suspended, probe if paused
@@ -217,6 +217,9 @@ type Runner3 struct {
 	stateDirty     atomic.Bool // the learned offsets changed; Run saves them
 }
 
+// Family is the market family this runner holds buckets for: store.FamilyRounds or FamilyLadders.
+func (r *Runner3) Family() string { return r.opts.family() }
+
 func (r *Runner3) now() time.Time {
 	if r.opts.Now != nil {
 		return r.opts.Now()
@@ -243,7 +246,7 @@ func (o Options3) vet(raw json.RawMessage) (p k3.Params, plumbing bool, err erro
 		return p, false, fmt.Errorf("its params cannot be read: %w", err)
 	}
 	if p.SeedCents != seed3Cents {
-		return p, false, fmt.Errorf("its seed is %d cents and the runner seeds %d", p.SeedCents, seed3Cents)
+		return p, false, fmt.Errorf("its seed convention is %d cents and the runner's is %d", p.SeedCents, seed3Cents)
 	}
 	if err = p.Validate(); err == nil {
 		return p, false, nil
@@ -344,8 +347,14 @@ func (o Options3) load(ctx context.Context, db Store3, on bool) (*loaded3, error
 			l.plumbing = l.plumbing || b.plumbing
 			l.feePerFill = l.feePerFill || b.params.FeePerFill // one Paper serves every bucket: the pessimistic reading wins
 		}
-		// The allocator's mark: the bucket's last recorded high, else what it was seeded with.
-		mark, err := db.HighWaterMark(ctx, h.ID, seed3Cents)
+		// The allocator's mark: the bucket's last recorded high, else what it was seeded with. The
+		// seed is the ledger's, because the operator may deploy a bucket at a figure of their own
+		// (DeployBucket); a bucket with no seed on record is marked at the convention.
+		seed := h.SeedCents
+		if seed <= 0 {
+			seed = seed3Cents
+		}
+		mark, err := db.HighWaterMark(ctx, h.ID, seed)
 		if err != nil {
 			return nil, fmt.Errorf("v3 high-water mark of bucket %d: %w", h.ID, err)
 		}
@@ -603,6 +612,51 @@ func (r *Runner3) Reap(ctx context.Context, versionID int64, restake bool) (Reap
 		out.Next = next.Name
 	}
 	slog.Info("v3 bucket reaped or restaked by the operator", "bucket", out.Bucket, "reaped_cents", out.ReapedCents, "restaked_as", out.Next)
+	return out, nil
+}
+
+// DeployReport is what a Deploy did.
+type DeployReport struct {
+	Bucket    string // the bucket opened
+	SeedCents int64
+	Held      int // buckets held after the reload
+	MayOrder  int // of them, how many may order
+}
+
+// Deploy opens a bucket for a version by the operator's hand, seeded with the amount and from
+// the source they chose (store.DeployBucket): the first life, or the next after a reap. It is
+// refused while the version holds a bucket in this runner, and the store refuses a version of
+// another family with store.ErrOtherFamily, so app can ask the next runner. The write happens
+// while v3 is suspended and the load that follows reads the bucket back as held; a draft or
+// retired version was put on probation with it, so it may order on the next look if it vets.
+func (r *Runner3) Deploy(ctx context.Context, d store.Deploy) (DeployReport, error) {
+	check := func() error {
+		if r.state == stateSuspended {
+			return errors.New("v3 is suspended and its books are not known; try again after it heals")
+		}
+		for i := range r.buckets {
+			if r.buckets[i].VersionID == d.VersionID {
+				return store.ErrBucketHeld
+			}
+		}
+		return nil
+	}
+	var next store.SimBucket
+	between := func(ctx context.Context) error {
+		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.writeBudget)
+		defer cancel()
+		var err error
+		if next, err = r.db.DeployBucket(wctx, r.setup, r.opts.prefix(), r.opts.family(), version3, d); err != nil {
+			return fmt.Errorf("deploying version %d: %w", d.VersionID, err)
+		}
+		return nil
+	}
+	rep, err := r.reload(ctx, "deploying a bucket", check, between)
+	if err != nil {
+		return DeployReport{}, err
+	}
+	out := DeployReport{Bucket: next.Name, SeedCents: d.SeedCents, Held: rep.Held, MayOrder: rep.MayOrder}
+	slog.Info("v3 bucket deployed by the operator", "bucket", out.Bucket, "seed_cents", out.SeedCents, "source", d.Source, "version", d.VersionID)
 	return out, nil
 }
 
@@ -1679,6 +1733,7 @@ func (r *Runner3) read(ctx context.Context, pending []string, ids []int64, bucke
 	accounts := make([]*k3.Account, 0, len(buckets))
 	for _, b := range buckets {
 		a := k3.NewAccount(b.params, b.ID, cash[b.ID], b.mayOrder)
+		a.SeedCents = b.SeedCents // the ledger's: a bucket deployed at its own figure sizes off that figure, not the convention
 		if b.params.Sizing == k3.SizingMartingale && b.mayOrder {
 			// The martingale's state is the ledger's, like everything else in this rebuild.
 			streak, err := r.db.SettledStreak(ctx, b.ID)

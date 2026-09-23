@@ -883,7 +883,7 @@ func bucketDocs(rows []store.BucketRow, books []runner.Book) []map[string]any {
 	out := []map[string]any{}
 	for _, row := range rows {
 		doc := map[string]any{"id": row.ID, "version_id": row.VersionID, "name": row.Name, "engine": fmt.Sprintf("v%d", row.Version), "strategy": strings.TrimPrefix(row.Strategy, "Anti "),
-			"world": "real", "status": row.Status, "life": row.Life, "seed_cents": row.SeedCents, "equity_cents": row.CashCents,
+			"world": "real", "status": row.Status, "life": row.Life, "seed_cents": row.SeedCents, "source": row.Source, "equity_cents": row.CashCents,
 			"cash_cents": row.CashCents, "at_risk_cents": int64(0), "high_water_cents": nil, "allocated_cents": row.AllocatedCents,
 			"bets": row.Bets, "unmarked_bets": 0}
 		if row.Anti {

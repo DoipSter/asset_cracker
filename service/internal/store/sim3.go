@@ -108,6 +108,7 @@ type HeldBucket struct {
 	Strategy      string // the strategy's name, e.g. "Scalper"
 	VersionStatus string // draft | probation | bench | active | retired, as read
 	Params        json.RawMessage
+	SeedCents     int64 // what it was seeded with, from the ledger: the allocator's mark until its first high
 }
 
 // BucketFill is one recorded fill with everything the rebuild folds it with (plan 5.4).
@@ -639,7 +640,9 @@ func (s *Store) TradableVersions(ctx context.Context, family string, version int
 func (s *Store) HeldBuckets(ctx context.Context, family string, version int) ([]HeldBucket, error) {
 	rows, err := s.pool.Query(ctx, `
 		select b.id, b.name, b.ledger_account_id, b.strategy_version_id, st.name, v.status, v.params,
-		       coalesce((select sum(e.amount_cents) from ledger_entry e where e.account_id = b.ledger_account_id), 0)::bigint
+		       coalesce((select sum(e.amount_cents) from ledger_entry e where e.account_id = b.ledger_account_id), 0)::bigint,
+		       coalesce((select sum(e.amount_cents) from ledger_entry e join ledger_transfer t on t.id = e.transfer_id
+		                  where e.account_id = b.ledger_account_id and t.reason = 'seed'), 0)::bigint
 		  from bucket b
 		  join strategy_version v on v.id = b.strategy_version_id
 		  join strategy st        on st.id = v.strategy_id
@@ -653,7 +656,7 @@ func (s *Store) HeldBuckets(ctx context.Context, family string, version int) ([]
 	for rows.Next() {
 		var h HeldBucket
 		var params []byte
-		if err := rows.Scan(&h.ID, &h.Name, &h.LedgerAccountID, &h.VersionID, &h.Strategy, &h.VersionStatus, &params, &h.CashCents); err != nil {
+		if err := rows.Scan(&h.ID, &h.Name, &h.LedgerAccountID, &h.VersionID, &h.Strategy, &h.VersionStatus, &params, &h.CashCents, &h.SeedCents); err != nil {
 			return nil, err
 		}
 		h.Params = params

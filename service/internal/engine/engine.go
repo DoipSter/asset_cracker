@@ -28,6 +28,11 @@ type Account struct {
 	Params    Params
 	BucketID  int64
 	CashCents int64
+	// SeedCents is what THIS bucket was seeded with, from the ledger: the figure the window cap
+	// and the martingale stake are measured against (Seed). Every bucket used to start at the
+	// params' convention; a bucket the operator deploys at another figure sizes off its own.
+	// Zero means unknown, and the params' figure stands.
+	SeedCents int64
 	Positions map[posKey]*Position
 	Windows   map[int64]*Window // by close, unix seconds; pruned once over and empty
 	// MayOrder: AC_V3 on AND the version was probation/active at start. False = settle-only: held,
@@ -58,10 +63,19 @@ func (a *Account) FixedStake() int64 {
 	for i := 0; i < n; i++ {
 		stake *= p.Multiplier
 	}
-	if stake > float64(p.SeedCents) {
-		stake = float64(p.SeedCents)
+	if stake > float64(a.Seed()) {
+		stake = float64(a.Seed())
 	}
 	return int64(math.Floor(stake))
+}
+
+// Seed is the figure this account's sizing is measured against: the bucket's own seed when the
+// rebuild read one from the ledger, else the params' convention.
+func (a *Account) Seed() int64 {
+	if a.SeedCents > 0 {
+		return a.SeedCents
+	}
+	return a.Params.SeedCents
 }
 
 // NewAccount is an account holding cashCents and nothing else. The rebuild makes one per held
@@ -429,7 +443,7 @@ func (a *Account) decide(coin string, m Market, sides broker.Sides, v View, now 
 		}
 		w := a.windowOrFresh(m.Close)
 		in := SizeInput{PSide: pSide, Asks: asks, StaleUnits: staleUnits, Kappa: prm.Kappa, CapBps: prm.WindowCapBps,
-			SeedCents: prm.SeedCents, EquityCents: w.EquityCents, KMax: w.KMax, UsedCents: w.Used(), CashCents: a.CashCents,
+			SeedCents: a.Seed(), EquityCents: w.EquityCents, KMax: w.KMax, UsedCents: w.Used(), CashCents: a.CashCents,
 			FixedStakeCents: a.FixedStake()}
 		if held != nil { // the same side: the loop above lets the account add only to the side it holds
 			in.HeldCents = held.CostCents

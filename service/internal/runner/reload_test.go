@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/doipster/asset_cracker/service/internal/store"
 )
 
 // A reset followed by a reload is a start without a process start: the approved version is
@@ -167,6 +169,76 @@ func TestReapAndRestake(t *testing.T) {
 	if lifeOf(rep.Next) != 3 || lifeOf("Scalper v3") != 1 || lifeOf("x life 7") != 7 {
 		t.Fatalf("lifeOf: %d", lifeOf(rep.Next))
 	}
+}
+
+// Deploy by the operator's hand: a draft is seeded at the figure asked for and put on probation
+// in the same write, so it trades on the next look; a version that holds a bucket is refused
+// without the books being touched; after a reap, a deploy opens the next life at its own figure,
+// and the allocator's mark for that life is that figure, not the convention.
+func TestDeployAtAChosenSeed(t *testing.T) {
+	ctx := context.Background()
+	g := newRig(t)
+	g.s.addVersion("Value", "draft", plumbing(t, "Value"))
+	r := g.start(true)
+	scalper, value := g.s.versions[0].ID, g.s.versions[1].ID
+	if len(r.BucketIDs()) != 1 {
+		t.Fatalf("held %v: a draft is not seeded", r.BucketIDs())
+	}
+
+	if _, err := r.Deploy(ctx, store.Deploy{VersionID: scalper, SeedCents: 50000, Source: store.SeedFromBank}); !errors.Is(err, store.ErrBucketHeld) {
+		t.Fatalf("a version with a bucket held: %v", err)
+	}
+	if g.s.count("DeployBucket") != 0 || len(r.BucketIDs()) != 1 {
+		t.Fatalf("the refusal touched the books: deploys %d held %v", g.s.count("DeployBucket"), r.BucketIDs())
+	}
+	g.wantState(stateRunning)
+
+	rep, err := r.Deploy(ctx, store.Deploy{VersionID: value, SeedCents: 50000, Source: store.SeedFromReplenishment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Bucket != "kalshi15m3 Value v3" || rep.SeedCents != 50000 || rep.Held != 2 || rep.MayOrder != 2 {
+		t.Fatalf("deploy: %+v", rep)
+	}
+	if g.s.version(value).Status != "probation" {
+		t.Fatalf("the draft was not put on probation: %s", g.s.version(value).Status)
+	}
+	var valueID int64
+	for _, b := range g.s.buckets {
+		if b.strategy == "Value" {
+			valueID = b.ID
+		}
+	}
+	if g.s.ledgerCash(valueID) != 50000 {
+		t.Fatalf("the deployed bucket holds %d, want the figure asked for", g.s.ledgerCash(valueID))
+	}
+	r.mu.Lock()
+	mark, acct := r.hwm[valueID], r.engine.Account(valueID)
+	r.mu.Unlock()
+	if mark != 50000 {
+		t.Fatalf("the allocator's mark is %d, want the bucket's own seed", mark)
+	}
+	if acct == nil || acct.Seed() != 50000 {
+		t.Fatalf("the engine sizes the deployed bucket off %v, want its own seed of 50000", acct)
+	}
+	g.wantState(stateRunning)
+
+	// Reaped, then deployed again: life 2 at another figure.
+	g.s.setStatus("Value", "retired")
+	if _, err := r.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reap(ctx, value, false); err != nil {
+		t.Fatal(err)
+	}
+	rep, err = r.Deploy(ctx, store.Deploy{VersionID: value, SeedCents: 25000, Source: store.SeedFromBank})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Bucket != "kalshi15m3 Value v3 life 2" || rep.Held != 2 || rep.MayOrder != 2 || g.s.version(value).Status != "probation" {
+		t.Fatalf("redeploy: %+v status %s", rep, g.s.version(value).Status)
+	}
+	g.equalsLedger(r)
 }
 
 // A load that cannot read leaves the old books in place, and the runner heals from them.

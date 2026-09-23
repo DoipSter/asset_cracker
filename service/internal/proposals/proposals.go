@@ -8,8 +8,9 @@
 // buckets page uses (POST /api/controls/version/new), with the same operator key, the same
 // engine validation and the same labelling. This process has no write grant of its own
 // (acdeploy reads the record as assetcracker_ro), so the service's gate is the gate. A draft
-// trades nothing: the Approve click on the buckets page seeds it, and that click stays a
-// person's. No tool here approves, retires, moves money or places an order.
+// trades nothing: the Deploy form on the buckets page seeds it, at a seed and from a source a
+// person chooses, and that click stays a person's. No tool here deploys, retires, moves money
+// or places an order.
 //
 // The dry run (strategy_build) and the presets (strategy_presets) are computed here from the
 // engine in this binary, which is the release the service runs; they touch nothing.
@@ -79,8 +80,9 @@ const descBuild = `A dry run of the builder: the shape in, the version the engin
 
 const descRegister = `Register a version-3 strategy as a DRAFT from a shape, through the running service's builder ` +
 	`route (the same one the buckets page uses): the engine validates and labels it, the registry gains a row with ` +
-	`status draft, code_ref says it was proposed via mcp. A draft trades nothing until a person clicks Approve on the ` +
-	`buckets page, which seeds a $1,000 simulated bucket. hypothesis is required: say what the version is meant to ` +
+	`status draft, code_ref says it was proposed via mcp. A draft trades nothing until a person deploys it on the ` +
+	`buckets page, choosing its simulated seed ($1,000 by convention) and whether it is drawn from replenishment or ` +
+	`the bank. hypothesis is required: say what the version is meant to ` +
 	`test. The operator key is taken from the server's environment or key file on the Pi, never from this call. ` +
 	`One version 3 per name; a name already registered is refused, not replaced.`
 
@@ -168,8 +170,9 @@ func (d *Door) registerVersion(ctx context.Context, _ *mcp.CallToolRequest, s en
 	if err := d.call(ctx, http.MethodPost, "/api/controls/version/new", body, &out); err != nil {
 		return nil, Registered{}, err
 	}
-	out.Note = "Registered as a draft: it trades nothing yet. Approve on the buckets page seeds it $1,000 in simulation " +
-		"and it trades on the engine's next look. One more trial in the registry."
+	out.Note = "Registered as a draft: it trades nothing yet. Deploy on the buckets page seeds it in simulation, at the " +
+		"seed and from the source a person chooses ($1,000 by convention), and it trades on the engine's next look. " +
+		"One more trial in the registry."
 	return nil, out, nil
 }
 
@@ -217,7 +220,7 @@ func (d *Door) versions(ctx context.Context, _ *mcp.CallToolRequest, _ noInput) 
 		return nil, Registry{}, err
 	}
 	out.Note = "Simulated money. draft: registered, not seeded. probation/active: holds a bucket and trades. " +
-		"retired: its bucket is held settle-only. Approval and retirement are clicks on the buckets page."
+		"retired: its bucket is held settle-only. Deploying and retirement are clicks on the buckets page."
 	return nil, out, nil
 }
 

@@ -6,15 +6,22 @@ The Asset Cracker service, in Go. See `docs/platform-brief.md` for where it is g
 v1 and v2 are frozen archives, imported only by `cmd/replay` and `cmd/replay2`. There is no order
 code and there are no credentials. The pages are served on localhost. Every ledger account is `sim`.
 
-The buckets page is the operator's desk for the paper fund: turn new orders on or off; approve or
-retire a version-3 strategy, which seeds a fresh $1,000 bucket or holds one settle-only at once,
-without a process start (`Runner3.Reload`); set the four sustainment allocation rates, taken at
-settlement from a bucket's gain above its high-water mark, by typing over the figures of the
-rule in force (the remainder follows; a save row with the reason appears while a figure
-differs); and reset the simulated books, which
-empties them and starts again from the approved versions. A bucket that loses its last bet with
+The two pages divide the operator's desk (2026-09-23). **The home page holds the bank.** Its
+balance sheet lists the bank's accounts, and each account's row has a menu (a right-click, a long
+press, or its ⋯): move money out of it or into it, and on replenishment schedule a payday; the
+bank's own row sets the four sustainment allocation rates (each account also shows its rate
+beside its balance), schedules a payday, and closes the bank for the next one (the reset, after
+typing `reset sim`). The paydays scheduled and the rule in force stand under the sheet. **The
+buckets page deploys strategy accounts.** Its deploy form takes a strategy from the registry, a
+seed in dollars ($1,000 by default, the convention every bucket so far started at), and where
+the seed is drawn from: replenishment (refused when it is short) or the bank (the owners deposit
+it). Deploy seeds the bucket, puts a draft or retired version on probation in the same write,
+and the engine loads it without a process start (`Runner3.Deploy`, `store.DeployBucket`); a
+version that holds a bucket must be closed out first (the × on its row). The registry under the
+form retires a version (its bucket held settle-only), resumes a retired one that still holds a
+bucket, and remixes; the new-orders switch is there too. A bucket that loses its last bet with
 less than the floor left is closed at that settlement: reaped into replenishment, frozen, not
-replaced.
+replaced. Each bucket's row says where its seed came from, read off the seed's ledger memo.
 
 **Two market families, one engine** (2026-09-23). A version belongs to `kalshi15m`, the
 15-minute rounds, or `kalshiladder`, Kalshi's daily and weekly above/below ladders (`KXBTCD` and
@@ -33,18 +40,24 @@ leg closing at the same instant is one window. Presets: Day Value, Day Favourite
 Designed from the model side on purpose: `docs/longshot-protocol.md` reserves the price-band
 question on these horizons for its one look each.
 
-**The bucket's lifecycle by hand** (each version row): **Reap** closes the version's bucket once
-nothing is open, what it holds going to the common pool and the bucket frozen with its record
-(`Runner3.Reap`, refused while a bet is on); **Reap & restake** does that and seeds "`<name>
-life N`" from the pool at once (the owners cover a shortfall, recorded as its own deposit);
-**Restake** opens the next life of a version whose every bucket is frozen. Approving a retired
-version resumes its held bucket as it stands; a version whose bucket was reaped comes back by
-Restake, not by Approve. **Remix** fills the builder with a version's own numbers
-(`engine.ToShape`) so a variant starts from what traded. **Transfer** moves simulated money by
-hand: out of a bucket into a reserve or the pool, between the pools and reserves, to or from the
+**The bucket's lifecycle by hand.** The × on a bucket's row closes it out once nothing is open:
+what it holds goes to the common pool and the bucket is frozen with its record (`Runner3.Reap`
+for the live engine, refused while a bet is on; the ledger alone for an old engine's). The next
+life is a **Deploy** of the same version from the buckets page, at whatever seed and source the
+operator chooses ("`<name> life N`"). `Runner3.Reap` with restake, and `api/controls/version/reap`,
+remain for the engine's own restart from the pool (the owners cover a shortfall, recorded as its
+own deposit). **Resume** puts a retired version that still holds a bucket back on probation, as
+it stands. **Remix** fills the builder with a version's own numbers (`engine.ToShape`) so a
+variant starts from what traded. **Moving money** is the home page's: from an account's menu,
+out of a bucket into a reserve or the pool, between the pools and reserves, to or from the
 owners; never into a bucket (the allocator would read it as a gain). Money taken out of a bucket
 by hand lowers its high-water mark by the same amount (`store.HighWaterMark`), so the strategy is
-not asked to earn it back before its next gain counts. Each is a ledger transfer with a memo.
+not asked to earn it back before its next gain counts. Each is a ledger transfer with a memo. A
+bucket's own seed, from the ledger, is the figure the engine measures it against: the allocator's
+mark until its first high, the window cap (`window_cap_bps` of the lesser of equity and seed) and
+the martingale ceiling (`engine.Account.Seed`), so a bucket deployed at $500 is sized as a $500
+bucket and not asked to reach $1,000 first. The version's `seed_cents` stays the convention the
+engine seeds at when nobody chose.
 
 **The strategy builder** (buckets page, "New strategy") makes a version-3 row from a shape:
 the exit rule (`hold` or `ev`), a side filter (whichever the belief favours, the favourite only,
@@ -55,7 +68,7 @@ Martingale control. Every number set is a `convention` the owner chose, every on
 `inherited` from the parent, the name carries "(conventions)", and `engine.Params.Validate` is
 the gate (`engine.FromShape`). No shape can make the engine buy where its belief has no edge after
 costs; the shapes decide when, which side, how much and how to leave. Registered as `draft`;
-Approve seeds it. Each is one more trial the leaderboard's threshold is corrected for. Versions
+deploying it seeds it. Each is one more trial the leaderboard's threshold is corrected for. Versions
 whose four numbers were MEASURED come only from `cmd/measure3` (`docs/v3-measurement-protocol.md`).
 
 | Package | |
@@ -113,8 +126,8 @@ the Pi, as `assetcracker_ro`, so Cursor's agent can call `instruments`, `candles
 `book`, `markets`, `returns_summary`, `vol_profile`, `momentum_grid`, `features` and
 `analysis_results` directly. It uses the release binary. The same server carries the strategy
 builder as four tools: `strategy_presets`, `strategy_build` (a dry run, every number labelled),
-`strategy_register` (a draft, through the running service's route and operator key; Approve
-stays a click on the buckets page) and `strategy_versions` (the registry). The key comes from
+`strategy_register` (a draft, through the running service's route and operator key; deploying
+it stays a click on the buckets page) and `strategy_versions` (the registry). The key comes from
 `~/.config/assetcracker/operator_key` on the Pi, put there once by the owner. What each tool
 returns, and what it deliberately cannot do, is in `docs/mcp-read-surface.md`.
 
@@ -124,7 +137,7 @@ returns, and what it deliberately cannot do, is in `docs/mcp-read-surface.md`.
 |---|---|
 | `AC_DATABASE_URL` | `postgres:///assetcracker?host=/var/run/postgresql` (unix socket, peer auth, no password) |
 | `AC_HTTP_ADDR` | `127.0.0.1:8377`. `0.0.0.0:8377` puts the page on the house network; set the key below with it |
-| `AC_OPERATOR_KEY` | unset: no passphrase. Set, every change on the buckets page and the assets dialog needs it (`X-Operator-Key`); reads never do |
+| `AC_OPERATOR_KEY` | unset: no passphrase. Set, every change on either page (the bank's menus on home, the deploy form and registry on buckets) and in the assets dialog needs it (`X-Operator-Key`); reads never do |
 | `AC_USER_AGENT` | `asset-cracker/0.1` |
 | `AC_V3` | on unless exactly `off`. The buckets page can override this; with no saved switch, off means settle-only |
 | `AC_GATE_MIN_EDGE` | `0.02`: the after-fee return per dollar staked the promotion gate's sample floor is sized to find |

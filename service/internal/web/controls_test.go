@@ -197,6 +197,77 @@ func TestReapTransferAndShapes(t *testing.T) {
 	}
 }
 
+// Deploy: the page names the version, the seed and the source; the route finds the version's
+// family and hands the engine the deploy. A version that holds a bucket is refused before the
+// engine is asked, replenishment short is the store's refusal, and a bad figure never leaves the route.
+func TestDeployAChosenSeed(t *testing.T) {
+	f := &fakeControls{versions: []store.Version3{
+		{ID: 19, Name: "Scalper (conventions)", Status: "probation", Family: "kalshi15m", Held: true, Lives: 1},
+		{ID: 21, Name: "Day Value (conventions)", Status: "draft", Family: "kalshiladder"},
+	}}
+	var asked []string
+	dropped := 0
+	mux := controlsMux(f, Control{
+		Drop: func() { dropped++ },
+		Deploy: func(_ context.Context, family string, d store.Deploy) (Deployed, error) {
+			asked = append(asked, family)
+			if d.Source == store.SeedFromReplenishment {
+				return Deployed{}, store.DeployRefused{Why: "Replenishment holds $12.00; the deploy asks for $500.00. Pull from the bank instead, or deploy less."}
+			}
+			return Deployed{Bucket: "kalshiladder3 Day Value (conventions) v3", SeedCents: d.SeedCents, Source: d.Source, Held: 2, Ordering: 2}, nil
+		},
+	})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/controls", nil))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"seed_sources":["replenishment","bank"]`) || !strings.Contains(rec.Body.String(), `"default_seed_cents":100000`) {
+		t.Fatalf("the form's choices %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = postJSON(mux, "/api/controls/bucket/deploy", `{"version_id":21,"cents":50000,"source":"bank"}`); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"bucket":"kalshiladder3 Day Value (conventions) v3"`) || !strings.Contains(rec.Body.String(), `"seed_cents":50000`) || dropped != 1 {
+		t.Fatalf("deploy %d %s dropped %d", rec.Code, rec.Body.String(), dropped)
+	}
+	if len(asked) != 1 || asked[0] != "kalshiladder" {
+		t.Fatalf("the engine was asked for family %v; the version is a ladder", asked)
+	}
+	if rec = postJSON(mux, "/api/controls/bucket/deploy", `{"version_id":21,"cents":50000,"source":"replenishment"}`); rec.Code != 400 || !strings.Contains(rec.Body.String(), "Pull from the bank instead") {
+		t.Fatalf("replenishment short %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = postJSON(mux, "/api/controls/bucket/deploy", `{"version_id":19,"cents":50000,"source":"bank"}`); rec.Code != 409 || len(asked) != 2 {
+		t.Fatalf("held %d %s asked %v", rec.Code, rec.Body.String(), asked)
+	}
+	if rec = postJSON(mux, "/api/controls/bucket/deploy", `{"version_id":99,"cents":50000,"source":"bank"}`); rec.Code != 404 {
+		t.Fatalf("missing %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = postJSON(mux, "/api/controls/bucket/deploy", `{"version_id":21,"cents":0,"source":"bank"}`); rec.Code != 400 || len(asked) != 2 {
+		t.Fatalf("no seed %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = postJSON(mux, "/api/controls/bucket/deploy", `{"version_id":21,"cents":100,"source":"owners"}`); rec.Code != 400 || len(asked) != 2 {
+		t.Fatalf("bad source %d %s", rec.Code, rec.Body.String())
+	}
+	none := controlsMux(&fakeControls{}, Control{})
+	if rec := postJSON(none, "/api/controls/bucket/deploy", `{"version_id":21,"cents":100,"source":"bank"}`); rec.Code != 503 {
+		t.Fatalf("no engine in the process: %d", rec.Code)
+	}
+}
+
+// The two pages divide the work: the home page holds the bank (its accounts' menus move money and
+// schedule a payday, the rule and the reset hang off the bank), and the buckets page deploys strategy
+// accounts (a strategy, a seed, and where the seed is drawn from). The money forms no longer live on buckets.
+func TestHomeHoldsTheBankAndBucketsDeploys(t *testing.T) {
+	page := string(homePage)
+	for _, want := range []string{`id="bankform"`, `id="paydays"`, `id="rule"`, `data-menu="`, `"form-payday"`, `"form-rule"`, `"form-reset"`, `"form-out"`, `"form-in"`,
+		`api/controls/transfer`, `api/controls/payday`, `api/controls/policy`, `api/controls/reset`,
+		`id="j-deploy"`, `id="dp-version"`, `id="dp-seed"`, `id="dp-source"`, `api/controls/bucket/deploy`, `seed_sources`, `default_seed_cents`, `b.source`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the page lacks %s", want)
+		}
+	}
+	for _, gone := range []string{`transferHTML`, `paydayHTML`, `controlsHTML`, `data-act="restake"`, `data-act="reap"`, `id="j-money"`, `id="j-rule"`, `mountBuckets`} {
+		if strings.Contains(page, gone) {
+			t.Errorf("the buckets page still carries %s", gone)
+		}
+	}
+}
+
 // Close-out is per bucket. An old engine is closed in the ledger and its record stays. A live-engine
 // bucket is handed to that engine's reap, and is not restaked.
 func TestCloseOutOneBucket(t *testing.T) {

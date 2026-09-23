@@ -406,6 +406,22 @@ func Run(version string) error {
 					}
 					return web.Reaped{}, last
 				},
+				// Deploy knows the version's family from the registry, so only the runner that
+				// holds that family is suspended for it.
+				Deploy: func(rctx context.Context, family string, d store.Deploy) (web.Deployed, error) {
+					for _, r := range runners {
+						if r.Family() != family {
+							continue
+						}
+						rep, err := r.Deploy(rctx, d)
+						if err != nil {
+							return web.Deployed{}, err
+						}
+						dropCapital() // a bucket opened: the next snapshot reads the ledger
+						return web.Deployed{Bucket: rep.Bucket, SeedCents: rep.SeedCents, Source: d.Source, Held: rep.Held, Ordering: rep.MayOrder}, nil
+					}
+					return web.Deployed{}, store.ErrOtherFamily
+				},
 				EnvOn:  cfg.V3,
 				Status: run3.OrdersStatus, // the switch is one row; both runners read it, and both apply it below
 				Apply: func(on bool) string {

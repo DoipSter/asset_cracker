@@ -244,8 +244,9 @@ type BucketRow struct {
 	Life           int   // 1, or N for "<name> life N"
 	CashCents      int64 // the ledger's balance for the bucket
 	SeedCents      int64
-	AllocatedCents int64 // the sustainment allocation taken from it to date
-	Bets           int64 // simulated buys filled
+	Source         string // where the seed was drawn from: SeedFromReplenishment or SeedFromBank, read off the seed's memo; "" with no seed
+	AllocatedCents int64  // the sustainment allocation taken from it to date
+	Bets           int64  // simulated buys filled
 }
 
 // LifeOf reads a bucket's life number from its name: "<name> life N" is life N, anything else 1.
@@ -263,12 +264,23 @@ func LifeOf(name string) int {
 // Its bet count is the buy orders that FILLED something. A buy that was cancelled with no fill
 // bought nothing and is not a bet; one that was partly filled is one bet. The first two engines
 // fill every order whole, so for them this is every buy order, as it always was.
+//
+// Where the seed came from is read off the seed transfer's memo (fundSeed writes it). The first
+// life of a version the engine seeded itself says only "seed <name>", funded by a deposit from
+// the owners: that is the bank. A life the pool restaked says "from replenishment", whether or
+// not the owners covered a shortfall.
 func (s *Store) Buckets(ctx context.Context) ([]BucketRow, error) {
 	rows, err := s.pool.Query(ctx, `
 		select b.id, v.id, b.name, b.status, st.name, v.version, coalesce((v.params->>'anti')::boolean, false),
 		       coalesce((select sum(e.amount_cents) from ledger_entry e where e.account_id = b.ledger_account_id), 0)::bigint,
 		       coalesce((select sum(e.amount_cents) from ledger_entry e join ledger_transfer t on t.id = e.transfer_id
 		                  where e.account_id = b.ledger_account_id and t.reason = 'seed'), 0)::bigint,
+		       coalesce((select case when count(*) = 0 then ''
+		                             when bool_or(t.memo like '% from the bank') then 'bank'
+		                             when bool_or(t.memo like '% from replenishment') then 'replenishment'
+		                             else 'bank' end
+		                   from ledger_entry e join ledger_transfer t on t.id = e.transfer_id
+		                  where e.account_id = b.ledger_account_id and t.reason = 'seed'), ''),
 		       coalesce((select sum(k.winnings_cents + k.replenish_cents + k.tax_cents + k.fees_cents)
 		                   from bucket_skim k where k.bucket_id = b.id), 0)::bigint,
 		       (select count(*) from trade_order o where o.bucket_id = b.id and o.action = 'buy'
@@ -285,7 +297,7 @@ func (s *Store) Buckets(ctx context.Context) ([]BucketRow, error) {
 	out := []BucketRow{}
 	for rows.Next() {
 		var b BucketRow
-		if err := rows.Scan(&b.ID, &b.VersionID, &b.Name, &b.Status, &b.Strategy, &b.Version, &b.Anti, &b.CashCents, &b.SeedCents, &b.AllocatedCents, &b.Bets); err != nil {
+		if err := rows.Scan(&b.ID, &b.VersionID, &b.Name, &b.Status, &b.Strategy, &b.Version, &b.Anti, &b.CashCents, &b.SeedCents, &b.Source, &b.AllocatedCents, &b.Bets); err != nil {
 			return nil, err
 		}
 		b.Life = LifeOf(b.Name)
@@ -324,6 +336,12 @@ func EventNote(kind string, detail []byte) string {
 	switch {
 	case d["cents"] != nil:
 		if seed, ok := dollars("cents"); ok {
+			switch d["source"] {
+			case SeedFromBank:
+				return "seeded with " + seed + " from the bank"
+			case SeedFromReplenishment:
+				return "seeded with " + seed + " from replenishment"
+			}
 			return "seeded with " + seed
 		}
 	case kind == "allocated" || kind == "taxed":

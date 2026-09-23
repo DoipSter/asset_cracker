@@ -1,8 +1,10 @@
 // Package web serves the home page, the phone widget, and the JSON they poll.
 //
-// The pages read. The buckets page also posts four controls, all for simulated money:
-// the orders switch, approving or retiring a version-3 strategy, the allocation rates,
-// and resetting the sim books. The server listens on localhost only.
+// The pages read, and post a few controls, all for simulated money. The home page holds the
+// bank: from an account's own row it moves money, schedules a payday, sets the allocation
+// rates, and closes the bank for the next one (the reset). The buckets page deploys strategy
+// accounts: a version, a seed, and where the seed is drawn from; it also retires a version,
+// closes a bucket out, and switches new orders. The server listens on localhost only.
 package web
 
 import (

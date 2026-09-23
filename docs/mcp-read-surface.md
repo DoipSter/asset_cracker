@@ -145,9 +145,9 @@ the id. Three reasons for the detour:
 - **One write path, one gate.** The service holds the operator key and the write grants
   (`db/grants.sql`); the MCP process runs as `acdeploy`, which reads the record only as
   `assetcracker_ro` and can insert nothing. There is no second door to widen.
-- **A draft trades nothing.** Seeding is the Approve click on the buckets page, which stays a
-  person's (brief §9: "each proposal waits for a person"). No tool here approves, retires, moves
-  money or places an order.
+- **A draft trades nothing.** Seeding is the Deploy form on the buckets page (a seed and where
+  it is drawn from), which stays a person's (brief §9: "each proposal waits for a person"). No
+  tool here deploys, retires, moves money or places an order.
 - **The registry says who.** `code_ref` records the origin; every registration is one more trial
   the leaderboard's threshold is corrected for, whoever made it.
 
@@ -179,8 +179,8 @@ side against a stand-in service: the key header, the `via` field, the 401 and 40
 
 ## What is not here
 
-- Approval, retirement, the orders switch, the rates, the reset: clicks on the buckets page, a
-  person's. Raw SQL, writes to any table.
+- Deploying, retirement, the orders switch (the buckets page), the rates, the paydays, moving
+  money, the reset (the home page's bank): clicks, a person's. Raw SQL, writes to any table.
 - The ledger, journal, metrics, commentary (TSK-42's first half). Same server, later.
 - Fifteen-minute candles: not stored. `bars` builds any bucket from the trade prints, but only
   from the day recording started.

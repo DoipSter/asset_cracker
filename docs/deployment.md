@@ -20,7 +20,7 @@ goes through a private VPN.
 | Who writes | `assetcracker`, under systemd | nobody: the service refuses to start here |
 | Migrate | `db/migrate.sh prod` | `db/migrate.sh` (rehearse, then prod) |
 | Release | `deploy/pi/deploy.sh prod` | `deploy/pi/deploy.sh` copies a spare binary and does not run it |
-| Wipe | the buckets page, simulated books, after typing `reset sim` | `db/reset-dev.sh` |
+| Wipe | the home page, from the bank's row (close this bank and open the next), after typing `reset sim` | `db/reset-dev.sh` |
 
 A strategy is a version row in the record. Graduation is its status (`draft`, `probation`,
 `bench`, `active`, `retired`), not a second database. Agents read the record as
@@ -121,7 +121,8 @@ The page is served by the Pi. Three roads lead to it; pick by who else can reach
 - **The house network** (the plain one): in `/etc/assetcracker/env` set
   `AC_HTTP_ADDR=0.0.0.0:8377` and `AC_OPERATOR_KEY=<a passphrase>`, then restart the unit. The
   page is `http://rpi-v5-1.local:8377/` from any browser in the house. Anyone on the Wi-Fi can
-  read it (simulated figures); a change on the buckets page or the assets dialog asks for the
+  read it (simulated figures); a change on either page (the bank's menus on home, the deploy form
+  on buckets) or in the assets dialog asks for the
   passphrase once per tab and sends it as `X-Operator-Key`. Without `AC_OPERATOR_KEY` the
   controls are open to whoever can reach the port: fine on localhost or a tailnet, not on a LAN.
   The MCP server's `strategy_register` sends the same header; its copy of the key lives in

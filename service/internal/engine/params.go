@@ -62,7 +62,7 @@ type Params struct {
 
 	Kappa          float64 `json:"kappa"`           // the Kelly fraction staked [CONVENTION: a quarter]
 	WindowCapBps   int64   `json:"window_cap_bps"`  // most of min(E_w, seed) one window may use [LIMIT]
-	SeedCents      int64   `json:"seed_cents"`      // the bucket's starting balance [CONVENTION]
+	SeedCents      int64   `json:"seed_cents"`      // the bucket's starting balance [CONVENTION]; a bucket seeded at another figure sizes off its own (Account.Seed)
 	ExhaustedCents int64   `json:"exhausted_cents"` // under this with nothing open, the account has run out [INHERITED]
 
 	TauMin  float64 `json:"tau_min"` // seconds to the close between which it may enter [INHERITED]

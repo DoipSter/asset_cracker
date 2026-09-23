@@ -150,7 +150,7 @@ func TestRegisterPostsToTheService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.ID != 42 || out.Status != "draft" || !strings.Contains(out.Note, "Approve") {
+	if out.ID != 42 || out.Status != "draft" || !strings.Contains(out.Note, "Deploy") {
 		t.Fatalf("answer %+v", out)
 	}
 	if got.Method != http.MethodPost || got.Path != "/api/controls/version/new" || got.Key != "open-sesame" {

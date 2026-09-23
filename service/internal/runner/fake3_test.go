@@ -363,7 +363,7 @@ func (s *fakeStore) HeldBuckets(ctx context.Context, family string, version int)
 			continue
 		}
 		v := s.version(b.VersionID)
-		h := store.HeldBucket{SimBucket: b.SimBucket, Strategy: b.strategy, VersionStatus: v.Status, Params: v.Params}
+		h := store.HeldBucket{SimBucket: b.SimBucket, Strategy: b.strategy, VersionStatus: v.Status, Params: v.Params, SeedCents: b.seed}
 		h.CashCents = s.cash(b)
 		out = append(out, h)
 	}
@@ -630,6 +630,46 @@ func (s *fakeStore) RestakeBucket(ctx context.Context, setup store.SimSetup, ver
 		return store.SimBucket{}, store.ErrBucketHeld
 	}
 	return s.seedLife(prev, lifeOf(prev.Name)+1, seedCents), nil
+}
+
+// DeployBucket is the store's: the first life named as EnsureSimSetup names it, or the next after
+// a frozen one; a draft or retired version goes on probation with it. The fake has one family.
+func (s *fakeStore) DeployBucket(ctx context.Context, setup store.SimSetup, prefix, family string, version int, d store.Deploy) (store.SimBucket, error) {
+	if hb := s.hook(ctx, "DeployBucket"); hb.err != nil {
+		return store.SimBucket{}, hb.err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d.SeedCents <= 0 || (d.Source != store.SeedFromReplenishment && d.Source != store.SeedFromBank) {
+		return store.SimBucket{}, store.DeployRefused{Why: "bad deploy"}
+	}
+	v := s.version(d.VersionID)
+	if v == nil {
+		return store.SimBucket{}, store.ErrVersionNotFound
+	}
+	var prev *fakeBucket
+	for _, fb := range s.buckets {
+		if fb.VersionID == d.VersionID {
+			prev = fb
+		}
+	}
+	var next store.SimBucket
+	switch {
+	case prev != nil && !prev.Frozen:
+		return store.SimBucket{}, store.ErrBucketHeld
+	case prev != nil:
+		next = s.seedLife(prev, lifeOf(prev.Name)+1, d.SeedCents)
+	default:
+		fb := &fakeBucket{SimBucket: store.SimBucket{ID: s.id(), Name: fmt.Sprintf("%s %s v%d", prefix, v.Name, version), LedgerAccountID: s.id(), VersionID: d.VersionID}, strategy: v.Name, seed: d.SeedCents}
+		s.buckets = append(s.buckets, fb)
+		s.created = append(s.created, "bucket "+fb.Name, "seed "+fb.Name+" from "+d.Source)
+		next = fb.SimBucket
+		next.CashCents = d.SeedCents
+	}
+	if v.Status == "draft" || v.Status == "retired" {
+		v.Status = "probation"
+	}
+	return next, nil
 }
 
 func (s *fakeStore) SettledStreak(ctx context.Context, bucketID int64) (int, error) {

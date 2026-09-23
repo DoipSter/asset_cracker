@@ -156,6 +156,16 @@ func TestMartingaleStake(t *testing.T) {
 	if (&Account{Params: Params{Sizing: SizingKelly}}).FixedStake() != 0 {
 		t.Error("Kelly sizing has no fixed stake")
 	}
+	// A bucket seeded at its own figure is bounded by that figure, not the params' convention;
+	// with no figure read from the ledger the convention stands.
+	a.SeedCents = 5000
+	if got := a.FixedStake(); got != 5000 || a.Seed() != 5000 {
+		t.Errorf("the stake never passes the bucket's own seed: %d (seed %d)", got, a.Seed())
+	}
+	a.SeedCents = 0
+	if a.Seed() != 100000 {
+		t.Errorf("no seed on record: the convention stands, got %d", a.Seed())
+	}
 	// The fixed stake goes through Size, bounded by the room like any stake.
 	s := Size(SizeInput{PSide: 0.70, Asks: []broker.Price{6000}, Kappa: 0.25, CapBps: 2500, SeedCents: 100000,
 		EquityCents: 100000, CashCents: 100000, FixedStakeCents: 4000})

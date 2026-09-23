@@ -42,6 +42,10 @@ func operator(key string, h http.HandlerFunc) http.HandlerFunc {
 // reloadBudget is the engine's start-up budget: the seeding, the reads and the rebuild.
 const reloadBudget = 30 * time.Second
 
+// defaultSeedCents is what the deploy form starts at: the $1,000 every bucket has been seeded
+// with so far (runner.seed3Cents), so the lines compare unless the operator chooses otherwise.
+const defaultSeedCents = 100000
+
 // Control is how the buckets page reaches the running engine. A nil func means there is
 // no engine in this process: the saved switch still applies at the next start.
 type Control struct {
@@ -68,8 +72,21 @@ type Control struct {
 	// Reap closes a version's held bucket by the operator's hand, into the common pool; with
 	// restake, or with nothing held, a fresh life is seeded in its place. Nil means no engine.
 	Reap func(ctx context.Context, versionID int64, restake bool) (Reaped, error)
+	// Deploy opens a bucket for a version at the seed and from the source the operator chose.
+	// family is the version's, so app hands it to the runner that holds that family. Nil means
+	// no engine.
+	Deploy func(ctx context.Context, family string, d store.Deploy) (Deployed, error)
 	// Drop forgets the cached capital read, so the next value snapshot sees a bucket just closed.
 	Drop func()
+}
+
+// Deployed is what a Deploy did, for the page.
+type Deployed struct {
+	Bucket    string `json:"bucket"`
+	SeedCents int64  `json:"seed_cents"`
+	Source    string `json:"source"`
+	Held      int    `json:"held"`
+	Ordering  int    `json:"ordering"`
 }
 
 // Reaped is what a Reap did, for the page.
@@ -248,6 +265,9 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 			},
 			"bank":    bankOut,
 			"paydays": paydays,
+			// The deploy form: where a seed may be drawn from, and the figure it starts at.
+			"seed_sources":       store.SeedSources,
+			"default_seed_cents": defaultSeedCents,
 		})
 	})
 
@@ -352,6 +372,86 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 			list.drop()
 		}
 		slog.Info("bucket reaped from the buckets page", "version", body.ID, "bucket", out.Bucket, "reaped_cents", out.ReapedCents, "next", out.Next)
+		writeJSON(w, out)
+	}))
+
+	// Deploy: the operator opens a bucket for a version. {version_id, cents, source}, source being
+	// "replenishment" or "bank". A draft or retired version is put on probation with it. Refused
+	// (409) while the version holds a bucket, 400 when replenishment is short or a figure is bad,
+	// 404 for a version that is not registered.
+	mux.HandleFunc("POST /api/controls/bucket/deploy", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			writeErr(w, http.StatusServiceUnavailable, "The controls have no database.")
+			return
+		}
+		if ctl.Deploy == nil {
+			writeErr(w, http.StatusServiceUnavailable, "No engine runs in this process; deploy at the next start's page.")
+			return
+		}
+		var body struct {
+			VersionID int64  `json:"version_id"`
+			Cents     int64  `json:"cents"`
+			Source    string `json:"source"`
+		}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		switch {
+		case body.VersionID == 0:
+			writeErr(w, http.StatusBadRequest, "Pick the strategy to deploy.")
+			return
+		case body.Cents <= 0:
+			writeErr(w, http.StatusBadRequest, "Enter the seed in dollars, above zero.")
+			return
+		case body.Source != store.SeedFromReplenishment && body.Source != store.SeedFromBank:
+			writeErr(w, http.StatusBadRequest, "Pull the seed from replenishment or from the bank.")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), reloadBudget)
+		defer cancel()
+		versions, err := db.ListVersion3(ctx)
+		if err != nil {
+			slog.Error("controls: deploy versions", "err", err)
+			writeErr(w, http.StatusInternalServerError, "The version-3 strategies could not be read.")
+			return
+		}
+		var family string
+		for _, v := range versions {
+			if v.ID == body.VersionID {
+				family = v.Family
+				if v.Held {
+					writeErr(w, http.StatusConflict, v.Name+" already holds a bucket. Close it out first, then deploy again.")
+					return
+				}
+			}
+		}
+		if family == "" {
+			writeErr(w, http.StatusNotFound, "That version-3 strategy is not registered.")
+			return
+		}
+		out, err := ctl.Deploy(ctx, family, store.Deploy{VersionID: body.VersionID, SeedCents: body.Cents, Source: body.Source})
+		if err != nil {
+			var refused store.DeployRefused
+			switch {
+			case errors.As(err, &refused):
+				writeErr(w, http.StatusBadRequest, refused.Why)
+			case errors.Is(err, store.ErrBucketHeld):
+				writeErr(w, http.StatusConflict, "That version already holds a bucket. Close it out first, then deploy again.")
+			case errors.Is(err, store.ErrVersionNotFound):
+				writeErr(w, http.StatusNotFound, "That version-3 strategy is not registered.")
+			default:
+				slog.Error("controls: deploy", "err", err)
+				writeErr(w, http.StatusInternalServerError, "The bucket was not deployed: "+err.Error())
+			}
+			return
+		}
+		if list != nil {
+			list.drop()
+		}
+		if ctl.Drop != nil {
+			ctl.Drop()
+		}
+		slog.Info("bucket deployed from the buckets page", "version", body.VersionID, "bucket", out.Bucket, "seed_cents", out.SeedCents, "source", out.Source)
 		writeJSON(w, out)
 	}))
 
