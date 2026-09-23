@@ -76,7 +76,9 @@ func snapshotValues(ctx context.Context, db *store.Store, src web.Sources, run *
 }
 
 // writeTicks batches trade prints into the database: every second, or sooner when busy.
-func writeTicks(ctx context.Context, db *store.Store, products map[string]int64, in <-chan coinbase.Trade, written *atomic.Int64) {
+// writeTicks records the prints of the seeded products in batches of up to 500 or one second,
+// whichever comes first. insert is the store's InsertTicks.
+func writeTicks(ctx context.Context, insert func(context.Context, []store.Tick) error, products map[string]int64, in <-chan coinbase.Trade, written *atomic.Int64) {
 	var batch []store.Tick
 	flush := func() {
 		if len(batch) == 0 {
@@ -84,7 +86,7 @@ func writeTicks(ctx context.Context, db *store.Store, products map[string]int64,
 		}
 		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		if err := db.InsertTicks(wctx, batch); err != nil {
+		if err := insert(wctx, batch); err != nil {
 			slog.Error("writing ticks", "n", len(batch), "err", err)
 		} else {
 			written.Add(int64(len(batch)))
@@ -101,7 +103,15 @@ func writeTicks(ctx context.Context, db *store.Store, products map[string]int64,
 		case <-t.C:
 			flush()
 		case tr := <-in:
-			batch = append(batch, store.Tick{InstrumentID: products[tr.Product], At: tr.At, ReceivedAt: tr.ReceivedAt, Price: tr.Price, Size: tr.Size})
+			// Only the seeded products are recorded. The stream also carries the prints of
+			// coins switched on from the assets page, for their live price on the home page;
+			// those have no id here, and one of them in a batch would fail the whole insert
+			// (2026-09-22: AMP-USD prints cost a day of BTC and ETH prints their batches).
+			id, recorded := products[tr.Product]
+			if !recorded {
+				continue
+			}
+			batch = append(batch, store.Tick{InstrumentID: id, At: tr.At, ReceivedAt: tr.ReceivedAt, Price: tr.Price, Size: tr.Size})
 			if len(batch) >= 500 {
 				flush()
 			}

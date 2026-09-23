@@ -141,7 +141,7 @@ func Run(version string) error {
 		}()
 		go func() {
 			defer wg.Done()
-			writeTicks(ctx, db, products, trades, &ticksWritten)
+			writeTicks(ctx, db.InsertTicks, products, trades, &ticksWritten)
 		}()
 	}
 
