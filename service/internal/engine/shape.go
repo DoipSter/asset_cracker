@@ -54,13 +54,14 @@ type Shape struct {
 	Control bool `json:"control,omitempty" jsonschema:"a negative control: registered to show the checks catch it, not to win; the pages say so"`
 
 	// Members, when two or more, make this version a roster: one bucket, one version, a set of
-	// named shapes plus a pick. Member is Shape without a nested roster, so the MCP schema
-	// does not cycle. The pick is structural first (a member is eligible only if it would
-	// send a buy), then recent shadow return per dollar over lookback_windows among the
-	// eligible. Sit out if nobody is eligible. Results attach to this version, not to a member.
-	Members         []Member `json:"members,omitempty" jsonschema:"a roster of 2 to 8 member shapes; this version picks among them. v1 members all hold, same family. Omit for a single shape"`
-	LookbackWindows int      `json:"lookback_windows,omitempty" jsonschema:"settled shadow entries the adaptive pick needs of every eligible member, 1 to 64; default 16 when members are set. 0 with structural_only is roster order always"`
-	StructuralOnly  bool     `json:"structural_only,omitempty" jsonschema:"true: pick is roster order among the eligible, no look at recent results. The ablation's structural-only baseline"`
+	// named shapes plus an assignment. Member is Shape without a nested roster, so the MCP schema
+	// does not cycle. The window owner is chosen from prior settled clocks; that owner gets
+	// first refusal, then a later specialist (smaller tau_max) may reserve an unclaimed ticker.
+	// Sit out if nobody may claim. Results attach to this version, not to a member.
+	Members         []Member `json:"members,omitempty" jsonschema:"a roster of 2 to 8 member shapes; this version assigns a window owner then may reserve leftovers. v1 members all hold, same family. Omit for a single shape"`
+	LookbackWindows int      `json:"lookback_windows,omitempty" jsonschema:"prior 15-minute clocks the adaptive window owner needs, 1 to 64; default 16 when members are set. 0 with structural_only: owner is always the first member"`
+	StructuralOnly  bool     `json:"structural_only,omitempty" jsonschema:"true: window owner is always the first member, no look at recent clocks. The ablation's dumb owner"`
+	Assign          string   `json:"assign,omitempty" jsonschema:"both (default): window owner first, later specialists may take unclaimed seats. window: only the owner may enter. reserve: no owner; sit until the latest specialist's clock, then they may enter"`
 }
 
 // Member is one shape in a roster. It carries the same knobs as Shape except a nested roster.
@@ -255,18 +256,40 @@ func attachMembers(p *Params, s Shape, set func(string, float64, string)) error 
 		p.Members = append(p.Members, m)
 	}
 	p.StructuralOnly = s.StructuralOnly
+	p.Assign = s.Assign
+	if p.Assign == "" {
+		p.Assign = AssignBoth
+	}
 	switch {
+	case p.Assign == AssignReserve:
+		if s.LookbackWindows != 0 {
+			return fmt.Errorf("assign=reserve does not use lookback_windows")
+		}
+		if s.StructuralOnly {
+			return fmt.Errorf("assign=reserve has no window owner; structural_only is for window or both")
+		}
+		p.LookbackWindows = 0
+		p.StructuralOnly = false
+		p.Blurb += fmt.Sprintf("; a roster of %d, reservation only: sit until the latest specialist's clock", len(p.Members))
 	case s.StructuralOnly:
 		p.LookbackWindows = 0
-		p.Blurb += fmt.Sprintf("; a roster of %d, picked in roster order among whoever would enter", len(p.Members))
+		p.Blurb += fmt.Sprintf("; a roster of %d, window owner always the first member", len(p.Members))
+		if p.Assign == AssignBoth {
+			p.Blurb += ", later specialists may take unclaimed seats"
+		}
 	default:
 		k := s.LookbackWindows
 		if k == 0 {
 			k = DefaultLookback
 		}
 		p.LookbackWindows = int64(k)
-		set("lookback_windows", float64(k), "settled shadow entries the adaptive pick needs of every eligible member")
-		p.Blurb += fmt.Sprintf("; a roster of %d, structural then recent return per dollar over %d windows", len(p.Members), k)
+		set("lookback_windows", float64(k), "prior 15-minute clocks the adaptive window owner needs")
+		switch p.Assign {
+		case AssignWindow:
+			p.Blurb += fmt.Sprintf("; a roster of %d, one window owner from the last %d clocks, no leftovers", len(p.Members), k)
+		default:
+			p.Blurb += fmt.Sprintf("; a roster of %d, window owner from the last %d clocks then later specialists on unclaimed seats", len(p.Members), k)
+		}
 	}
 	return nil
 }
@@ -305,6 +328,7 @@ func ToShape(p Params) Shape {
 		MaxDoublings:    p.MaxDoublings,
 		LookbackWindows: int(p.LookbackWindows),
 		StructuralOnly:  p.StructuralOnly,
+		Assign:          p.Assign,
 	}
 	s.Members = append([]Member(nil), p.Members...)
 	return s

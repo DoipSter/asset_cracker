@@ -118,11 +118,13 @@ type Params struct {
 	Levels     int  `json:"levels"`       // recorded levels an order may walk [FACT: five are recorded]
 	FeePerFill bool `json:"fee_per_fill"` // the pessimistic fee rounding; copied into the Paper by whoever builds it
 
-	// A roster (2026-09-23): Members, when two or more, make this one version that picks among
-	// them. LookbackWindows is K for the adaptive pick (0 with StructuralOnly: roster order).
+	// A roster (2026-09-23, assignment 2026-09-24): Members, when two or more, make this one
+	// version that assigns a window owner then may reserve leftovers. LookbackWindows is K
+	// prior clocks (0 with StructuralOnly: owner is roster[0]). Assign is both, window or reserve.
 	Members         []Member `json:"members,omitempty"`
 	LookbackWindows int64    `json:"lookback_windows,omitempty"`
 	StructuralOnly  bool     `json:"structural_only,omitempty"`
+	Assign          string   `json:"assign,omitempty"`
 
 	Provenance  map[string]Provenance `json:"provenance"`
 	ProtocolSHA string                `json:"protocol_sha"` // sha-256 of docs/v3-measurement-protocol.md

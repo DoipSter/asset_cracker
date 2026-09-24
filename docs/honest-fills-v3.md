@@ -512,6 +512,17 @@ before now, then the best shadow return per dollar. Shadows do not use the compo
 `Decision.Pick` name who fired. A settlement after now cannot elect a member (tested). Not a
 bucket rewriting `strategy_version_id`, not the unbuilt bench, not online learning of K.
 
+**Note of 2026-09-24 (the owner's decision): window owner, then reservation.** Same-tick pick
+among whoever would buy spent the only seat on the first member (Favourite); Late, the member
+to beat on the burned window (record 615), fired twice. Assignment is now: each 15-minute clock
+has one owner from prior settled *clocks* (`lookback_windows`, default 16; sit-outs do not
+dilute a late specialist); that owner gets first refusal; a later specialist (strictly smaller
+`tau_max`) may reserve an unclaimed ticker. `assign` is `both` (default), `window` (owner only)
+or `reserve` (sit until the latest specialist's clock). `structural_only` makes the first member
+the owner. A ticker is reserved at first claim and never reassigned. A settlement after now, or
+at this clock's own close, cannot elect the owner (tested). The burned window
+`2026-09-23T01:30Z`–`2026-09-24T01:30Z` is not a register look.
+
 Entry test at the best ask `c`: `edge = p_side - c - fee(c) - stale_cost > 0`. `fee(c) = 0.07 c (1-c)` exactly.
 `stale_cost` is **[MEASURED on v2's entries: a proxy for v3's]** (6.3, M2) and replaces v2's guessed 0.01
 slippage. There is NO `min_edge` (v2's 0.03 was a guess at costs now charged exactly or measured). Buy limit: the
@@ -1252,9 +1263,16 @@ sustainment allocation lowers a live bucket's cash, and settlement lands a few s
 `by_member` and `picks`. The first three members were exercised alone on
 `2026-09-23T01:30:00Z`–`2026-09-24T01:30:00Z` (TRAIN, 96 windows): Favourite record **614**
 (+$41.04, r/$ 0.0232, t 0.35), Value no-longshot **613** (+$30.92, r/$ 0.0299, t 0.62), Late
-model **615** (+$176.86, r/$ 0.1376, t 0.97). Registering the composition as a draft waits on the
-ablation (structural-only vs both vs best member) after this release; Late model is the member to
-beat.
+model **615** (+$176.86, r/$ 0.1376, t 0.97). The same-tick roster (records **729** structural
++$1.48, **730** both +$29.35) lost to Late alone.
+
+**Note of 2026-09-24: assignment walk, not a register.** TRAIN from `2026-09-22T04:30Z` to
+`2026-09-24T03:20Z` (188 windows, the tape walk): Late alone **747** +$201.87 r/$ 0.0712 t=0.95;
+`assign=reserve` **748** matched Late (113 Late bets); window structural **749** +$12.56 t=0.06
+(Favourite only); window adaptive **752** +$206.28 r/$ 0.0541 t=0.79; `assign=both` **755**
++$251.49 r/$ 0.0582 t=0.90 (24 reserve leftovers, Late on 61 markets). Both made more dollars
+than Late and than window-only, but lost on return per dollar and t to leaving Late alone.
+Not registered.
 
 ---
 

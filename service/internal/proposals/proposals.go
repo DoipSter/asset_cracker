@@ -3,14 +3,13 @@
 // "proposal tools: draft a strategy version"). It sits beside the read surface on the same
 // server (docs/mcp-read-surface.md) and is the only part of that server that changes anything.
 //
-// What it may change is one thing: it can add a DRAFT row to the trials registry. It does so by
-// asking the RUNNING SERVICE, over HTTP on the Pi's loopback, through the same route the
-// buckets page uses (POST /api/controls/version/new), with the same operator key, the same
-// engine validation and the same labelling. This process has no write grant of its own
-// (acdeploy reads the record as assetcracker_ro), so the service's gate is the gate. A draft
-// trades nothing: the Deploy form on the buckets page seeds it, at a seed and from a source a
-// person chooses, and that click stays a person's. No tool here deploys, retires, moves money
-// or places an order.
+// What it may change is two things, both through the RUNNING SERVICE on the Pi's loopback,
+// with the same operator key the buckets page uses. This process has no write grant of its own
+// (acdeploy reads the record as assetcracker_ro), so the service's gate is the gate.
+//
+//  1. strategy_register adds a DRAFT row (POST /api/controls/version/new). A draft trades nothing.
+//  2. strategy_deploy seeds a draft (POST /api/controls/bucket/deploy): the same write as the
+//     page's Deploy form. It does not retire, move money or place an order.
 //
 // The dry run (strategy_build) and the presets (strategy_presets) are computed here from the
 // engine in this binary, which is the release the service runs; they touch nothing.
@@ -30,6 +29,7 @@ import (
 	"time"
 
 	"github.com/doipster/asset_cracker/service/internal/engine"
+	"github.com/doipster/asset_cracker/service/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -58,10 +58,10 @@ func New() *Door {
 	return &Door{URL: "", Client: &http.Client{Timeout: timeout}, Getenv: os.Getenv, HomeDir: os.UserHomeDir}
 }
 
-// Register adds the four tools to an MCP server.
+// Register adds the proposal tools to an MCP server.
 func Register(s *mcp.Server) { New().register(s) }
 
-// RegisterWith adds the four tools using a door the caller holds, so that another tool on the
+// RegisterWith adds the proposal tools using a door the caller holds, so that another tool on the
 // same server (strategy_exercise) can post through the very same one.
 func RegisterWith(s *mcp.Server, d *Door) { d.register(s) }
 
@@ -69,6 +69,7 @@ func (d *Door) register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{Name: "strategy_presets", Description: descPresets}, d.presets)
 	mcp.AddTool(s, &mcp.Tool{Name: "strategy_build", Description: descBuild}, d.build)
 	mcp.AddTool(s, &mcp.Tool{Name: "strategy_register", Description: descRegister}, d.registerVersion)
+	mcp.AddTool(s, &mcp.Tool{Name: "strategy_deploy", Description: descDeploy}, d.deploy)
 	mcp.AddTool(s, &mcp.Tool{Name: "strategy_versions", Description: descVersions}, d.versions)
 }
 
@@ -84,11 +85,16 @@ const descBuild = `A dry run of the builder: the shape in, the version the engin
 
 const descRegister = `Register a version-3 strategy as a DRAFT from a shape, through the running service's builder ` +
 	`route (the same one the buckets page uses): the engine validates and labels it, the registry gains a row with ` +
-	`status draft, code_ref says it was proposed via mcp. A draft trades nothing until a person deploys it on the ` +
-	`buckets page, choosing its simulated seed ($1,000 by convention) and whether it is drawn from replenishment or ` +
-	`the bank. hypothesis is required: say what the version is meant to ` +
-	`test. The operator key is taken from the server's environment or key file on the Pi, never from this call. ` +
-	`One version 3 per name; a name already registered is refused, not replaced.`
+	`status draft, code_ref says it was proposed via mcp. A draft trades nothing until strategy_deploy seeds it. ` +
+	`hypothesis is required: say what the version is meant to test. The operator key is taken from the server's ` +
+	`environment or key file on the Pi, never from this call. One version 3 per name; a name already registered is refused, not replaced.`
+
+const descDeploy = `Seed a registered version-3 draft as a simulated bucket, through the running service's deploy ` +
+	`route (the same one the buckets page uses). version_id is the registry id from strategy_versions. seed_cents ` +
+	`defaults to 100000 ($1,000), the convention. source is replenishment (the default) or bank. A draft or retired ` +
+	`version is put on probation in the same write and the engine loads it on the next look. Refused while the ` +
+	`version already holds a bucket, when replenishment is short, or when the figure is bad. Simulated money only. ` +
+	`The operator key is taken from the server's environment or key file on the Pi, never from this call.`
 
 const descVersions = `The strategy registry as the buckets page shows it: every version-3 strategy with id, name, status ` +
 	`(draft, probation, active, retired) and hypothesis; the new-orders switch and whether this process is placing; ` +
@@ -174,9 +180,63 @@ func (d *Door) registerVersion(ctx context.Context, _ *mcp.CallToolRequest, s en
 	if err := d.call(ctx, http.MethodPost, "/api/controls/version/new", body, &out); err != nil {
 		return nil, Registered{}, err
 	}
-	out.Note = "Registered as a draft: it trades nothing yet. Deploy on the buckets page seeds it in simulation, at the " +
-		"seed and from the source a person chooses ($1,000 by convention), and it trades on the engine's next look. " +
+	out.Note = "Registered as a draft: it trades nothing yet. strategy_deploy seeds it in simulation, at the " +
+		"seed and from the source chosen ($1,000 from replenishment by convention), and it trades on the engine's next look. " +
 		"One more trial in the registry."
+	return nil, out, nil
+}
+
+// DeployIn is strategy_deploy's argument.
+type DeployIn struct {
+	VersionID int64  `json:"version_id" jsonschema:"the registered version-3 id from strategy_versions"`
+	SeedCents int64  `json:"seed_cents,omitempty" jsonschema:"simulated seed in cents; default 100000 ($1,000), the convention every bucket so far started at"`
+	Source    string `json:"source,omitempty" jsonschema:"where the seed is drawn: replenishment (the default) or bank"`
+}
+
+// Deployed is what strategy_deploy answers.
+type Deployed struct {
+	Bucket    string `json:"bucket"`
+	SeedCents int64  `json:"seed_cents"`
+	Source    string `json:"source"`
+	Held      int    `json:"held"`
+	Ordering  int    `json:"ordering"`
+	Note      string `json:"note"`
+}
+
+const defaultSeedCents = 100000
+
+func (d *Door) deploy(ctx context.Context, _ *mcp.CallToolRequest, in DeployIn) (*mcp.CallToolResult, Deployed, error) {
+	if in.VersionID <= 0 {
+		return nil, Deployed{}, errors.New("version_id is required: the registry id from strategy_versions")
+	}
+	cents := in.SeedCents
+	if cents == 0 {
+		cents = defaultSeedCents
+	}
+	if cents < 0 {
+		return nil, Deployed{}, errors.New("seed_cents must not be negative")
+	}
+	source := strings.TrimSpace(in.Source)
+	if source == "" {
+		source = store.SeedFromReplenishment
+	}
+	if source != store.SeedFromReplenishment && source != store.SeedFromBank {
+		return nil, Deployed{}, fmt.Errorf("source %q is not replenishment or bank", source)
+	}
+	body, err := json.Marshal(struct {
+		VersionID int64  `json:"version_id"`
+		Cents     int64  `json:"cents"`
+		Source    string `json:"source"`
+	}{in.VersionID, cents, source})
+	if err != nil {
+		return nil, Deployed{}, err
+	}
+	var out Deployed
+	if err := d.call(ctx, http.MethodPost, "/api/controls/bucket/deploy", body, &out); err != nil {
+		return nil, Deployed{}, err
+	}
+	out.Note = "Seeded in simulation. The version is on probation and the engine loads it on the next look. " +
+		"Close the bucket on the buckets page before deploying this version again."
 	return nil, out, nil
 }
 
@@ -224,7 +284,7 @@ func (d *Door) versions(ctx context.Context, _ *mcp.CallToolRequest, _ noInput) 
 		return nil, Registry{}, err
 	}
 	out.Note = "Simulated money. draft: registered, not seeded. probation/active: holds a bucket and trades. " +
-		"retired: its bucket is held settle-only. Deploying and retirement are clicks on the buckets page."
+		"retired: its bucket is held settle-only. strategy_deploy seeds a draft; retirement is still a click on the buckets page."
 	return nil, out, nil
 }
 

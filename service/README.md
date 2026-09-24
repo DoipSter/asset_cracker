@@ -80,9 +80,9 @@ engine seeds at when nobody chose.
 the exit rule (`hold` or `ev`), a side filter (whichever the belief favours, the favourite only,
 the longshot only), time gates, price band, bets per round, the Kelly fraction and window cap, a
 volatility trigger, a late window for the model's weight (`lambda_late` inside `lambda_late_tau`
-seconds of the close; 2026-09-23), a roster (`members`, 2 to 8 shapes plus a pick: structural
-eligibility then recent shadow return; one version, not a bucket that rewrites its
-`strategy_version_id`; 2026-09-23), and the sizing (Kelly, or a bounded martingale registered as a
+seconds of the close; 2026-09-23), a roster (`members`, 2 to 8 shapes plus an assignment: window owner from prior clocks, then
+later specialists on unclaimed seats; one version, not a bucket that rewrites its
+`strategy_version_id`; 2026-09-24), and the sizing (Kelly, or a bounded martingale registered as a
 negative control). Eleven presets fill the form: Value, Late, Favourite, Model, Scalper, Calm
 Scalper, Tail, Martingale control, and three ladder shapes. Every number set is a `convention` the owner chose, every one left blank is
 `inherited` from the parent, the name carries "(conventions)", and `engine.Params.Validate` is
@@ -111,8 +111,8 @@ whose four numbers were MEASURED come only from `cmd/measure3` (`docs/v3-measure
 | `internal/web` | The status page, and the buckets-page controls (orders, version-3 approval, allocation, sim reset) |
 | `internal/health` | `GET /healthz` on localhost: prices, rounds, counts; 503 if anything is stale |
 | `internal/readsurface` | The agents' read-only door: the MCP tools of `assetcracker mcp`. Windowed, capped, paged reads of candles, prints, the book and markets, and in-database summaries (returns, vol profile, momentum grid, features, stored analyses). Every call in a READ ONLY transaction with a timeout. `docs/mcp-read-surface.md` |
-| `internal/proposals` | The agents' door to the strategy builder, on the same MCP server: presets, a dry run through the engine, registration of a draft through the running service's route and operator key, the registry. Imports the engine only |
-| `internal/exercise` | `strategy_exercise`, on the same MCP server: a shape or a roster replayed through the live engine and paper broker on the recorded tape over a settled window, answered as a leaderboard-style row with P&L by entry time, price and member, pick counts, every blocked decision counted, and the orders that filled. Every run is recorded as an `analysis_result` (`strategy.exercise`) through the service's `POST /api/controls/exercise/record`; 15-minute windows past the protocol's TRAIN are refused until TEST has been looked at |
+| `internal/proposals` | The agents' door to the strategy builder, on the same MCP server: presets, a dry run through the engine, registration of a draft, seeding that draft (`strategy_deploy`), the registry. Imports the engine only |
+| `internal/exercise` | `strategy_exercise`, on the same MCP server: a shape or a roster replayed through the live engine and paper broker on the recorded tape over a settled window, answered as a leaderboard-style row with P&L by entry time, price, member and window owner, pick counts, every blocked decision counted, and the orders that filled. Every run is recorded as an `analysis_result` (`strategy.exercise`) through the service's `POST /api/controls/exercise/record`; 15-minute windows past the protocol's TRAIN are refused until TEST has been looked at |
 
 What it watches comes from the `instrument` table (`db/migrations/0002_seed_sources.sql`), so
 adding a coin is a row, not a code change.
@@ -146,9 +146,9 @@ The repository's `.cursor/mcp.json` runs that over SSH against the record (`asse
 the Pi, as `assetcracker_ro`, so Cursor's agent can call `instruments`, `candles`, `bars`,
 `book`, `markets`, `returns_summary`, `vol_profile`, `momentum_grid`, `features` and
 `analysis_results` directly. It uses the release binary. The same server carries the strategy
-builder as four tools: `strategy_presets`, `strategy_build` (a dry run, every number labelled),
-`strategy_register` (a draft, through the running service's route and operator key; deploying
-it stays a click on the buckets page) and `strategy_versions` (the registry). The key comes from
+builder as five tools: `strategy_presets`, `strategy_build` (a dry run, every number labelled),
+`strategy_register` (a draft), `strategy_deploy` (seeds the draft through the running service's
+route and operator key) and `strategy_versions` (the registry). The key comes from
 `~/.config/assetcracker/operator_key` on the Pi, put there once by the owner. What each tool
 returns, and what it deliberately cannot do, is in `docs/mcp-read-surface.md`.
 

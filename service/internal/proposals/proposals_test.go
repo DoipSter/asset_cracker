@@ -43,7 +43,7 @@ func TestRegister(t *testing.T) {
 	for _, tl := range tools.Tools {
 		names[tl.Name] = true
 	}
-	for _, want := range []string{"strategy_presets", "strategy_build", "strategy_register", "strategy_versions"} {
+	for _, want := range []string{"strategy_presets", "strategy_build", "strategy_register", "strategy_deploy", "strategy_versions"} {
 		if !names[want] {
 			t.Fatalf("tool %s is not listed: %v", want, names)
 		}
@@ -150,7 +150,7 @@ func TestRegisterPostsToTheService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.ID != 42 || out.Status != "draft" || !strings.Contains(out.Note, "Deploy") {
+	if out.ID != 42 || out.Status != "draft" || !strings.Contains(out.Note, "strategy_deploy") {
 		t.Fatalf("answer %+v", out)
 	}
 	if got.Method != http.MethodPost || got.Path != "/api/controls/version/new" || got.Key != "open-sesame" {
@@ -229,5 +229,50 @@ func TestVersionsReadsTheService(t *testing.T) {
 	d.URL = "http://127.0.0.1:1"
 	if _, _, err := d.versions(context.Background(), nil, noInput{}); err == nil || !strings.Contains(err.Error(), "did not answer") {
 		t.Fatalf("a service that is down must be said so: %v", err)
+	}
+}
+
+func TestDeployPostsToTheService(t *testing.T) {
+	var got struct {
+		Body   map[string]any
+		Key    string
+		Path   string
+		Method string
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Method, got.Path, got.Key = r.Method, r.URL.Path, r.Header.Get("X-Operator-Key")
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &got.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"bucket":"kalshi15m3 Dance both (conventions) v3","seed_cents":100000,"source":"replenishment","held":1,"ordering":1}`))
+	}))
+	defer srv.Close()
+	d := &Door{URL: srv.URL, Client: srv.Client(), Getenv: func(k string) string {
+		if k == EnvKey {
+			return "open-sesame"
+		}
+		return ""
+	}, HomeDir: os.UserHomeDir}
+
+	_, out, err := d.deploy(context.Background(), nil, DeployIn{VersionID: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Bucket == "" || out.SeedCents != 100000 || out.Source != "replenishment" || !strings.Contains(out.Note, "probation") {
+		t.Fatalf("answer %+v", out)
+	}
+	if got.Method != http.MethodPost || got.Path != "/api/controls/bucket/deploy" || got.Key != "open-sesame" {
+		t.Fatalf("request %+v", got)
+	}
+	if got.Body["version_id"] != float64(40) || got.Body["cents"] != float64(100000) || got.Body["source"] != "replenishment" {
+		t.Fatalf("body %v", got.Body)
+	}
+
+	got.Path = ""
+	if _, _, err := d.deploy(context.Background(), nil, DeployIn{}); err == nil || got.Path != "" {
+		t.Fatalf("version_id is required: %v %q", err, got.Path)
+	}
+	if _, _, err := d.deploy(context.Background(), nil, DeployIn{VersionID: 40, Source: "owners"}); err == nil || got.Path != "" {
+		t.Fatalf("bad source must be refused here: %v %q", err, got.Path)
 	}
 }

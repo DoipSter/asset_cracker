@@ -26,14 +26,15 @@ const RecordKey = "strategy.exercise"
 // RecordPath is the service route that writes the record.
 const RecordPath = "/api/controls/exercise/record"
 
-// Budget is the most one call may take, reads and replay together.
-const Budget = 45 * time.Second
+// Budget is the most one call may take, reads and replay together. A 48-hour roster walk
+// runs four Decide paths per snapshot (three shadows and the live seat).
+const Budget = 90 * time.Second
 
 // Input is the tool's argument: a shape, exactly as strategy_build takes it, and a window.
 type Input struct {
 	engine.Shape
 	From      string `json:"from" jsonschema:"start of the window, inclusive: markets CLOSING from this time are replayed. RFC 3339 (2026-09-22T04:30:00Z), a date (2026-09-22), or relative to now: -24h, -2d. Their snapshots from their open are read, so a ladder window reaches back days"`
-	To        string `json:"to,omitempty" jsonschema:"end of the window, exclusive; default now. Only markets that have SETTLED are replayed, so a window into the open round holds nothing of it. At most 24 hours for the 15-minute rounds, 7 days for the ladders; a longer run is several calls"`
+	To        string `json:"to,omitempty" jsonschema:"end of the window, exclusive; default now. Only markets that have SETTLED are replayed, so a window into the open round holds nothing of it. At most 48 hours for the 15-minute rounds, 7 days for the ladders; a longer run is several calls"`
 	StepS     int    `json:"step_s,omitempty" jsonschema:"thinning: the first recorded snapshot of each market in every step_s seconds is stepped, as if the engine looked that often. Default 1 for the rounds, every recorded second, as the live engine looks; a coarser step is faster and loses the bets a flickering ask would have given a band-restricted shape (measured: one in five cost Mid-round Favourite 21 of 76 bets). Default 60 for the ladders, at least 30"`
 	SeedCents int64  `json:"seed_cents,omitempty" jsonschema:"the simulated bucket's starting cash in cents; default the convention, 100000 ($1,000), so the lines compare"`
 }
@@ -90,8 +91,19 @@ type Tool struct {
 // recording through door (the proposals door, which posts with the operator key; nil records
 // nothing and every answer says so).
 func Register(s *mcp.Server, db *store.Store, door Recorder, version string) {
-	t := &Tool{Source: storeSource{db}, Recorder: door, Version: version, Now: time.Now, Getenv: os.Getenv}
-	t.register(s)
+	NewTool(db, door, version).register(s)
+}
+
+// NewTool is the same tool the MCP server holds, for a stdin run on the Pi without replacing
+// the live mcp process.
+func NewTool(db *store.Store, door Recorder, version string) *Tool {
+	return &Tool{Source: storeSource{db}, Recorder: door, Version: version, Now: time.Now, Getenv: os.Getenv}
+}
+
+// Run is one replay: the same path as the MCP tool.
+func (t *Tool) Run(ctx context.Context, in Input) (Answer, error) {
+	_, ans, err := t.exercise(ctx, nil, in)
+	return ans, err
 }
 
 func (t *Tool) register(s *mcp.Server) {
@@ -108,9 +120,11 @@ const Description = `Run a strategy shape through the third engine on the record
 	`that looks good on the window it was tuned on has been tuned on it, and every registration is still judged live at ` +
 	`the corrected threshold. Every run is recorded as an analysis_result row (key strategy.exercise) so the shapes tried ` +
 	`are counted beside the shapes registered. Refuses 15-minute windows past the v3 protocol's TRAIN until TEST has been ` +
-	`looked at. A roster (members: 2 to 8 shapes) is one version that picks among them: structural ` +
-	`eligibility first, then recent shadow return per dollar over lookback_windows (default 16); ` +
-	`structural_only is roster order among the eligible. The answer then includes by_member and pick counts. ` +
+	`looked at. A roster (members: 2 to 8 shapes) is one version: assign=both (default) gives the ` +
+	`window owner first refusal then later specialists on unclaimed seats; assign=window is owner only; ` +
+	`assign=reserve sits until the latest specialist's clock. lookback_windows (default 16) is prior ` +
+	`clocks, not entries; structural_only makes the first member the owner. The answer then includes ` +
+	`by_member, by_owner and pick counts (sit_out / warmup / window / reserve). ` +
 	`Reads at most 48 hours of rounds (7 days of ladders) per call; longer runs are several calls.`
 
 func (t *Tool) exercise(ctx context.Context, _ *mcp.CallToolRequest, in Input) (*mcp.CallToolResult, Answer, error) {
@@ -173,7 +187,7 @@ func (t *Tool) exercise(ctx context.Context, _ *mcp.CallToolRequest, in Input) (
 		"applied at the first snapshot at or after the close; against a registered version over its own window (2026-09-23) the entry " +
 		"seconds agreed and the stakes drifted by a contract or two as the cash paths parted. Snapshots without depth (before release " +
 		"87a2100) decide nothing. A step above 1 drops the bets a flickering ask would have given a band-restricted shape. A roster is " +
-		"one version: the pick is structural then recent shadow return, and by_member / picks say who fired. Registering " +
+		"one version: assign is window owner then later specialists on unclaimed seats, and by_member / by_owner / picks say who fired. Registering " +
 		"the shape is strategy_register; it is then judged live at the corrected threshold."
 
 	ans := Answer{Result: res}

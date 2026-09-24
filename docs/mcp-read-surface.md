@@ -23,10 +23,10 @@ authentication. Code: `service/internal/readsurface` (the tools), `service/inter
 
 ### Guarantees
 
-These hold for the ten read tools. The five `strategy_*` tools are described in their own section
-below: three are a client of the running service (one of them registers a draft), one is a dry run
-in this process, and `strategy_exercise` reads the record under the same guarantees and asks the
-service to record that it ran.
+These hold for the ten read tools. The `strategy_*` tools are described in their own section
+below: four are a client of the running service (register a draft, seed it, read the registry,
+record an exercise), two are a dry run or presets in this process, and `strategy_exercise` also
+reads the record under the same guarantees.
 
 - **Read-only by the database, not by convention.** Every call runs in a `READ ONLY` transaction:
   Postgres itself refuses any insert, update, delete or DDL inside one, whatever the role. In the
@@ -133,8 +133,9 @@ Added 2026-09-22, when the strategy builder landed on the buckets page (`service
 | `strategy_presets` | The eight standard shapes (Value, Late, Favourite, Model, Scalper, Calm Scalper, Tail, Martingale control), each with what it tests | The engine in this binary; nothing else |
 | `strategy_build` | A dry run: the shape in, the version the engine would register out, every number labelled `convention` (you set it), `inherited` (the parent's), `limit` or `fact`; refuses exactly as registration would | The engine in this binary; nothing else |
 | `strategy_register` | Registers the shape as a **draft** version 3 | The running service, over HTTP on the Pi's loopback |
+| `strategy_deploy` | Seeds a registered draft as a simulated bucket (the page's Deploy form) | The running service, over HTTP on the Pi's loopback |
 | `strategy_versions` | The registry as the buckets page shows it: every version 3 with status and hypothesis, the new-orders switch, the allocation rule | The running service, a read |
-| `strategy_exercise` | Runs the shape — or a roster of shapes — through the live engine and paper broker on the recorded tape over a window of settled markets: what it would have done. Added 2026-09-23, roster 2026-09-23; [its own section](#exercising-a-shape-on-the-tape) | The record (read-only, `internal/exercise`); the running service, for the one row that records the run |
+| `strategy_exercise` | Runs the shape — or a roster of shapes — through the live engine and paper broker on the recorded tape over a window of settled markets: what it would have done. Added 2026-09-23, roster 2026-09-23, assignment 2026-09-24; [its own section](#exercising-a-shape-on-the-tape) | The record (read-only, `internal/exercise`); the running service, for the one row that records the run |
 
 ### How a registration happens, and why that way
 
@@ -148,9 +149,10 @@ the id. Three reasons for the detour:
 - **One write path, one gate.** The service holds the operator key and the write grants
   (`db/grants.sql`); the MCP process runs as `acdeploy`, which reads the record only as
   `assetcracker_ro` and can insert nothing. There is no second door to widen.
-- **A draft trades nothing.** Seeding is the Deploy form on the buckets page (a seed and where
-  it is drawn from), which stays a person's (brief §9: "each proposal waits for a person"). No
-  tool here deploys, retires, moves money or places an order.
+- **A draft trades nothing until it is seeded.** `strategy_deploy` posts to the page's Deploy
+  route (`POST /api/controls/bucket/deploy`) with the same operator key: a seed (default $1,000)
+  and a source (replenishment or bank). Retirement, moving money and placing an order stay off
+  this door.
 - **The registry says who.** `code_ref` records the origin; every registration is one more trial
   the leaderboard's threshold is corrected for, whoever made it.
 
@@ -201,11 +203,13 @@ this writing) are counted (`snapshots_unpriced`) and not read, since nothing can
 included), plus `from` (required: markets CLOSING from this time), `to` (default now; only
 settled markets are replayed), `step_s` and `seed_cents`. A roster is the same shape with
 `members` (2 to 8, each a member shape; v1 all hold, same family): one version that picks among
-them. `structural_only` is roster order among whoever would enter. Otherwise the pick is
-structural first, then recent shadow return per dollar over `lookback_windows` (default 16)
-among the eligible; sit out if nobody would enter. Shadows are unit contracts on a fixed $1,000
-seed, settled only after that market's close, and a settlement after now is invisible. Times take the read surface's forms.
-Caps: 24 hours of 15-minute rounds or 7 days of ladders per call (a longer run is several calls);
+them. `assign` is `both` (default: window owner first, later specialists may take unclaimed
+seats), `window` (owner only) or `reserve` (sit until the latest specialist's clock). The window
+owner is chosen from prior settled clocks (`lookback_windows`, default 16); `structural_only`
+makes the first member the owner. Sit out if nobody may claim. Shadows are unit contracts on a
+fixed $1,000 seed, settled only after that market's close, and a settlement after now cannot
+elect this clock. Times take the read surface's forms.
+Caps: 48 hours of 15-minute rounds or 7 days of ladders per call (a longer run is several calls);
 `step_s` is 1 for the rounds by default, every recorded second as the live engine looks, and 60
 for the ladders (at least 30: a leg is open for days). **A coarser step is not free**: measured
 on 2026-09-23, thinning to one snapshot in five cost Mid-round Favourite 21 of its 76 bets, because
@@ -220,8 +224,9 @@ by its price (`by_entry_price`, the five bands of the 2026-09-23 attribution); e
 decision by reason (`blocked`, the engine's own texts); orders asked against filled for buys and
 sales; the cumulative P&L by window (`series`, at most 300 points); and every order that filled
 (`entries`, at most 400: ticker, second, tau, side, why, requested, filled, price, cash, Kelly,
-and which limit set the stake). A roster also answers `by_member` (P&L cut by who fired) and
-`picks` (sit_out / warmup / adaptive / roster counts). Then `recorded`, `record_id` and, when it was not, `record_error`.
+and which limit set the stake). A roster also answers `by_member` (P&L cut by who fired),
+`by_owner` (P&L cut by who owned the clock) and `picks` (sit_out / warmup / window / reserve).
+Then `recorded`, `record_id` and, when it was not, `record_error`.
 
 **Every run is recorded.** The tool posts the shape, the window, the step, the seed, its release
 and the summary to `POST /api/controls/exercise/record` on the running service, with the operator
@@ -259,21 +264,21 @@ where the replay applies it at the first snapshot at or after it.
 
 **Cost.** A 20-hour window of the two priced coins at every second is about 150,000 snapshots,
 read in 7 s over the SSH tunnel from the Mac and replayed in 1.5 s; the statement timeout is 25 s
-and the call's budget 45 s.
+and the call's budget 90 s.
 
 **Checking it.** `cd service && go test ./internal/exercise/`: the replay on a synthetic tape (the
 money adds up, the cuts and blocked counts, a tape without depth or a view, an unordered tape
 refused, the late lambda entering only inside its window, a roster of two disjoint members naming
-who fired), the protocol walk on rows (the 480th
+who fired and who owned the clock), the protocol walk on rows (the 480th
 eligible window, ineligible windows, a coin covered later, the fifteen-minute wait), the guard's
 refusal and the owner's word, and the tool over the in-memory transport against a stub tape and a
-stub door (the schema, the window forms, the caps, `members`, the record's body, an unrecorded run).
+stub door (the schema, the window forms, the caps, `members`, `assign`, the record's body, an unrecorded run).
 
 ## What is not here
 
-- Deploying, retirement, the orders switch (the buckets page), the rates, the paydays, moving
-  money, the reset (the home page's bank): clicks, a person's. Raw SQL, writes to any table (the
-  exercise record is written by the service, not by this process).
+- Retirement, the orders switch, the rates, the paydays, moving money, the reset (the home
+  page's bank): clicks, a person's. Raw SQL, writes to any table (the exercise record and a
+  deploy are written by the service, not by this process).
 - The ledger, journal, metrics, commentary (TSK-42's first half). Same server, later.
 - Fifteen-minute candles: not stored. `bars` builds any bucket from the trade prints, but only
   from the day recording started.

@@ -27,7 +27,7 @@ func tapeOf(evalID *int64, marketID int64, coin, symbol, result string, closes t
 	for _, tau := range taus {
 		*evalID++
 		out = append(out, Snapshot{EvaluationID: *evalID, At: closes.Add(-time.Duration(tau * float64(time.Second))), MarketID: marketID,
-			Ticker: symbol + "-" + closes.Format("0215"), Coin: coin, Symbol: symbol, Strike: 100, Closes: closes, Result: result, Price: 100,
+			Ticker: symbol + "-" + closes.Format("021504"), Coin: coin, Symbol: symbol, Strike: 100, Closes: closes, Result: result, Price: 100,
 			Quotes: evenBook, View: view(coin, pModel), HasDepth: true, HasVolRatio: true})
 	}
 	return out
@@ -146,9 +146,9 @@ func TestRunWithLateLambda(t *testing.T) {
 	}
 }
 
-// A roster of two disjoint members: mid-round Favourite-shaped and Late. Structural pick uses
-// the mid-round member at 500 s and the late member at 100 s, sits out at 200 s, and the
-// answer names who fired. Adaptive is not yet live (one window each): picks are roster/sit_out.
+// A roster of two disjoint members: mid-round Favourite-shaped and Late. Structural both:
+// the first member owns every clock, takes the 500 s seat, and Late reserves the leftover at
+// 100 s. 200 s is a sit-out. The answer names who fired.
 func TestRunRoster(t *testing.T) {
 	p, err := engine.FromShape(engine.Shape{
 		Name: "Dance", Exit: "hold", Lambda: 0.5, StaleCost: 0.0012, StructuralOnly: true,
@@ -181,11 +181,18 @@ func TestRunRoster(t *testing.T) {
 	if got["Mid (conventions)"] != 1 || got["Late (conventions)"] != 1 {
 		t.Fatalf("by_member: %+v", res.ByMember)
 	}
+	owners := map[string]int{}
+	for _, c := range res.ByOwner {
+		owners[c.Band] = c.Markets
+	}
+	if owners["Mid (conventions)"] != 2 {
+		t.Fatalf("by_owner (structural Mid owns both clocks): %+v", res.ByOwner)
+	}
 	picks := map[string]int{}
 	for _, p := range res.Picks {
 		picks[p.Reason] = p.Count
 	}
-	if picks[engine.PickRoster] < 2 || picks[engine.PickSitOut] < 1 {
+	if picks[engine.PickWindow]+picks[engine.PickWarmup] < 1 || picks[engine.PickReserve] < 1 || picks[engine.PickSitOut] < 1 {
 		t.Fatalf("picks: %+v", res.Picks)
 	}
 	if res.Entries[0].Member == "" || res.Entries[0].Member == res.Entries[1].Member {
@@ -329,7 +336,7 @@ func TestToolOverProtocol(t *testing.T) {
 		t.Fatalf("tools: %v %+v", err, tools)
 	}
 	schema, _ := json.Marshal(tools.Tools[0].InputSchema)
-	for _, want := range []string{`"from"`, `"lambda"`, `"lambda_late"`, `"step_s"`, `"family"`, `"seed_cents"`, `"members"`, `"lookback_windows"`, `"structural_only"`} {
+	for _, want := range []string{`"from"`, `"lambda"`, `"lambda_late"`, `"step_s"`, `"family"`, `"seed_cents"`, `"members"`, `"lookback_windows"`, `"structural_only"`, `"assign"`} {
 		if !strings.Contains(string(schema), want) {
 			t.Fatalf("the input schema lacks %s: %s", want, schema)
 		}

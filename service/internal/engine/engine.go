@@ -209,7 +209,8 @@ type Decision struct {
 	// second's book and did not fire. Decide changes nothing, so it only says so; AfterDecide acts.
 	ClearExit string
 	Member    string // a roster's member that fired, or empty for a single shape
-	Pick      string // sit_out | warmup | adaptive | roster
+	Pick      string // sit_out | warmup | window | reserve
+	Owner     string // the clock's window owner, or empty when assign is reserve
 }
 
 // Intent is an order the engine would like sent, and what it knew when it formed it.
@@ -329,8 +330,8 @@ func (a *Account) decide(coin string, m Market, sides broker.Sides, v View, now 
 }
 
 // decideRoster observes every member's would-be unit entry (independent of this account's
-// cash), picks among those that would send a buy on THIS account, and runs decideOnce with
-// the picked member's params. Sit out if nobody is eligible.
+// cash), assigns the ticker (window owner first, then a later specialist), and runs
+// decideOnce with the assigned member's params. Sit out if nobody may claim.
 func (a *Account) decideRoster(coin string, m Market, sides broker.Sides, v View, now float64) ([]Decision, []Intent) {
 	c := a.Composition
 	var eligible []int
@@ -346,9 +347,14 @@ func (a *Account) decideRoster(coin string, m Market, sides broker.Sides, v View
 			eligible = append(eligible, i)
 		}
 	}
-	idx, how := c.Pick(now, eligible)
+	idx, how := c.Pick(m.Ticker, m.Close, now, m.Close-now, eligible)
+	ownerIdx, _ := c.WindowOwner(m.Close, now)
+	ownerName := ""
+	if ownerIdx >= 0 && ownerIdx < len(c.Members) {
+		ownerName = c.Members[ownerIdx].Name
+	}
 	if idx < 0 {
-		d := Decision{BucketID: a.BucketID, Strategy: a.Params.Name, Action: "none", Intent: -1, BlockedBy: BlockedNoMember, Why: BlockedNoMember, Pick: how}
+		d := Decision{BucketID: a.BucketID, Strategy: a.Params.Name, Action: "none", Intent: -1, BlockedBy: BlockedNoMember, Why: BlockedNoMember, Pick: how, Owner: ownerName}
 		if v.OK {
 			d.ModelProb = v.PModel
 		}
@@ -363,6 +369,7 @@ func (a *Account) decideRoster(coin string, m Market, sides broker.Sides, v View
 		ds[i].Strategy = c.Name
 		ds[i].Member = member.Name
 		ds[i].Pick = how
+		ds[i].Owner = ownerName
 	}
 	for i := range ins {
 		ins[i].Strategy = c.Name
@@ -371,6 +378,9 @@ func (a *Account) decideRoster(coin string, m Market, sides broker.Sides, v View
 		}
 		ins[i].Detail["member"] = member.Name
 		ins[i].Detail["pick"] = how
+		if ownerName != "" {
+			ins[i].Detail["owner"] = ownerName
+		}
 	}
 	return ds, ins
 }

@@ -21,10 +21,11 @@ import (
 
 // Caps on a read, so that one call cannot occupy the record or outlive the client's patience.
 const (
-	// MaxSpanRounds is the longest window of 15-minute rounds one call may replay: a day is
-	// about 170,000 snapshots of the two coins the model prices, read in a few seconds on the
-	// Pi. The ladders hold legs open for days, so theirs is a week and their thinning is coarser.
-	MaxSpanRounds  = 24 * time.Hour
+	// MaxSpanRounds is the longest window of 15-minute rounds one call may replay: two days is
+	// about 340,000 snapshots of the two coins the model prices, enough for a TRAIN walk from
+	// t0 through the current settled clocks without resetting the window owner. The ladders
+	// hold legs open for days, so theirs is a week and their thinning is coarser.
+	MaxSpanRounds  = 48 * time.Hour
 	MaxSpanLadders = 7 * 24 * time.Hour
 	// DefaultStepRounds is every recorded second. Measured on 2026-09-23 against the record:
 	// thinning to one snapshot in five cost Mid-round Favourite 21 of its 76 bets (its band,
