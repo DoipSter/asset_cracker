@@ -146,6 +146,53 @@ func TestRunWithLateLambda(t *testing.T) {
 	}
 }
 
+// A roster of two disjoint members: mid-round Favourite-shaped and Late. Structural pick uses
+// the mid-round member at 500 s and the late member at 100 s, sits out at 200 s, and the
+// answer names who fired. Adaptive is not yet live (one window each): picks are roster/sit_out.
+func TestRunRoster(t *testing.T) {
+	p, err := engine.FromShape(engine.Shape{
+		Name: "Dance", Exit: "hold", Lambda: 0.5, StaleCost: 0.0012, StructuralOnly: true,
+		Members: []engine.Member{
+			{Name: "Mid", Exit: "hold", Lambda: 0.5, StaleCost: 0.0012, TauMin: 300, TauMax: 600},
+			{Name: "Late", Exit: "hold", Lambda: 0.5, StaleCost: 0.0012, TauMax: 150},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c1 := time.Date(2026, 9, 22, 5, 0, 0, 0, time.UTC)
+	c2 := c1.Add(15 * time.Minute)
+	c3 := c2.Add(15 * time.Minute)
+	var evalID int64
+	snaps := tapeOf(&evalID, 1, "BTC", "KXBTC15M", "yes", c1, 0.9, 500)
+	snaps = append(snaps, tapeOf(&evalID, 2, "BTC", "KXBTC15M", "yes", c2, 0.9, 100)...)
+	snaps = append(snaps, tapeOf(&evalID, 3, "BTC", "KXBTC15M", "yes", c3, 0.9, 200)...)
+	res, err := Run(context.Background(), p, 0, &SliceTape{Snaps: sortTape(snaps)}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Bets != 2 || len(res.ByMember) != 2 {
+		t.Fatalf("roster bets: %+v members %+v", res, res.ByMember)
+	}
+	got := map[string]int{}
+	for _, c := range res.ByMember {
+		got[c.Band] = c.Markets
+	}
+	if got["Mid (conventions)"] != 1 || got["Late (conventions)"] != 1 {
+		t.Fatalf("by_member: %+v", res.ByMember)
+	}
+	picks := map[string]int{}
+	for _, p := range res.Picks {
+		picks[p.Reason] = p.Count
+	}
+	if picks[engine.PickRoster] < 2 || picks[engine.PickSitOut] < 1 {
+		t.Fatalf("picks: %+v", res.Picks)
+	}
+	if res.Entries[0].Member == "" || res.Entries[0].Member == res.Entries[1].Member {
+		t.Fatalf("entries must name different members: %+v", res.Entries)
+	}
+}
+
 // The protocol's walk on rows: the 480th eligible window's close is TRAIN's end; one short and
 // TRAIN is not complete; a window missing a covered coin, or with one unscored, is not counted;
 // a coin not yet covered is not required.
@@ -282,7 +329,7 @@ func TestToolOverProtocol(t *testing.T) {
 		t.Fatalf("tools: %v %+v", err, tools)
 	}
 	schema, _ := json.Marshal(tools.Tools[0].InputSchema)
-	for _, want := range []string{`"from"`, `"lambda"`, `"lambda_late"`, `"step_s"`, `"family"`, `"seed_cents"`} {
+	for _, want := range []string{`"from"`, `"lambda"`, `"lambda_late"`, `"step_s"`, `"family"`, `"seed_cents"`, `"members"`, `"lookback_windows"`, `"structural_only"`} {
 		if !strings.Contains(string(schema), want) {
 			t.Fatalf("the input schema lacks %s: %s", want, schema)
 		}

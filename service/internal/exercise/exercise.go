@@ -159,6 +159,8 @@ type Result struct {
 
 	ByEntryBand      []Cut      `json:"by_entry_band"`
 	ByEntryPrice     []Cut      `json:"by_entry_price"`
+	ByMember         []Cut      `json:"by_member,omitempty"`
+	Picks            []Blocked  `json:"picks,omitempty"`
 	Blocked          []Blocked  `json:"blocked"`
 	Decisions        int        `json:"decisions"`
 	Buys             Orders     `json:"buys"`
@@ -200,6 +202,7 @@ type Entry struct {
 	CashCents int64   `json:"cash_cents"` // what left (negative) or reached the bucket, fees inside
 	Kelly     float64 `json:"kelly,omitempty"`
 	Binding   string  `json:"binding,omitempty"` // which limit set a buy's stake
+	Member    string  `json:"member,omitempty"`  // a roster's member that sent this order
 }
 
 // MaxEntries is how many fills an answer lists; the counts cover them all.
@@ -210,6 +213,7 @@ type perMarket struct {
 	closes     int64
 	firstTau   float64
 	firstPrice float64
+	member     string
 	entered    bool
 	cost, back int64 // cents out on buys (fees inside); cents in on sales and settlement
 }
@@ -235,6 +239,7 @@ func Run(ctx context.Context, p engine.Params, seedCents int64, tape Tape, stepS
 	byTicker := map[string]*Snapshot{} // the last snapshot of each market, for its settlement
 	pending := map[string]bool{}       // markets seen and not yet settled
 	blocked := map[string]int{}
+	picks := map[string]int{}
 	var last time.Time
 
 	settleDue := func(now time.Time, all bool) {
@@ -299,6 +304,9 @@ func Run(ctx context.Context, p engine.Params, seedCents int64, tape Tape, stepS
 		eng.AfterDecide(s.Ticker, decisions)
 		res.Decisions += len(decisions)
 		for _, d := range decisions {
+			if d.Pick != "" {
+				picks[d.Pick]++
+			}
 			if d.Intent >= 0 {
 				continue
 			}
@@ -325,8 +333,15 @@ func Run(ctx context.Context, p engine.Params, seedCents int64, tape Tape, stepS
 		}
 		events := eng.Apply(intents, reports)
 		paper.Commit(ids...)
+		member := ""
+		for _, d := range decisions {
+			if d.Member != "" {
+				member = d.Member
+				break
+			}
+		}
 		for i, in := range intents {
-			tallyOrder(&res, markets[s.MarketID], in, reports[i], m.Close-now)
+			tallyOrder(&res, markets[s.MarketID], in, reports[i], m.Close-now, member)
 		}
 		for _, ev := range events {
 			switch ev.Kind {
@@ -338,14 +353,14 @@ func Run(ctx context.Context, p engine.Params, seedCents int64, tape Tape, stepS
 				return Result{}, fmt.Errorf("the engine reports an inconsistency: %s", ev.Note)
 			}
 		}
-		res.noteEntries(intents, reports, events, m.Close-now)
+		res.noteEntries(intents, reports, events, m.Close-now, member)
 	}
 	settleDue(last, true)
 
 	res.FinalCashCents = acct.CashCents
 	res.Exhausted = acct.Exhausted
 	res.Bets = acct.Bets
-	summarise(&res, markets, blocked)
+	summarise(&res, markets, blocked, picks)
 	if res.Entries == nil {
 		res.Entries = []Entry{}
 	}
@@ -354,7 +369,7 @@ func Run(ctx context.Context, p engine.Params, seedCents int64, tape Tape, stepS
 
 // noteEntries lists the step's fills, up to MaxEntries. Events come out in intent order, one per
 // intent that filled ("bought" / "sold"), so the cash figure is read from the matching event.
-func (r *Result) noteEntries(intents []engine.Intent, reports []broker.Report, events []engine.Event, tau float64) {
+func (r *Result) noteEntries(intents []engine.Intent, reports []broker.Report, events []engine.Event, tau float64, member string) {
 	filled := map[string]int64{} // client id -> cash
 	for _, ev := range events {
 		if ev.Kind == "bought" || ev.Kind == "sold" {
@@ -378,7 +393,7 @@ func (r *Result) noteEntries(intents []engine.Intent, reports []broker.Report, e
 			kind = "sold"
 		}
 		e := Entry{Ticker: in.Order.Ticker, At: in.Order.At.Unix(), Tau: math.Round(tau), Action: string(in.Order.Action), Side: string(in.Order.Side), Why: in.Why,
-			Requested: in.Order.Qty, Filled: n, Price: float64(reports[i].Fills[0].Price) / 10000, CashCents: filled[in.Order.Ticker+"|"+string(in.Order.Side)+"|"+kind]}
+			Requested: in.Order.Qty, Filled: n, Price: float64(reports[i].Fills[0].Price) / 10000, CashCents: filled[in.Order.Ticker+"|"+string(in.Order.Side)+"|"+kind], Member: member}
 		if in.Order.Action == broker.Buy {
 			e.Kelly = round(in.Kelly, 4)
 			if b, ok := in.Detail["binding"].(string); ok {
@@ -390,7 +405,7 @@ func (r *Result) noteEntries(intents []engine.Intent, reports []broker.Report, e
 }
 
 // tallyOrder counts one order's answer and, for a first buy, notes where the market was entered.
-func tallyOrder(res *Result, pm *perMarket, in engine.Intent, r broker.Report, tau float64) {
+func tallyOrder(res *Result, pm *perMarket, in engine.Intent, r broker.Report, tau float64, member string) {
 	o := &res.Buys
 	if in.Order.Action == broker.Sell {
 		o = &res.SellOrders
@@ -423,11 +438,12 @@ func tallyOrder(res *Result, pm *perMarket, in engine.Intent, r broker.Report, t
 		pm.entered = true
 		pm.firstTau = tau
 		pm.firstPrice = float64(r.Fills[0].Price) / 10000
+		pm.member = member
 	}
 }
 
 // summarise turns the per-market ledger into the row, the cuts and the series.
-func summarise(res *Result, markets map[int64]*perMarket, blocked map[string]int) {
+func summarise(res *Result, markets map[int64]*perMarket, blocked, picks map[string]int) {
 	res.Markets = len(markets)
 	closes := map[int64]bool{}
 	byClose := map[int64]int64{} // window P&L
@@ -438,6 +454,7 @@ func summarise(res *Result, markets map[int64]*perMarket, blocked map[string]int
 	}
 	prices := make([]Cut, len(priceBands))
 	sumPrice := make([]float64, len(priceBands))
+	byMember := map[string]Cut{}
 	for i, b := range priceBands {
 		prices[i].Band = b.Name
 	}
@@ -460,6 +477,9 @@ func summarise(res *Result, markets map[int64]*perMarket, blocked map[string]int
 			}
 		}
 		sumPrice[priceBandOf(pm.firstPrice)] += pm.firstPrice
+		if pm.member != "" {
+			byMember[pm.member] = addCut(byMember[pm.member], pm.member, pm.cost, pnl)
+		}
 	}
 	res.Windows = len(closes)
 	res.WindowsWithBet = len(betClose)
@@ -495,16 +515,43 @@ func summarise(res *Result, markets map[int64]*perMarket, blocked map[string]int
 	res.Drawdown = analysis.DrawdownOf(per)
 	res.Series = thin(series, 300)
 
-	res.Blocked = make([]Blocked, 0, len(blocked))
-	for why, n := range blocked {
-		res.Blocked = append(res.Blocked, Blocked{why, n})
+	res.Blocked = ranked(blocked)
+	if len(picks) > 0 {
+		res.Picks = ranked(picks)
 	}
-	sort.Slice(res.Blocked, func(i, j int) bool {
-		if res.Blocked[i].Count != res.Blocked[j].Count {
-			return res.Blocked[i].Count > res.Blocked[j].Count
+	if len(byMember) > 0 {
+		res.ByMember = make([]Cut, 0, len(byMember))
+		for _, c := range byMember {
+			c.ReturnPerDollar = ratio(c.PnLCents, c.StakedCents)
+			res.ByMember = append(res.ByMember, c)
 		}
-		return res.Blocked[i].Reason < res.Blocked[j].Reason
+		sort.Slice(res.ByMember, func(i, j int) bool { return res.ByMember[i].Band < res.ByMember[j].Band })
+	}
+}
+
+func addCut(c Cut, band string, cost, pnl int64) Cut {
+	c.Band = band
+	c.Markets++
+	c.StakedCents += cost
+	c.PnLCents += pnl
+	if pnl > 0 {
+		c.Won++
+	}
+	return c
+}
+
+func ranked(m map[string]int) []Blocked {
+	out := make([]Blocked, 0, len(m))
+	for why, n := range m {
+		out = append(out, Blocked{why, n})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Reason < out[j].Reason
 	})
+	return out
 }
 
 func ratio(num, den int64) float64 {

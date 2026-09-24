@@ -52,6 +52,68 @@ type Shape struct {
 
 	// Control marks a version registered to be caught, not to win: the pages say so.
 	Control bool `json:"control,omitempty" jsonschema:"a negative control: registered to show the checks catch it, not to win; the pages say so"`
+
+	// Members, when two or more, make this version a roster: one bucket, one version, a set of
+	// named shapes plus a pick. Member is Shape without a nested roster, so the MCP schema
+	// does not cycle. The pick is structural first (a member is eligible only if it would
+	// send a buy), then recent shadow return per dollar over lookback_windows among the
+	// eligible. Sit out if nobody is eligible. Results attach to this version, not to a member.
+	Members         []Member `json:"members,omitempty" jsonschema:"a roster of 2 to 8 member shapes; this version picks among them. v1 members all hold, same family. Omit for a single shape"`
+	LookbackWindows int      `json:"lookback_windows,omitempty" jsonschema:"settled shadow entries the adaptive pick needs of every eligible member, 1 to 64; default 16 when members are set. 0 with structural_only is roster order always"`
+	StructuralOnly  bool     `json:"structural_only,omitempty" jsonschema:"true: pick is roster order among the eligible, no look at recent results. The ablation's structural-only baseline"`
+}
+
+// Member is one shape in a roster. It carries the same knobs as Shape except a nested roster.
+type Member struct {
+	Name           string  `json:"name" jsonschema:"the member's name, shown on by_member and on the decision"`
+	Blurb          string  `json:"blurb,omitempty"`
+	Family         string  `json:"family,omitempty"`
+	Exit           string  `json:"exit" jsonschema:"hold (v1: every member holds)"`
+	Side           string  `json:"side,omitempty"`
+	Lambda         float64 `json:"lambda"`
+	LambdaLate     float64 `json:"lambda_late,omitempty"`
+	LambdaLateTau  float64 `json:"lambda_late_tau,omitempty"`
+	StaleCost      float64 `json:"stale_cost,omitempty"`
+	StaleCostSell  float64 `json:"stale_cost_sell,omitempty"`
+	TauMin         float64 `json:"tau_min,omitempty"`
+	TauMax         float64 `json:"tau_max,omitempty"`
+	BandMin        float64 `json:"band_min,omitempty"`
+	BandMax        float64 `json:"band_max,omitempty"`
+	MaxBets        int     `json:"max_bets,omitempty"`
+	MinGap         float64 `json:"min_gap,omitempty"`
+	MinHold        float64 `json:"min_hold,omitempty"`
+	Capture        float64 `json:"take_capture,omitempty"`
+	Kappa          float64 `json:"kappa,omitempty"`
+	WindowCapBps   int64   `json:"window_cap_bps,omitempty"`
+	MinVolRatio    float64 `json:"min_vol_ratio,omitempty"`
+	Sizing         string  `json:"sizing,omitempty"`
+	BaseStakeCents int64   `json:"base_stake_cents,omitempty"`
+	Multiplier     float64 `json:"multiplier,omitempty"`
+	MaxDoublings   int     `json:"max_doublings,omitempty"`
+}
+
+func (m Member) asShape() Shape {
+	return Shape{
+		Name: m.Name, Blurb: m.Blurb, Family: m.Family, Exit: m.Exit, Side: m.Side,
+		Lambda: m.Lambda, LambdaLate: m.LambdaLate, LambdaLateTau: m.LambdaLateTau,
+		StaleCost: m.StaleCost, StaleCostSell: m.StaleCostSell,
+		TauMin: m.TauMin, TauMax: m.TauMax, BandMin: m.BandMin, BandMax: m.BandMax,
+		MaxBets: m.MaxBets, MinGap: m.MinGap, MinHold: m.MinHold, Capture: m.Capture,
+		Kappa: m.Kappa, WindowCapBps: m.WindowCapBps, MinVolRatio: m.MinVolRatio,
+		Sizing: m.Sizing, BaseStakeCents: m.BaseStakeCents, Multiplier: m.Multiplier, MaxDoublings: m.MaxDoublings,
+	}
+}
+
+func memberOf(s Shape) Member {
+	return Member{
+		Name: s.Name, Blurb: s.Blurb, Family: s.Family, Exit: s.Exit, Side: s.Side,
+		Lambda: s.Lambda, LambdaLate: s.LambdaLate, LambdaLateTau: s.LambdaLateTau,
+		StaleCost: s.StaleCost, StaleCostSell: s.StaleCostSell,
+		TauMin: s.TauMin, TauMax: s.TauMax, BandMin: s.BandMin, BandMax: s.BandMax,
+		MaxBets: s.MaxBets, MinGap: s.MinGap, MinHold: s.MinHold, Capture: s.Capture,
+		Kappa: s.Kappa, WindowCapBps: s.WindowCapBps, MinVolRatio: s.MinVolRatio,
+		Sizing: s.Sizing, BaseStakeCents: s.BaseStakeCents, Multiplier: s.Multiplier, MaxDoublings: s.MaxDoublings,
+	}
 }
 
 // FromShape builds the version. Every number the shape sets is a convention that names the
@@ -172,7 +234,41 @@ func FromShape(s Shape) (Params, error) {
 		set("multiplier", s.Multiplier, "the stake is multiplied by this after each settled loss")
 		set("max_doublings", float64(s.MaxDoublings), "the most consecutive multiplications; the window cap bounds it too")
 	}
+	if len(s.Members) > 0 {
+		if err := attachMembers(&p, s, set); err != nil {
+			return Params{}, err
+		}
+	}
 	return p, p.Validate()
+}
+
+// attachMembers builds each member and labels the pick. A member Shape may not itself carry members.
+func attachMembers(p *Params, s Shape, set func(string, float64, string)) error {
+	p.Members = make([]Member, 0, len(s.Members))
+	for i, m := range s.Members {
+		if strings.TrimSpace(m.Name) == "" {
+			m.Name = fmt.Sprintf("member %d", i+1)
+		}
+		if _, err := FromShape(m.asShape()); err != nil {
+			return fmt.Errorf("member %q: %w", m.Name, err)
+		}
+		p.Members = append(p.Members, m)
+	}
+	p.StructuralOnly = s.StructuralOnly
+	switch {
+	case s.StructuralOnly:
+		p.LookbackWindows = 0
+		p.Blurb += fmt.Sprintf("; a roster of %d, picked in roster order among whoever would enter", len(p.Members))
+	default:
+		k := s.LookbackWindows
+		if k == 0 {
+			k = DefaultLookback
+		}
+		p.LookbackWindows = int64(k)
+		set("lookback_windows", float64(k), "settled shadow entries the adaptive pick needs of every eligible member")
+		p.Blurb += fmt.Sprintf("; a roster of %d, structural then recent return per dollar over %d windows", len(p.Members), k)
+	}
+	return nil
 }
 
 // ToShape is the builder's form filled from a registered version: every knob as the version
@@ -181,33 +277,37 @@ func FromShape(s Shape) (Params, error) {
 // new and the registry wants that said. Registered again through FromShape, every number becomes
 // the owner's convention, which is what choosing to keep it means.
 func ToShape(p Params) Shape {
-	return Shape{
-		Name:           strings.TrimSuffix(p.Name, ConventionSuffix),
-		Blurb:          "",
-		Family:         p.Family,
-		Exit:           p.Exit,
-		Side:           p.Side,
-		Lambda:         p.Lambda,
-		LambdaLate:     p.LambdaLate,
-		LambdaLateTau:  p.LambdaLateTau,
-		StaleCost:      p.StaleCost,
-		StaleCostSell:  p.StaleCostSell,
-		TauMin:         p.TauMin,
-		TauMax:         p.TauMax,
-		BandMin:        p.BandMin,
-		BandMax:        p.BandMax,
-		MaxBets:        p.MaxBets,
-		MinGap:         p.MinGap,
-		MinHold:        p.MinHold,
-		Capture:        p.TakeCapture,
-		Kappa:          p.Kappa,
-		WindowCapBps:   p.WindowCapBps,
-		MinVolRatio:    p.MinVolRatio,
-		Sizing:         p.Sizing,
-		BaseStakeCents: p.BaseStakeCents,
-		Multiplier:     p.Multiplier,
-		MaxDoublings:   p.MaxDoublings,
+	s := Shape{
+		Name:            strings.TrimSuffix(p.Name, ConventionSuffix),
+		Blurb:           "",
+		Family:          p.Family,
+		Exit:            p.Exit,
+		Side:            p.Side,
+		Lambda:          p.Lambda,
+		LambdaLate:      p.LambdaLate,
+		LambdaLateTau:   p.LambdaLateTau,
+		StaleCost:       p.StaleCost,
+		StaleCostSell:   p.StaleCostSell,
+		TauMin:          p.TauMin,
+		TauMax:          p.TauMax,
+		BandMin:         p.BandMin,
+		BandMax:         p.BandMax,
+		MaxBets:         p.MaxBets,
+		MinGap:          p.MinGap,
+		MinHold:         p.MinHold,
+		Capture:         p.TakeCapture,
+		Kappa:           p.Kappa,
+		WindowCapBps:    p.WindowCapBps,
+		MinVolRatio:     p.MinVolRatio,
+		Sizing:          p.Sizing,
+		BaseStakeCents:  p.BaseStakeCents,
+		Multiplier:      p.Multiplier,
+		MaxDoublings:    p.MaxDoublings,
+		LookbackWindows: int(p.LookbackWindows),
+		StructuralOnly:  p.StructuralOnly,
 	}
+	s.Members = append([]Member(nil), p.Members...)
+	return s
 }
 
 // Preset is a named Shape with a sentence about what it tests.

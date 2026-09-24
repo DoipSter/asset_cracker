@@ -134,7 +134,7 @@ Added 2026-09-22, when the strategy builder landed on the buckets page (`service
 | `strategy_build` | A dry run: the shape in, the version the engine would register out, every number labelled `convention` (you set it), `inherited` (the parent's), `limit` or `fact`; refuses exactly as registration would | The engine in this binary; nothing else |
 | `strategy_register` | Registers the shape as a **draft** version 3 | The running service, over HTTP on the Pi's loopback |
 | `strategy_versions` | The registry as the buckets page shows it: every version 3 with status and hypothesis, the new-orders switch, the allocation rule | The running service, a read |
-| `strategy_exercise` | Runs the shape through the live engine and paper broker on the recorded tape over a window of settled markets: what it would have done. Added 2026-09-23; [its own section](#exercising-a-shape-on-the-tape) | The record (read-only, `internal/exercise`); the running service, for the one row that records the run |
+| `strategy_exercise` | Runs the shape — or a roster of shapes — through the live engine and paper broker on the recorded tape over a window of settled markets: what it would have done. Added 2026-09-23, roster 2026-09-23; [its own section](#exercising-a-shape-on-the-tape) | The record (read-only, `internal/exercise`); the running service, for the one row that records the run |
 
 ### How a registration happens, and why that way
 
@@ -199,7 +199,12 @@ this writing) are counted (`snapshots_unpriced`) and not read, since nothing can
 
 **Input.** The shape, exactly as `strategy_build` takes it (`lambda_late` and `lambda_late_tau`
 included), plus `from` (required: markets CLOSING from this time), `to` (default now; only
-settled markets are replayed), `step_s` and `seed_cents`. Times take the read surface's forms.
+settled markets are replayed), `step_s` and `seed_cents`. A roster is the same shape with
+`members` (2 to 8, each a member shape; v1 all hold, same family): one version that picks among
+them. `structural_only` is roster order among whoever would enter. Otherwise the pick is
+structural first, then recent shadow return per dollar over `lookback_windows` (default 16)
+among the eligible; sit out if nobody would enter. Shadows are unit contracts on a fixed $1,000
+seed, settled only after that market's close, and a settlement after now is invisible. Times take the read surface's forms.
 Caps: 24 hours of 15-minute rounds or 7 days of ladders per call (a longer run is several calls);
 `step_s` is 1 for the rounds by default, every recorded second as the live engine looks, and 60
 for the ladders (at least 30: a leg is open for days). **A coarser step is not free**: measured
@@ -215,7 +220,8 @@ by its price (`by_entry_price`, the five bands of the 2026-09-23 attribution); e
 decision by reason (`blocked`, the engine's own texts); orders asked against filled for buys and
 sales; the cumulative P&L by window (`series`, at most 300 points); and every order that filled
 (`entries`, at most 400: ticker, second, tau, side, why, requested, filled, price, cash, Kelly,
-and which limit set the stake). Then `recorded`, `record_id` and, when it was not, `record_error`.
+and which limit set the stake). A roster also answers `by_member` (P&L cut by who fired) and
+`picks` (sit_out / warmup / adaptive / roster counts). Then `recorded`, `record_id` and, when it was not, `record_error`.
 
 **Every run is recorded.** The tool posts the shape, the window, the step, the seed, its release
 and the summary to `POST /api/controls/exercise/record` on the running service, with the operator
@@ -257,10 +263,11 @@ and the call's budget 45 s.
 
 **Checking it.** `cd service && go test ./internal/exercise/`: the replay on a synthetic tape (the
 money adds up, the cuts and blocked counts, a tape without depth or a view, an unordered tape
-refused, the late lambda entering only inside its window), the protocol walk on rows (the 480th
+refused, the late lambda entering only inside its window, a roster of two disjoint members naming
+who fired), the protocol walk on rows (the 480th
 eligible window, ineligible windows, a coin covered later, the fifteen-minute wait), the guard's
 refusal and the owner's word, and the tool over the in-memory transport against a stub tape and a
-stub door (the schema, the window forms, the caps, the record's body, an unrecorded run).
+stub door (the schema, the window forms, the caps, `members`, the record's body, an unrecorded run).
 
 ## What is not here
 

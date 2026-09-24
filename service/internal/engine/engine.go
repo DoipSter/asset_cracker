@@ -49,6 +49,9 @@ type Account struct {
 	LossStreak int
 
 	validated bool // the engine checked Params when it was built; without it Decide forms no order
+
+	// Composition is the roster picker when Params carries members. Nil for a single shape.
+	Composition *Composition
 }
 
 // FixedStake is the martingale stake for the next entry, in cents: base times multiplier for
@@ -82,7 +85,7 @@ func (a *Account) Seed() int64 {
 // bucket from the ledger balance and folds the recorded fills into it.
 func NewAccount(p Params, bucketID, cashCents int64, mayOrder bool) *Account {
 	return &Account{Params: p, BucketID: bucketID, CashCents: cashCents, MayOrder: mayOrder,
-		Positions: map[posKey]*Position{}, Windows: map[int64]*Window{}}
+		Positions: map[posKey]*Position{}, Windows: map[int64]*Window{}, Composition: newComposition(p)}
 }
 
 // Position is what the account holds on one side of a market, nil if nothing.
@@ -205,6 +208,8 @@ type Decision struct {
 	// ClearExit names a side whose exit is no longer wanted: the rule was evaluated afresh on this
 	// second's book and did not fire. Decide changes nothing, so it only says so; AfterDecide acts.
 	ClearExit string
+	Member    string // a roster's member that fired, or empty for a single shape
+	Pick      string // sit_out | warmup | adaptive | roster
 }
 
 // Intent is an order the engine would like sent, and what it knew when it formed it.
@@ -317,6 +322,89 @@ func wholeAsks(sides broker.Sides, side broker.Side, levels int) []broker.Price 
 }
 
 func (a *Account) decide(coin string, m Market, sides broker.Sides, v View, now float64) ([]Decision, []Intent) {
+	if a.Composition != nil {
+		return a.decideRoster(coin, m, sides, v, now)
+	}
+	return a.decideOnce(coin, m, sides, v, now)
+}
+
+// decideRoster observes every member's would-be unit entry (independent of this account's
+// cash), picks among those that would send a buy on THIS account, and runs decideOnce with
+// the picked member's params. Sit out if nobody is eligible.
+func (a *Account) decideRoster(coin string, m Market, sides broker.Sides, v View, now float64) ([]Decision, []Intent) {
+	c := a.Composition
+	var eligible []int
+	for i, mp := range c.Members {
+		if side, cost, ok := shadowEntry(mp, coin, m, sides, v, now); ok {
+			c.Observe(mp.Name, m.Ticker, side, m.Close, cost)
+		}
+		saved := a.Params
+		a.Params = mp
+		_, ins := a.decideOnce(coin, m, sides, v, now)
+		a.Params = saved
+		if buyIntent(ins) {
+			eligible = append(eligible, i)
+		}
+	}
+	idx, how := c.Pick(now, eligible)
+	if idx < 0 {
+		d := Decision{BucketID: a.BucketID, Strategy: a.Params.Name, Action: "none", Intent: -1, BlockedBy: BlockedNoMember, Why: BlockedNoMember, Pick: how}
+		if v.OK {
+			d.ModelProb = v.PModel
+		}
+		return []Decision{d}, nil
+	}
+	member := c.Members[idx]
+	saved := a.Params
+	a.Params = member
+	ds, ins := a.decideOnce(coin, m, sides, v, now)
+	a.Params = saved
+	for i := range ds {
+		ds[i].Strategy = c.Name
+		ds[i].Member = member.Name
+		ds[i].Pick = how
+	}
+	for i := range ins {
+		ins[i].Strategy = c.Name
+		if ins[i].Detail == nil {
+			ins[i].Detail = map[string]any{}
+		}
+		ins[i].Detail["member"] = member.Name
+		ins[i].Detail["pick"] = how
+	}
+	return ds, ins
+}
+
+func buyIntent(ins []Intent) bool {
+	for _, in := range ins {
+		if in.Order.Action == broker.Buy {
+			return true
+		}
+	}
+	return false
+}
+
+// shadowEntry is a member's would-be unit buy on a fresh $1,000 account: independent of the
+// composition's cash path, so one lucky Kelly stake does not elect the next member.
+func shadowEntry(p Params, coin string, m Market, sides broker.Sides, v View, now float64) (side string, costCents int64, ok bool) {
+	tmp := NewAccount(p, 0, p.SeedCents, true)
+	tmp.Composition = nil
+	tmp.validated = true
+	_, ins := tmp.decideOnce(coin, m, sides, v, now)
+	for _, in := range ins {
+		if in.Order.Action != broker.Buy {
+			continue
+		}
+		cost := int64(in.Order.Limit) / 100
+		if cost < 1 {
+			cost = 1
+		}
+		return string(in.Order.Side), cost, true
+	}
+	return "", 0, false
+}
+
+func (a *Account) decideOnce(coin string, m Market, sides broker.Sides, v View, now float64) ([]Decision, []Intent) {
 	prm := a.Params
 	tau := m.Close - now
 	tp, two := touch(sides)
@@ -1045,6 +1133,11 @@ func (e *Engine) SettleRows(ticker, result string) []SettleRow {
 // ApplySettlement pays out and closes the positions SettleRows listed. The runner calls it only
 // after RecordSettlements has committed those very rows.
 func (e *Engine) ApplySettlement(ticker, result string) []Event {
+	for _, a := range e.Accounts {
+		if a.Composition != nil {
+			a.Composition.Settle(ticker, result)
+		}
+	}
 	var events []Event
 	for _, row := range e.SettleRows(ticker, result) {
 		a := e.Account(row.BucketID)

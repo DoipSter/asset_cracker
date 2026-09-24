@@ -108,7 +108,10 @@ const Description = `Run a strategy shape through the third engine on the record
 	`that looks good on the window it was tuned on has been tuned on it, and every registration is still judged live at ` +
 	`the corrected threshold. Every run is recorded as an analysis_result row (key strategy.exercise) so the shapes tried ` +
 	`are counted beside the shapes registered. Refuses 15-minute windows past the v3 protocol's TRAIN until TEST has been ` +
-	`looked at. Reads at most 48 hours of rounds (7 days of ladders) per call; longer runs are several calls.`
+	`looked at. A roster (members: 2 to 8 shapes) is one version that picks among them: structural ` +
+	`eligibility first, then recent shadow return per dollar over lookback_windows (default 16); ` +
+	`structural_only is roster order among the eligible. The answer then includes by_member and pick counts. ` +
+	`Reads at most 48 hours of rounds (7 days of ladders) per call; longer runs are several calls.`
 
 func (t *Tool) exercise(ctx context.Context, _ *mcp.CallToolRequest, in Input) (*mcp.CallToolResult, Answer, error) {
 	ctx, cancel := context.WithTimeout(ctx, Budget)
@@ -169,7 +172,8 @@ func (t *Tool) exercise(ctx context.Context, _ *mcp.CallToolRequest, in Input) (
 		"drops a coin's second when another coin's write holds its lock, no sustainment allocation is taken here, and settlement is " +
 		"applied at the first snapshot at or after the close; against a registered version over its own window (2026-09-23) the entry " +
 		"seconds agreed and the stakes drifted by a contract or two as the cash paths parted. Snapshots without depth (before release " +
-		"87a2100) decide nothing. A step above 1 drops the bets a flickering ask would have given a band-restricted shape. Registering " +
+		"87a2100) decide nothing. A step above 1 drops the bets a flickering ask would have given a band-restricted shape. A roster is " +
+		"one version: the pick is structural then recent shadow return, and by_member / picks say who fired. Registering " +
 		"the shape is strategy_register; it is then judged live at the corrected threshold."
 
 	ans := Answer{Result: res}

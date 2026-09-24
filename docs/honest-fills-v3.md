@@ -501,6 +501,17 @@ weight the order was formed with. Why: on 162 windows the scorecard found the mo
 depend on the horizon (worse at 5 to 10 minutes, far better inside 2, where the book is one-sided most of the
 time), which one number cannot express; the shape lets that be tried as a trial, judged live like every other.
 
+**Note of 2026-09-23 (the owner's decision): a roster, one version.** The builder's shape gained
+`members` (2 to 8), `lookback_windows` and `structural_only` (`engine.Composition`). A bucket still
+holds one strategy version; the dance is that version. Each member is a normal shape (v1: all
+`hold`, same family). At a snapshot a member is eligible only if `Decide` with its params would
+send a buy; sit out if nobody is. Among the eligible the pick is roster order until every eligible
+member has `lookback_windows` (default 16) settled *shadow* unit entries whose close is at or
+before now, then the best shadow return per dollar. Shadows do not use the composition's cash.
+`structural_only` is the ablation's baseline (roster order always). `Decision.Member` and
+`Decision.Pick` name who fired. A settlement after now cannot elect a member (tested). Not a
+bucket rewriting `strategy_version_id`, not the unbuilt bench, not online learning of K.
+
 Entry test at the best ask `c`: `edge = p_side - c - fee(c) - stale_cost > 0`. `fee(c) = 0.07 c (1-c)` exactly.
 `stale_cost` is **[MEASURED on v2's entries: a proxy for v3's]** (6.3, M2) and replaces v2's guessed 0.01
 slippage. There is NO `min_edge` (v2's 0.03 was a guess at costs now charged exactly or measured). Buy limit: the
@@ -1236,6 +1247,14 @@ Mid-round Favourite (conventions) replayed to the same bet counts within one (24
 (121, 55) and the same entry seconds almost everywhere; stakes drifted by a contract or two and P&L by about $25 on
 $1,400 staked, because the live runner drops a coin's second under lock contention (`Runner3.Step`, `TryLock`), the
 sustainment allocation lowers a live bucket's cash, and settlement lands a few seconds later live.
+
+**Note of 2026-09-23: a roster is the same sim.** `strategy_exercise` takes `members` and answers
+`by_member` and `picks`. The first three members were exercised alone on
+`2026-09-23T01:30:00Z`–`2026-09-24T01:30:00Z` (TRAIN, 96 windows): Favourite record **614**
+(+$41.04, r/$ 0.0232, t 0.35), Value no-longshot **613** (+$30.92, r/$ 0.0299, t 0.62), Late
+model **615** (+$176.86, r/$ 0.1376, t 0.97). Registering the composition as a draft waits on the
+ablation (structural-only vs both vs best member) after this release; Late model is the member to
+beat.
 
 ---
 

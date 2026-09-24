@@ -118,6 +118,12 @@ type Params struct {
 	Levels     int  `json:"levels"`       // recorded levels an order may walk [FACT: five are recorded]
 	FeePerFill bool `json:"fee_per_fill"` // the pessimistic fee rounding; copied into the Paper by whoever builds it
 
+	// A roster (2026-09-23): Members, when two or more, make this one version that picks among
+	// them. LookbackWindows is K for the adaptive pick (0 with StructuralOnly: roster order).
+	Members         []Member `json:"members,omitempty"`
+	LookbackWindows int64    `json:"lookback_windows,omitempty"`
+	StructuralOnly  bool     `json:"structural_only,omitempty"`
+
 	Provenance  map[string]Provenance `json:"provenance"`
 	ProtocolSHA string                `json:"protocol_sha"` // sha-256 of docs/v3-measurement-protocol.md
 	ResultSHA   string                `json:"result_sha"`   // sha-256 of research/v3/frozen-params.json
@@ -139,7 +145,7 @@ var exitOnlyFields = map[string]bool{"stale_cost_sell": true, "min_hold": true, 
 // The builder's shape fields: zero, with no provenance, means "not used", so a version stored
 // before they existed still validates. Set, each needs provenance like every other number.
 var shapeFields = map[string]bool{"min_vol_ratio": true, "base_stake_cents": true, "multiplier": true, "max_doublings": true,
-	"lambda_late": true, "lambda_late_tau": true}
+	"lambda_late": true, "lambda_late_tau": true, "lookback_windows": true}
 
 // LambdaAt is the weight on the model at tau seconds to the close: LambdaLate inside
 // LambdaLateTau (tau at or under it), else Lambda. With no late window it is always Lambda.
@@ -495,6 +501,9 @@ func (p Params) validate(plumbing bool) error {
 	}
 	if p.Levels < 1 || p.Levels > 5 {
 		fail("levels %d is outside 1..5, and only five are recorded", p.Levels)
+	}
+	if err := validateComposition(p); err != nil {
+		fail("%s", err.Error())
 	}
 	if len(bad) > 0 {
 		return errors.New("engine params " + p.Name + ": " + strings.Join(bad, "; "))

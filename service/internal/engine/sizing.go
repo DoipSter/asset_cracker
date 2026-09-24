@@ -29,6 +29,7 @@ const (
 	BlockedExitNoProceeds       = "an exit is wanted but the sale could book nothing after the rounded fee: held to settlement"
 	BlockedSide                 = "the side with the edge is not the side this version buys"
 	BlockedQuietMarket          = "volatility under its trigger"
+	BlockedNoMember             = "no member eligible"
 	bindingKelly                = "kelly"
 	bindingMartingale           = "martingale"
 	bindingWindow               = "window"
