@@ -111,17 +111,25 @@ type HourlyClose struct {
 // InsertAnalysisResult appends one row to the analysis_result table (migration 0016): an
 // analysis computed by the service, in its own shape, never edited; a rerun is a new row.
 func (s *Store) InsertAnalysisResult(ctx context.Context, key, source, codeSHA string, params any, windowFrom, windowTo time.Time, result any) error {
+	_, err := s.RecordAnalysisResult(ctx, key, source, codeSHA, params, windowFrom, windowTo, result)
+	return err
+}
+
+// RecordAnalysisResult is InsertAnalysisResult returning the new row's id, for a caller that
+// hands it back (the exercise record route).
+func (s *Store) RecordAnalysisResult(ctx context.Context, key, source, codeSHA string, params any, windowFrom, windowTo time.Time, result any) (int64, error) {
 	p, err := json.Marshal(params)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	r, err := json.Marshal(result)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	_, err = s.pool.Exec(ctx, `insert into analysis_result (key, source, code_sha, params, window_from, window_to, result)
-	                            values ($1, $2, nullif($3, ''), $4, $5, $6, $7)`, key, source, codeSHA, p, windowFrom, windowTo, r)
-	return err
+	var id int64
+	err = s.pool.QueryRow(ctx, `insert into analysis_result (key, source, code_sha, params, window_from, window_to, result)
+	                             values ($1, $2, nullif($3, ''), $4, $5, $6, $7) returning id`, key, source, codeSHA, p, windowFrom, windowTo, r).Scan(&id)
+	return id, err
 }
 
 // DailyCloses is the last n daily candle closes of a spot instrument (by symbol, e.g. BTC-USD),

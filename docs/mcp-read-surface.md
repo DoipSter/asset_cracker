@@ -23,8 +23,10 @@ authentication. Code: `service/internal/readsurface` (the tools), `service/inter
 
 ### Guarantees
 
-These hold for the ten read tools. The four `strategy_*` tools are a client of the running
-service and are described in their own section below; one of them registers a draft.
+These hold for the ten read tools. The five `strategy_*` tools are described in their own section
+below: three are a client of the running service (one of them registers a draft), one is a dry run
+in this process, and `strategy_exercise` reads the record under the same guarantees and asks the
+service to record that it ran.
 
 - **Read-only by the database, not by convention.** Every call runs in a `READ ONLY` transaction:
   Postgres itself refuses any insert, update, delete or DDL inside one, whatever the role. In the
@@ -132,6 +134,7 @@ Added 2026-09-22, when the strategy builder landed on the buckets page (`service
 | `strategy_build` | A dry run: the shape in, the version the engine would register out, every number labelled `convention` (you set it), `inherited` (the parent's), `limit` or `fact`; refuses exactly as registration would | The engine in this binary; nothing else |
 | `strategy_register` | Registers the shape as a **draft** version 3 | The running service, over HTTP on the Pi's loopback |
 | `strategy_versions` | The registry as the buckets page shows it: every version 3 with status and hypothesis, the new-orders switch, the allocation rule | The running service, a read |
+| `strategy_exercise` | Runs the shape through the live engine and paper broker on the recorded tape over a window of settled markets: what it would have done. Added 2026-09-23; [its own section](#exercising-a-shape-on-the-tape) | The record (read-only, `internal/exercise`); the running service, for the one row that records the run |
 
 ### How a registration happens, and why that way
 
@@ -177,10 +180,93 @@ transport (the SDK validates every answer against the schema it derived, which i
 `required` field that should not have been was found), the dry run's labelling, and the HTTP
 side against a stand-in service: the key header, the `via` field, the 401 and 409 texts.
 
+### Exercising a shape on the tape
+
+Added 2026-09-23, at Brad's word ("make it so the mcp surface can exercise all of these with the
+engine when making a strategy"). `strategy_build` labels a shape; `strategy_exercise` runs it.
+Code: `service/internal/exercise`. It is the step between building and registering: a shape that
+has been exercised is still registered by `strategy_register` and judged live at the corrected
+threshold, and nothing here changes that.
+
+**What it does.** For every settled market of the shape's family closing in the window, it reads
+the recorded snapshots (the two bid ladders, the spot price and the model's journaled view,
+`model.v3`) in a READ ONLY transaction, rebuilds `engine.View` from each, and drives the very code
+the runner drives: `engine.Decide` on each second's book, `broker.Paper` filling only what the
+recorded depth displayed, `engine.Apply` folding the fills, `engine.ApplySettlement` at each
+market's recorded result. One account, seeded at $1,000 by convention (`seed_cents` otherwise),
+alone in its paper world. Rows of coins the model never priced (no `v3` key: SOL, XRP, DOGE at
+this writing) are counted (`snapshots_unpriced`) and not read, since nothing can be entered on them.
+
+**Input.** The shape, exactly as `strategy_build` takes it (`lambda_late` and `lambda_late_tau`
+included), plus `from` (required: markets CLOSING from this time), `to` (default now; only
+settled markets are replayed), `step_s` and `seed_cents`. Times take the read surface's forms.
+Caps: 24 hours of 15-minute rounds or 7 days of ladders per call (a longer run is several calls);
+`step_s` is 1 for the rounds by default, every recorded second as the live engine looks, and 60
+for the ladders (at least 30: a leg is open for days). **A coarser step is not free**: measured
+on 2026-09-23, thinning to one snapshot in five cost Mid-round Favourite 21 of its 76 bets, because
+its band (0.70 to 0.90) is one the ask flickers across within a second; Value lost 5 of 240.
+
+**Answer.** `simulated: true`, the built version's name, family and params; the window and its
+counts (markets, windows, snapshots, and those without depth, without a view, without `vol_ratio`,
+unpriced); a leaderboard-style row (bets, sells, windows with a bet, P&L, staked, fees, return per
+dollar, mean window P&L with its plain SE and t, top-window share, drawdown, final cash, whether
+it ran out); P&L cut by the entry's time band (`by_entry_band`, the analysis package's five) and
+by its price (`by_entry_price`, the five bands of the 2026-09-23 attribution); every blocked
+decision by reason (`blocked`, the engine's own texts); orders asked against filled for buys and
+sales; the cumulative P&L by window (`series`, at most 300 points); and every order that filled
+(`entries`, at most 400: ticker, second, tau, side, why, requested, filled, price, cash, Kelly,
+and which limit set the stake). Then `recorded`, `record_id` and, when it was not, `record_error`.
+
+**Every run is recorded.** The tool posts the shape, the window, the step, the seed, its release
+and the summary to `POST /api/controls/exercise/record` on the running service, with the operator
+key as `strategy_register` does, and the service writes one append-only `analysis_result` row:
+key `strategy.exercise`, `params` the shape and window (what makes it reproducible), `result` the
+summary. `analysis_results` with `key: strategy.exercise` lists them. The MCP process has no write
+grant, so this is the only mark a run can leave, and it exists so that the shapes tried are
+counted beside the shapes registered. A run the service could not record (no key in place, the
+route not yet released) is still answered, with `recorded: false` and the reason: the answer
+stands, the count does not. This departs from the plan's rule that every value tried be a
+registered draft (`docs/honest-fills-v3.md`, section 8, with a dated note); the record does not
+move the leaderboard's `trials`.
+
+**The protocol guard.** A 15-minute-round window that reaches past TRAIN's 480th eligible window
+(`docs/v3-measurement-protocol.md`, section 1) is refused, whole, until
+`research/v3/test-result.json` is committed: a lambda read off TEST windows' P&L would be a lambda
+chosen on TEST. TRAIN's end is found with the protocol's own existence query, which returns market
+ids and no figure and which the protocol says is not a look. The Pi's MCP process cannot see the
+repository, so the owner lifts the refusal by setting `AC_EXERCISE_PAST_TRAIN` in that process's
+environment once the look is taken. While TRAIN is short of 480 windows nothing settled is past it
+and nothing is refused. The ladders are under no protocol and are not guarded.
+
+**What it is not.** A measurement. The window and the shape were chosen, and a shape read on the
+window it was tuned on has been tuned on it; the answer says so in `note`, and the tool computes
+no `L_hat` and no model-against-mid Brier. Nor is it a copy of a live bucket. Checked on
+2026-09-23 against Value (conventions) and Mid-round Favourite (conventions) over their own live
+windows at `step_s` 1: bet counts within one (240 against 241; 76 against 75), windows equal (121;
+55), entry seconds the same almost everywhere, the worst window to the cent for Value; stakes a
+contract or two apart and P&L about $25 apart on $1,400 staked. The three reasons are the live
+path's and not the tape's: `Runner3.Step` gives up a coin's second when another coin's write holds
+its lock, so inside one second the two coins can be decided in the other order and the window's
+Kelly stake go to the other coin; the sustainment allocation lowers a live bucket's cash after
+each new high, and Kelly sizes off cash; and a live settlement lands a few seconds after the close,
+where the replay applies it at the first snapshot at or after it.
+
+**Cost.** A 20-hour window of the two priced coins at every second is about 150,000 snapshots,
+read in 7 s over the SSH tunnel from the Mac and replayed in 1.5 s; the statement timeout is 25 s
+and the call's budget 45 s.
+
+**Checking it.** `cd service && go test ./internal/exercise/`: the replay on a synthetic tape (the
+money adds up, the cuts and blocked counts, a tape without depth or a view, an unordered tape
+refused, the late lambda entering only inside its window), the protocol walk on rows (the 480th
+eligible window, ineligible windows, a coin covered later, the fifteen-minute wait), the guard's
+refusal and the owner's word, and the tool over the in-memory transport against a stub tape and a
+stub door (the schema, the window forms, the caps, the record's body, an unrecorded run).
+
 ## What is not here
 
 - Deploying, retirement, the orders switch (the buckets page), the rates, the paydays, moving
-  money, the reset (the home page's bank): clicks, a person's. Raw SQL, writes to any table.
+  money, the reset (the home page's bank): clicks, a person's. Raw SQL, writes to any table (the
+  exercise record is written by the service, not by this process).
 - The ledger, journal, metrics, commentary (TSK-42's first half). Same server, later.
 - Fifteen-minute candles: not stored. `bars` builds any bucket from the trade prints, but only
   from the day recording started.

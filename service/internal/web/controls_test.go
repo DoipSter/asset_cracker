@@ -32,6 +32,19 @@ type fakeControls struct {
 	stopped      []int64
 	bucketOrders []bool
 	archived     []bool
+	recorded     []recordedResult
+}
+
+// recordedResult is one analysis_result the fake was asked to write.
+type recordedResult struct {
+	key, source, sha string
+	params, result   any
+	from, to         time.Time
+}
+
+func (f *fakeControls) RecordAnalysisResult(_ context.Context, key, source, sha string, params any, from, to time.Time, result any) (int64, error) {
+	f.recorded = append(f.recorded, recordedResult{key, source, sha, params, result, from, to})
+	return int64(len(f.recorded)), nil
 }
 
 func (f *fakeControls) OrdersSetting(context.Context) (bool, bool, error) {
@@ -439,6 +452,58 @@ func TestResetHoldsThenReleasesThenReloads(t *testing.T) {
 
 // The builder: the engine (a fake here) builds and labels; the store registers as draft; a shape
 // the engine refuses, a missing hypothesis, and a taken name are refused with their reasons.
+// The exercise record: one append-only analysis_result row per run, key strategy.exercise, the
+// shape and window as params and the summary as result; behind the operator key like every
+// other POST here; a record without a shape, a window or a summary is refused and writes nothing.
+func TestExerciseRecord(t *testing.T) {
+	f := &fakeControls{}
+	mux := controlsMux(f, Control{Version: "rel1", Key: "open-sesame"})
+	body := `{"shape":{"name":"Late","exit":"hold","lambda":0.5,"tau_max":150},"family":"kalshi15m","from":"2026-09-22T04:30:00Z","to":"2026-09-23T04:30:00Z",` +
+		`"step_s":5,"seed_cents":100000,"release":"abc1234","summary":{"bets":12,"pnl_cents":-431}}`
+	req := httptest.NewRequest(http.MethodPost, ExerciseRecordPath, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 || len(f.recorded) != 0 {
+		t.Fatalf("without the key: %d %s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, ExerciseRecordPath, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(operatorHeader, "open-sesame")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 || len(f.recorded) != 1 || !strings.Contains(rec.Body.String(), `"id":1`) || !strings.Contains(rec.Body.String(), `"recorded":true`) {
+		t.Fatalf("record %d %s recorded %+v", rec.Code, rec.Body.String(), f.recorded)
+	}
+	got := f.recorded[0]
+	params, _ := got.params.(map[string]any)
+	if got.key != ExerciseRecordKey || got.source != ExerciseRecordSource || got.sha != "rel1" || params["family"] != "kalshi15m" || params["release"] != "abc1234" ||
+		!got.from.Equal(time.Date(2026, 9, 22, 4, 30, 0, 0, time.UTC)) || !got.to.Equal(time.Date(2026, 9, 23, 4, 30, 0, 0, time.UTC)) {
+		t.Fatalf("recorded %+v", got)
+	}
+	if shape, _ := params["shape"].(json.RawMessage); !strings.Contains(string(shape), `"tau_max":150`) {
+		t.Fatalf("the shape is the record: %s", shape)
+	}
+	if summary, _ := got.result.(json.RawMessage); !strings.Contains(string(summary), `"pnl_cents":-431`) {
+		t.Fatalf("the summary is the result: %s", summary)
+	}
+	for _, bad := range []string{
+		`{"family":"kalshi15m","from":"2026-09-22T04:30:00Z","to":"2026-09-23T04:30:00Z","summary":{}}`, // no shape
+		`{"shape":{"name":"x"},"from":"2026-09-23T04:30:00Z","to":"2026-09-22T04:30:00Z","summary":{}}`, // the window ends first
+		`{"shape":{"name":"x"},"from":"2026-09-22T04:30:00Z","to":"2026-09-23T04:30:00Z"}`,              // no summary
+		`{"shape":{"name":"x"},"from":"2026-09-22T04:30:00Z","to":"2026-09-23T04:30:00Z","summary":{},"release":"a\nb"}`,
+		`not json`,
+	} {
+		req = httptest.NewRequest(http.MethodPost, ExerciseRecordPath, strings.NewReader(bad))
+		req.Header.Set(operatorHeader, "open-sesame")
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != 400 || len(f.recorded) != 1 {
+			t.Fatalf("must be refused: %s -> %d %s", bad, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestBuilderRegistersADraft(t *testing.T) {
 	f := &fakeControls{}
 	built := 0

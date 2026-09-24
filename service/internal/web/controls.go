@@ -194,7 +194,18 @@ type controlStore interface {
 	ListPaydays(ctx context.Context) ([]store.Payday, error)
 	SchedulePayday(ctx context.Context, amountCents int64, everyDays int, note string, now time.Time) (store.Payday, error)
 	StopPayday(ctx context.Context, id int64) error
+	// RecordAnalysisResult writes one append-only analysis_result row: the exercise record.
+	RecordAnalysisResult(ctx context.Context, key, source, codeSHA string, params any, windowFrom, windowTo time.Time, result any) (int64, error)
 }
+
+// ExerciseRecordKey is the analysis_result key a strategy_exercise run is written under, and
+// ExerciseRecordSource who wrote it. The MCP tool (internal/exercise) names the same key.
+const (
+	ExerciseRecordKey    = "strategy.exercise"
+	ExerciseRecordSource = "mcp strategy_exercise"
+	ExerciseRecordPath   = "/api/controls/exercise/record"
+	exerciseRecordMax    = 1 << 20 // the summary carries a series of at most 300 points and a few cuts
+)
 
 // versionOut is a version-3 row as the page sees it: the store's fields and, when the process
 // has a builder, the shape a Remix starts from.
@@ -783,6 +794,64 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 		}
 		slog.Info("version registered as draft", "id", id, "name", built.Name, "control", built.Control, "origin", origin)
 		writeJSON(w, map[string]any{"id": id, "name": built.Name, "status": "draft", "control": built.Control})
+	}))
+
+	// The exercise record. strategy_exercise (the MCP tool, internal/exercise) replays a shape on
+	// the tape in its own process, which reads the record as assetcracker_ro and can insert
+	// nothing, and asks here for the one row that says the run happened: an append-only
+	// analysis_result of key strategy.exercise, params the shape and window (what makes it
+	// reproducible), result the summary. It exists so that the shapes tried are counted beside
+	// the shapes registered; nothing about it moves money or touches the registry.
+	mux.HandleFunc("POST "+ExerciseRecordPath, operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			writeErr(w, http.StatusServiceUnavailable, "The controls have no database.")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, exerciseRecordMax)
+		body, err := io.ReadAll(r.Body)
+		if err != nil || !json.Valid(body) {
+			writeErr(w, http.StatusBadRequest, "The request could not be read.")
+			return
+		}
+		var rec struct {
+			Shape     json.RawMessage `json:"shape"`
+			Family    string          `json:"family"`
+			From      time.Time       `json:"from"`
+			To        time.Time       `json:"to"`
+			StepS     int             `json:"step_s"`
+			SeedCents int64           `json:"seed_cents"`
+			Release   string          `json:"release"`
+			Summary   json.RawMessage `json:"summary"`
+		}
+		if err := json.Unmarshal(body, &rec); err != nil {
+			writeErr(w, http.StatusBadRequest, "The record could not be read: "+err.Error())
+			return
+		}
+		switch {
+		case len(rec.Shape) == 0 || string(rec.Shape) == "null":
+			writeErr(w, http.StatusBadRequest, "The record has no shape.")
+			return
+		case rec.From.IsZero() || rec.To.IsZero() || !rec.To.After(rec.From):
+			writeErr(w, http.StatusBadRequest, "The record's window is missing or ends before it starts.")
+			return
+		case len(rec.Summary) == 0 || string(rec.Summary) == "null":
+			writeErr(w, http.StatusBadRequest, "The record has no summary.")
+			return
+		case len(rec.Release) > 80 || strings.ContainsAny(rec.Release, "\n\r\t"):
+			writeErr(w, http.StatusBadRequest, "release must be one short word.")
+			return
+		}
+		params := map[string]any{"shape": rec.Shape, "family": rec.Family, "step_s": rec.StepS, "seed_cents": rec.SeedCents, "release": rec.Release}
+		ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+		defer cancel()
+		id, err := db.RecordAnalysisResult(ctx, ExerciseRecordKey, ExerciseRecordSource, ctl.Version, params, rec.From.UTC(), rec.To.UTC(), rec.Summary)
+		if err != nil {
+			slog.Error("controls: exercise record", "err", err)
+			writeErr(w, http.StatusInternalServerError, "The exercise was not recorded.")
+			return
+		}
+		slog.Info("exercise recorded", "id", id, "family", rec.Family, "from", rec.From.UTC().Format(time.RFC3339), "to", rec.To.UTC().Format(time.RFC3339))
+		writeJSON(w, map[string]any{"id": id, "key": ExerciseRecordKey, "recorded": true})
 	}))
 
 	mux.HandleFunc("POST /api/controls/policy", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {

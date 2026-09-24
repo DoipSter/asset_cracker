@@ -61,6 +61,10 @@ func New() *Door {
 // Register adds the four tools to an MCP server.
 func Register(s *mcp.Server) { New().register(s) }
 
+// RegisterWith adds the four tools using a door the caller holds, so that another tool on the
+// same server (strategy_exercise) can post through the very same one.
+func RegisterWith(s *mcp.Server, d *Door) { d.register(s) }
+
 func (d *Door) register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{Name: "strategy_presets", Description: descPresets}, d.presets)
 	mcp.AddTool(s, &mcp.Tool{Name: "strategy_build", Description: descBuild}, d.build)
@@ -222,6 +226,14 @@ func (d *Door) versions(ctx context.Context, _ *mcp.CallToolRequest, _ noInput) 
 	out.Note = "Simulated money. draft: registered, not seeded. probation/active: holds a bucket and trades. " +
 		"retired: its bucket is held settle-only. Deploying and retirement are clicks on the buckets page."
 	return nil, out, nil
+}
+
+// Post sends one JSON body to a route of the running service with the operator key, for the
+// other tools of this server that write through the service's gate (strategy_exercise records
+// each run this way). The service's error text comes back as the error, a 401 with where the
+// key goes, exactly as strategy_register's does.
+func (d *Door) Post(ctx context.Context, path string, body []byte, out any) error {
+	return d.call(ctx, http.MethodPost, path, body, out)
 }
 
 // call sends one request to the running service and decodes its JSON answer. A POST carries the

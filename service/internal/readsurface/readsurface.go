@@ -97,6 +97,10 @@ func (r *Surface) bounds(w Window) (from, to time.Time, err error) {
 	return from, to, nil
 }
 
+// ParseTime is parseTime for the other tools of this server (strategy_exercise takes a window in
+// the same forms), so that every tool reads a time the same way.
+func ParseTime(s string, now time.Time) (time.Time, error) { return parseTime(s, now) }
+
 // parseTime reads the forms the tools accept. Relative forms count back from now: -7d, -36h,
 // -2w, -90m; "now" is now. Dates are midnight UTC.
 func parseTime(s string, now time.Time) (time.Time, error) {

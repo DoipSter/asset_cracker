@@ -1219,6 +1219,24 @@ The replayer must never be used for:
 4. Writing to the database (`default_transaction_read_only = on`; its store has no insert).
 5. Filling what the recording does not show: hours before 87a2100 are skipped, not filled at the touch.
 
+**Note of 2026-09-23: the replayer exists, as the MCP tool `strategy_exercise` (`service/internal/exercise`,
+`docs/mcp-read-surface.md`).** It is the live path on the tape (`engine.Decide`, `broker.Paper`, `Apply`,
+`ApplySettlement`), reading `evaluation.quotes` and the journaled `model.v3`, so no model is reconstructed. Against
+the five rules: (2) its answer is labelled a replay and says in words it is not a measurement; (3) the 15-minute
+windows past TRAIN's 480th eligible window are refused until `research/v3/test-result.json` exists (the owner sets
+`AC_EXERCISE_PAST_TRAIN` in the MCP process's environment then); (4) the MCP process reads as `assetcracker_ro` and
+writes nothing; (5) snapshots without depth decide nothing and are counted. **Rule 1 it departs from, by the
+owner's decision of 2026-09-23:** a shape may be exercised without a registered row, and instead EVERY run is
+recorded as an append-only `analysis_result` (key `strategy.exercise`: the shape, the window and the summary),
+written by the running service through `POST /api/controls/exercise/record` behind the operator key. The count of
+shapes tried is therefore on the record beside the count registered, but it does not move the leaderboard's
+`trials`; whether it should (a Bonferroni over registered versions plus distinct exercised shapes) is a policy
+question left open here. Checked against the ledger on 2026-09-23: over their own windows Value (conventions) and
+Mid-round Favourite (conventions) replayed to the same bet counts within one (240/241, 76/75), the same windows
+(121, 55) and the same entry seconds almost everywhere; stakes drifted by a contract or two and P&L by about $25 on
+$1,400 staked, because the live runner drops a coin's second under lock contention (`Runner3.Step`, `TryLock`), the
+sustainment allocation lowers a live bucket's cash, and settlement lands a few seconds later live.
+
 ---
 
 ## 9. File-by-file change list
