@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/doipster/asset_cracker/service/internal/engine"
-	"github.com/doipster/asset_cracker/service/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -218,9 +217,9 @@ func (d *Door) deploy(ctx context.Context, _ *mcp.CallToolRequest, in DeployIn) 
 	}
 	source := strings.TrimSpace(in.Source)
 	if source == "" {
-		source = store.SeedFromReplenishment
+		source = "replenishment"
 	}
-	if source != store.SeedFromReplenishment && source != store.SeedFromBank {
+	if source != "replenishment" && source != "bank" {
 		return nil, Deployed{}, fmt.Errorf("source %q is not replenishment or bank", source)
 	}
 	body, err := json.Marshal(struct {
