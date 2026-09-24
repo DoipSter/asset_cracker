@@ -491,6 +491,16 @@ func (e *Engine) ApplySettlement(ticker, result string) []Event // only after Re
 `lambda` is one number for both versions (it is a property of the model), **[MEASURED]**, frozen with provenance.
 `decision.model_prob` stays the RAW `p_model`, so the existing scorecard means the same for every engine.
 
+**Note of 2026-09-23 (the owner's decision): a late window, for convention versions only.** The builder's shape
+gained `lambda_late` and `lambda_late_tau` (`engine.Params.LambdaAt`): inside `lambda_late_tau` seconds of the close
+(tau at or under it) the blend uses `lambda_late`, outside it `lambda` as above. Both are **[CONVENTION]** with
+provenance, both or neither, `lambda_late` in 0..1 (0 is allowed: the belief is the mid there and nothing is
+entered), and `Validate` refuses them on any version whose basis is measured: the protocol measures ONE lambda, and
+that stays true. A version without them forms its belief exactly as before, and the order's stored `lambda` is the
+weight the order was formed with. Why: on 162 windows the scorecard found the model's skill against the mid to
+depend on the horizon (worse at 5 to 10 minutes, far better inside 2, where the book is one-sided most of the
+time), which one number cannot express; the shape lets that be tried as a trial, judged live like every other.
+
 Entry test at the best ask `c`: `edge = p_side - c - fee(c) - stale_cost > 0`. `fee(c) = 0.07 c (1-c)` exactly.
 `stale_cost` is **[MEASURED on v2's entries: a proxy for v3's]** (6.3, M2) and replaces v2's guessed 0.01
 slippage. There is NO `min_edge` (v2's 0.03 was a guess at costs now charged exactly or measured). Buy limit: the

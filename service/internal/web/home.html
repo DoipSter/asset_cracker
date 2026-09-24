@@ -1011,7 +1011,8 @@ function registryHTML(){var c=S.controls||{},o=c.orders||{},vs=objs(c.versions),
 /* ---------- the strategy builder ---------- */
 /* Every field is one of the engine's parameters (engine.Shape). What you set is recorded as a convention you chose; what you leave blank is inherited from the parent shape. Nothing here is a measurement. */
 var NB=[["nb-name","Name","text",""],["nb-blurb","One line about it","text",""]];
-var NB_NUM=[["nb-lambda","Lambda: weight on the model (0 to 1)","0.5"],["nb-stale","Stale cost, buying ($)","0.0012"],["nb-stale-sell","Stale cost, selling ($, ev only)",""],
+var NB_NUM=[["nb-lambda","Lambda: weight on the model (0 to 1)","0.5"],["nb-lambda-late","Late lambda: weight on the model inside the late window (0 to 1)",""],["nb-lambda-late-tau","Late window: seconds before close from which the late lambda applies",""],
+  ["nb-stale","Stale cost, buying ($)","0.0012"],["nb-stale-sell","Stale cost, selling ($, ev only)",""],
   ["nb-tau-min","Earliest entry: seconds before close",""],["nb-tau-max","Latest entry: seconds before close",""],["nb-band-min","Lowest ask it buys",""],["nb-band-max","Highest ask it buys",""],
   ["nb-max-bets","Filled buys per round",""],["nb-min-gap","Seconds between buys",""],["nb-min-hold","Seconds held before a sale (ev)",""],["nb-capture","Take capture: share of the way to $1 (ev)",""],
   ["nb-kappa","Kelly fraction",""],["nb-cap","Window cap: % of min(equity, seed)",""],["nb-vol","Volatility trigger: times the coin's default",""],
@@ -1033,14 +1034,14 @@ function builderHTML(){var ps=arr(S.presets),cur=draft("nb-preset","");
     '<div><button type="button" class="go" data-act="build">Register as draft</button></div></details>'}
 function nbShape(){var g=function(id){var n=$(id);return n?String(n.value).trim():""},f=function(id){var v=g(id);if(v==="")return 0;var x=Number(v);return isFinite(x)?x:NaN};
   var s={name:g("nb-name"),blurb:g("nb-blurb"),hypothesis:g("nb-hyp"),family:g("nb-family")||"kalshi15m",exit:g("nb-exit")||"hold",side:g("nb-side")||"model",
-    lambda:f("nb-lambda"),stale_cost:f("nb-stale"),stale_cost_sell:f("nb-stale-sell"),tau_min:f("nb-tau-min"),tau_max:f("nb-tau-max"),band_min:f("nb-band-min"),band_max:f("nb-band-max"),
+    lambda:f("nb-lambda"),lambda_late:f("nb-lambda-late"),lambda_late_tau:f("nb-lambda-late-tau"),stale_cost:f("nb-stale"),stale_cost_sell:f("nb-stale-sell"),tau_min:f("nb-tau-min"),tau_max:f("nb-tau-max"),band_min:f("nb-band-min"),band_max:f("nb-band-max"),
     max_bets:Math.round(f("nb-max-bets")),min_gap:f("nb-min-gap"),min_hold:f("nb-min-hold"),take_capture:f("nb-capture"),kappa:f("nb-kappa"),window_cap_bps:Math.round(f("nb-cap")*100),
     min_vol_ratio:f("nb-vol"),sizing:g("nb-sizing")||"kelly",base_stake_cents:Math.round(f("nb-base")*100),multiplier:f("nb-mult"),max_doublings:Math.round(f("nb-doublings")),control:!!($("nb-control")&&$("nb-control").checked)};
   for(var k in s)if(typeof s[k]==="number"&&isNaN(s[k]))return{error:"A number could not be read: "+k.replace(/_/g," ")+"."};
   return s}
 function nbFill(p){var sh=(p&&p.shape)||{};var set=function(k,v){if(v==null||v===0||v==="")delete S.draft[k];else S.draft[k]=String(v)};
   set("nb-name",sh.name);set("nb-blurb",sh.blurb);set("nb-hyp",sh.hypothesis||(p?p.what:""));S.draft["nb-family"]=sh.family||"kalshi15m";S.draft["nb-exit"]=sh.exit||"hold";S.draft["nb-side"]=sh.side||"model";
-  set("nb-lambda",sh.lambda);set("nb-stale",sh.stale_cost);set("nb-stale-sell",sh.stale_cost_sell);set("nb-tau-min",sh.tau_min);set("nb-tau-max",sh.tau_max);set("nb-band-min",sh.band_min);set("nb-band-max",sh.band_max);
+  set("nb-lambda",sh.lambda);set("nb-lambda-late",sh.lambda_late);set("nb-lambda-late-tau",sh.lambda_late_tau);set("nb-stale",sh.stale_cost);set("nb-stale-sell",sh.stale_cost_sell);set("nb-tau-min",sh.tau_min);set("nb-tau-max",sh.tau_max);set("nb-band-min",sh.band_min);set("nb-band-max",sh.band_max);
   set("nb-max-bets",sh.max_bets);set("nb-min-gap",sh.min_gap);set("nb-min-hold",sh.min_hold);set("nb-capture",sh.take_capture);set("nb-kappa",sh.kappa);set("nb-cap",sh.window_cap_bps?sh.window_cap_bps/100:0);set("nb-vol",sh.min_vol_ratio);
   S.draft["nb-sizing"]=sh.sizing||"kelly";set("nb-base",sh.base_stake_cents?sh.base_stake_cents/100:0);set("nb-mult",sh.multiplier);set("nb-doublings",sh.max_doublings);S.draft["nb-control"]=sh.control?"on":""}
 /* renderBuckets draws the whole pane. While a field of the deploy form or the builder is being typed in, the poll leaves the pane alone and

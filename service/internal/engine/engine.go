@@ -325,7 +325,9 @@ func (a *Account) decide(coin string, m Market, sides broker.Sides, v View, now 
 		blank.ModelProb = v.PModel
 	}
 	if two && v.OK {
-		blank.HasProb, blank.MarketProb, blank.P = true, tp.Mid, Blend(tp.Mid, v.PModel, prm.Lambda)
+		// The weight on the model is the version's, or its late-window one inside lambda_late_tau
+		// seconds of the close (Params.LambdaAt): one number for a version without a late window.
+		blank.HasProb, blank.MarketProb, blank.P = true, tp.Mid, Blend(tp.Mid, v.PModel, prm.LambdaAt(tau))
 	}
 
 	// 1. Exits.
@@ -503,8 +505,10 @@ func (a *Account) windowOrFresh(closeAt float64) Window {
 // Engine.Detail completes it with what filled.
 func (a *Account) detail(in Intent, d Decision, v View) map[string]any {
 	prm := a.Params
+	// lambda is the weight this order's belief was formed with: the late-window one when the
+	// order fell inside it, so the stored detail says what the engine did, not only what it holds.
 	out := map[string]any{"v": 3, "coin": in.Coin, "ticker": in.Order.Ticker, "close": windowKey(in.Close), "strike": in.Strike,
-		"requested": in.Order.Qty, "why": in.Why, "lambda": prm.Lambda, "stale_cost": prm.StaleCost, "stale_cost_sell": prm.StaleCostSell,
+		"requested": in.Order.Qty, "why": in.Why, "lambda": prm.LambdaAt(in.Close - UnixSeconds(in.Order.At)), "stale_cost": prm.StaleCost, "stale_cost_sell": prm.StaleCostSell,
 		"edge": d.Edge, "limit": int64(in.Order.Limit),
 		"window": map[string]any{"close": in.Window.Close, "equity_cents": in.Window.EquityCents, "k_max": in.Window.KMax,
 			"open_cents": in.Window.OpenCents, "lost_cents": in.Window.LostCents}}
@@ -580,7 +584,7 @@ func (a *Account) exit(pos *Position, side broker.Side, coin string, m Market, s
 	} else if v.OK && len(bids) == 0 && !sides.Crossed {
 		if other, oerr := ladderOf(sides, broker.LadderFor(broker.Buy, side), prm.Levels); oerr == nil && len(other) > 0 {
 			ask := priceDollars(broker.TakerPrice(broker.Buy, other[0].Bid)) // this side's ask
-			p := Blend(ask, sideProb(v.PModel, side), prm.Lambda)
+			p := Blend(ask, sideProb(v.PModel, side), prm.LambdaAt(tau))
 			pSide = &p
 		}
 	}

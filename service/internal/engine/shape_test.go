@@ -35,6 +35,99 @@ func TestToShapeRoundTrip(t *testing.T) {
 	}
 }
 
+// The late window: a second weight on the model inside lambda_late_tau seconds of the close.
+// Both numbers are conventions with provenance, the pair round-trips through the builder, the
+// half-pair is refused, and a measured version may not carry it.
+func TestLateLambdaShape(t *testing.T) {
+	s := Shape{Name: "Horizon", Exit: "hold", Lambda: 0.01, LambdaLate: 0.8, LambdaLateTau: 120, StaleCost: 0.0012}
+	p, err := FromShape(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.LambdaLate != 0.8 || p.LambdaLateTau != 120 || !p.HasLateLambda() ||
+		p.Provenance["lambda_late"].Kind != KindConvention || p.Provenance["lambda_late_tau"].Kind != KindConvention ||
+		!strings.Contains(p.Blurb, "inside 120 s of the close the model's weight is 0.8") {
+		t.Fatalf("late lambda not carried: %+v", p)
+	}
+	for tau, want := range map[float64]float64{600: 0.01, 121: 0.01, 120: 0.8, 30: 0.8, 0: 0.8} {
+		if got := p.LambdaAt(tau); got != want {
+			t.Errorf("lambda at tau %v: %v, want %v", tau, got, want)
+		}
+	}
+	back := ToShape(p)
+	if back.LambdaLate != 0.8 || back.LambdaLateTau != 120 {
+		t.Fatalf("did not round-trip: %+v", back)
+	}
+	// A zero weight inside the window is a chosen number, not "unused": it is kept with provenance.
+	z, err := FromShape(Shape{Name: "Market late", Exit: "hold", Lambda: 0.5, LambdaLate: 0, LambdaLateTau: 90})
+	if err != nil || z.LambdaAt(60) != 0 || z.Provenance["lambda_late"].Kind != KindConvention {
+		t.Fatalf("lambda_late 0 with a window: %v %+v", err, z.Provenance["lambda_late"])
+	}
+	// Without a window a version has one lambda, and LambdaAt never changes.
+	one, _ := FromShape(Shape{Name: "One", Exit: "hold", Lambda: 0.5})
+	if one.HasLateLambda() || one.LambdaAt(1) != 0.5 || one.LambdaAt(900) != 0.5 {
+		t.Fatalf("a version without a late window: %+v", one)
+	}
+	if _, has := one.Provenance["lambda_late"]; has {
+		t.Fatal("an unused shape field carries no provenance")
+	}
+	for _, bad := range []Shape{
+		{Name: "x", Exit: "hold", Lambda: 0.5, LambdaLate: 0.8},                      // no window
+		{Name: "x", Exit: "hold", Lambda: 0.5, LambdaLate: 1.5, LambdaLateTau: 120},  // range
+		{Name: "x", Exit: "hold", Lambda: 0.5, LambdaLate: -0.1, LambdaLateTau: 120}, // range
+		{Name: "x", Exit: "hold", Lambda: 0.5, LambdaLate: 0.8, LambdaLateTau: -5},   // a negative window
+		{Name: "x", Exit: "hold", Lambda: 0.5, LambdaLate: math.NaN(), LambdaLateTau: 120},
+	} {
+		if _, err := FromShape(bad); err == nil {
+			t.Errorf("must be refused: %+v", bad)
+		}
+	}
+	// A measured version has one lambda: the same numbers under the measured basis are refused for it.
+	m := p
+	m.Basis = "measured"
+	if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "lambda_late is a builder's shape") {
+		t.Fatalf("a measured version with a late window must be refused for that reason: %v", err)
+	}
+}
+
+// The engine forms its belief with the weight of the moment: outside the window the model barely
+// counts and there is no edge; inside it the model is trusted and the same book gets an entry,
+// whose stored detail says which lambda it was formed with.
+func TestLateLambdaDecides(t *testing.T) {
+	p, err := FromShape(Shape{Name: "Horizon", Exit: "hold", Lambda: 0.01, LambdaLate: 1, LambdaLateTau: 120, StaleCost: 0.0012})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := NewAccount(p, 1, 100000, true)
+	e, err := NewEngine(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A mid of exactly one half (yes bid 0.49, yes ask 0.51) and a model at 0.95.
+	q := book([][2]string{{"0.4900", "100"}}, [][2]string{{"0.4900", "100"}})
+	m := Market{Ticker: "T", MarketID: 1, EvaluationID: 1, Strike: 100, Close: 1000}
+	v := view("BTC", 0.95)
+
+	ds, ins := e.Decide("BTC", m, q, v, 1000-600) // ten minutes out: lambda 0.01
+	if len(ds) != 1 || len(ins) != 0 || ds[0].BlockedBy != BlockedNoEdge || math.Abs(ds[0].P-0.5045) > 1e-9 {
+		t.Fatalf("outside the window: %+v %d intents", ds, len(ins))
+	}
+	m.EvaluationID = 2
+	ds, ins = e.Decide("BTC", m, q, v, 1000-60) // a minute out: lambda 1
+	if len(ds) != 1 || len(ins) != 1 || ds[0].Action != "enter" || ds[0].Side != "yes" || math.Abs(ds[0].P-0.95) > 1e-9 {
+		t.Fatalf("inside the window: %+v %d intents", ds, len(ins))
+	}
+	if got := ins[0].Detail["lambda"]; got != 1.0 {
+		t.Fatalf("the order's detail must carry the weight it was formed with: %v", got)
+	}
+	// The same book and view through a version with one lambda of 0.01 never enters.
+	one, _ := FromShape(Shape{Name: "One", Exit: "hold", Lambda: 0.01, StaleCost: 0.0012})
+	e1, _ := NewEngine(NewAccount(one, 2, 100000, true))
+	if ds, ins := e1.Decide("BTC", m, q, v, 1000-60); len(ins) != 0 || ds[0].BlockedBy != BlockedNoEdge {
+		t.Fatalf("one lambda is unchanged: %+v", ds)
+	}
+}
+
 // A ladder version must say its window; past an hour the model prices with the long sigma.
 func TestLadderFamily(t *testing.T) {
 	s := Shape{Name: "Day", Exit: "hold", Lambda: 0.5, Family: FamilyLadders}

@@ -26,7 +26,9 @@ type Shape struct {
 	Exit   string `json:"exit" jsonschema:"hold: every position is held to settlement (parent Value). ev: sells on value or once the bid covers take_capture of the way to a dollar (parent Scalper)"`
 	Side   string `json:"side,omitempty" jsonschema:"which side it may buy: model (whichever the belief favours; the default), favourite (the side priced above one half only), longshot (under one half only)"`
 
-	Lambda        float64 `json:"lambda" jsonschema:"weight on the model against the market, 0 to 1 exclusive of 0; the owner's convention is 0.5"`
+	Lambda        float64 `json:"lambda" jsonschema:"weight on the model against the market, 0 to 1 exclusive of 0; the owner's convention is 0.5. With lambda_late_tau set, this is the weight OUTSIDE the late window"`
+	LambdaLate    float64 `json:"lambda_late,omitempty" jsonschema:"weight on the model inside lambda_late_tau seconds of the close, 0 to 1 (0: the belief is the mid there, and nothing is entered); needs lambda_late_tau. A convention, for testing horizon-dependent trust in the model"`
+	LambdaLateTau float64 `json:"lambda_late_tau,omitempty" jsonschema:"seconds before the close from which lambda_late applies (tau at or under it); 0 means one lambda for the whole round"`
 	StaleCost     float64 `json:"stale_cost,omitempty" jsonschema:"staleness cost in dollars charged to a buy; convention 0.0012"`
 	StaleCostSell float64 `json:"stale_cost_sell,omitempty" jsonschema:"staleness cost in dollars charged to a sale; ev only"`
 
@@ -106,6 +108,14 @@ func FromShape(s Shape) (Params, error) {
 	}
 
 	set := func(key string, v float64, what string) { p.Provenance[key] = conv(v, what) }
+	if s.LambdaLateTau > 0 || s.LambdaLate != 0 {
+		// Both are recorded, lambda_late even at 0: a zero with provenance is a chosen number,
+		// a zero without one is "not used". Validate refuses the pair when tau is missing.
+		p.LambdaLate, p.LambdaLateTau = s.LambdaLate, s.LambdaLateTau
+		set("lambda_late", s.LambdaLate, "the weight on the model inside the late window")
+		set("lambda_late_tau", s.LambdaLateTau, "seconds before the close from which lambda_late applies")
+		p.Blurb += fmt.Sprintf("; inside %v s of the close the model's weight is %v", s.LambdaLateTau, s.LambdaLate)
+	}
 	if s.TauMin > 0 {
 		p.TauMin = s.TauMin
 		set("tau_min", s.TauMin, "no entry with fewer seconds than this to the close")
@@ -178,6 +188,8 @@ func ToShape(p Params) Shape {
 		Exit:           p.Exit,
 		Side:           p.Side,
 		Lambda:         p.Lambda,
+		LambdaLate:     p.LambdaLate,
+		LambdaLateTau:  p.LambdaLateTau,
 		StaleCost:      p.StaleCost,
 		StaleCostSell:  p.StaleCostSell,
 		TauMin:         p.TauMin,

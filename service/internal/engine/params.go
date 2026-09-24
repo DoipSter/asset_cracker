@@ -50,6 +50,15 @@ type Params struct {
 	// Lambda is the weight on the model in p = mid + Lambda * (p_model - mid). One number for
 	// every version, because it is a property of the model, not of a strategy. [MEASURED, M1]
 	Lambda float64 `json:"lambda"`
+	// LambdaLate, with LambdaLateTau above 0, is the weight on the model INSIDE LambdaLateTau
+	// seconds of the close (tau <= LambdaLateTau); Lambda applies outside it. Both zero, with no
+	// provenance, means one lambda for the whole round, exactly as before they existed. A shape
+	// of the builder (2026-09-23), for convention versions only: the protocol measures ONE
+	// lambda, so a measured version never carries these. Why a shape at all: on 162 windows
+	// the scorecard found the model's skill against the mid to depend on the horizon (worse at
+	// 5 to 10 minutes, far better inside 2), which one number cannot express. [CONVENTION when set]
+	LambdaLate    float64 `json:"lambda_late,omitempty"`
+	LambdaLateTau float64 `json:"lambda_late_tau,omitempty"`
 	// StaleCost is what a second-old ask costs a buyer, in dollars per contract, charged in the
 	// entry test and in the Kelly fraction, never in the ledger. [MEASURED on v2's buys: a proxy]
 	StaleCost float64 `json:"stale_cost"`
@@ -129,7 +138,20 @@ var exitOnlyFields = map[string]bool{"stale_cost_sell": true, "min_hold": true, 
 
 // The builder's shape fields: zero, with no provenance, means "not used", so a version stored
 // before they existed still validates. Set, each needs provenance like every other number.
-var shapeFields = map[string]bool{"min_vol_ratio": true, "base_stake_cents": true, "multiplier": true, "max_doublings": true}
+var shapeFields = map[string]bool{"min_vol_ratio": true, "base_stake_cents": true, "multiplier": true, "max_doublings": true,
+	"lambda_late": true, "lambda_late_tau": true}
+
+// LambdaAt is the weight on the model at tau seconds to the close: LambdaLate inside
+// LambdaLateTau (tau at or under it), else Lambda. With no late window it is always Lambda.
+func (p Params) LambdaAt(tau float64) float64 {
+	if p.LambdaLateTau > 0 && tau <= p.LambdaLateTau {
+		return p.LambdaLate
+	}
+	return p.Lambda
+}
+
+// HasLateLambda reports a version whose weight on the model changes inside the round.
+func (p Params) HasLateLambda() bool { return p.LambdaLateTau > 0 }
 
 // The values Side and Sizing may take.
 const (
@@ -386,6 +408,22 @@ func (p Params) validate(plumbing bool) error {
 	}
 	if p.Lambda == 0 && !plumbing {
 		fail("lambda is 0: the protocol's rule R1 says no version is registered")
+	}
+	// The late window: both numbers or neither, the weight in 0..1 (0 is allowed: inside the
+	// window the belief is the mid, and nothing is entered there), and only in a convention
+	// version, since the protocol freezes one lambda.
+	switch {
+	case p.LambdaLateTau < 0 || math.IsNaN(p.LambdaLateTau):
+		fail("lambda_late_tau %v is negative", p.LambdaLateTau)
+	case p.LambdaLateTau == 0 && p.LambdaLate != 0:
+		fail("lambda_late is set without lambda_late_tau: say how many seconds before the close it applies")
+	case p.LambdaLateTau > 0:
+		if !(p.LambdaLate >= 0 && p.LambdaLate <= 1) {
+			fail("lambda_late %v is outside 0..1", p.LambdaLate)
+		}
+		if p.Basis != BasisConvention && !plumbing {
+			fail("lambda_late is a builder's shape for convention versions; a measured version has one lambda")
+		}
 	}
 	for key, v := range map[string]float64{"stale_cost": p.StaleCost, "stale_cost_sell": p.StaleCostSell} {
 		if _, ok := priceUnits(v); !ok || !(v >= 0 && v < 1) {
