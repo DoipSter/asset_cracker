@@ -290,14 +290,15 @@ so every point is a figure that stood at that moment. No statistic is changed by
   },
   "leaderboard": {
     "what": "Per strategy version. Windows are the independent sample, not bets. Lifetime includes every earlier life of a strategy that ran out.",
-    "rows": [ { "strategy_version_id": 7, "strategy": "Scalper", "engine": "v2", "world": "real", "lives": 1, "book_cents": 127000, "lifetime_pnl_cents": 27693,
+    "rows": [ { "strategy_version_id": 7, "strategy": "Scalper", "engine": "v2", "world": "real", "family": "kalshi15m", "lives": 1, "book_cents": 127000, "lifetime_pnl_cents": 27693,
                 "bets": 36, "windows": 5, "mean_window_pnl_cents": 5538, "se_cents": 5100, "t": 1.09,
                 "top_window_share": 0.97, "verdict": "unresolved", "flags": ["one window is 97% of the result"],
                 "orders": 71, "decisions": 4180, "staked_cents": 192706,          // orders that filled (buys and sales); journal rows in the period; what the bets cost, fees inside
                 "return_per_dollar": 0.1437, "return_se": 0.3256,                // lifetime_pnl_cents / staked_cents, and its bootstrap standard error
                 "return_lower": -0.8303, "return_t": 0.44,                       // return less gate.z standard errors (0 when gate.z is 0); return over its standard error
                 "windows_needed": 71259,                                         // the sample floor from the power calculation; 0 = could not be computed
-                "first_close": 1790000100, "last_close": 1790003700,             // unix s: the windows counted run from 900 s before the first to the last
+                "first_close": 1790000100, "last_close": 1790003700,             // unix s: the first and last windows counted
+                "period_start": 1789999200,                                      // unix s: 900 s before first_close for the rounds; a ladder version's first bet counted
                 "drawdown": { "max_cents": 73113, "now_cents": 57632, "longest_underwater_windows": 9, "worst_window_cents": -21880 },
                 "gate": { "evaluated": true, "passed": false,
                           "checks": [ { "name": "windows",     "passed": false, "why": "5 windows, floor 71259 (min_windows 30, windows_needed 71259)" },
@@ -342,6 +343,16 @@ applied to that row. A version passes when every check passes:
   engine's originals trade the scored model; every other version fails this check with `why`
   saying it is not scored. This check is weak and says so: it is the absence of a finding against
   the model, not a finding for it.
+
+**The ladders** (2026-09-24). A ladder version (`family` `kalshiladder`) has a leaderboard row and a
+gate like any other. Its windows are the ladder's own: every traded leg closing at one instant, all
+coins together, keyed apart from the 15-minute round that closes at the same instant (5 pm ET is a
+quarter hour), so a leg waiting for its result never holds that round out, or the other way round.
+Only legs a bucket ordered on are read. The scorecard, `fills` and `windows_recorded` stay the
+15-minute rounds'. A ladder row's `decisions` is 0 (its journal is not counted: it looks at every
+leg every minute for days), its `period_start` is its first bet counted, and its `calibration`
+check fails with `why` saying the ladder model is not scored, so no ladder version can pass the
+gate until something scores that model.
 
 Every check is decided on the figures as published (four places for the return, whole cents for
 the drawdown), so a row cannot show a number on one side of the bar and a verdict on the other.

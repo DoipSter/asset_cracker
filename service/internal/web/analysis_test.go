@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/doipster/asset_cracker/service/internal/analysis"
+	"github.com/doipster/asset_cracker/service/internal/store"
 )
 
 // The warm loop refreshes at once and then on every tick, does not wait for anybody to ask, and
@@ -60,15 +61,16 @@ func TestWarmDoesNothingOnceCancelled(t *testing.T) {
 // every minute and keep the older history from ever being read.
 func TestReadOrder(t *testing.T) {
 	m := func(id, closes int64) analysis.Market { return analysis.Market{ID: id, Closes: closes} }
-	pending := map[int64][]analysis.Market{
-		900:  {m(1, 900), m(2, 900)},
-		1800: {m(3, 1800)},
-		2700: {m(4, 2700), m(5, 2700)}, // market 5 was held back last time
-		3600: {m(6, 3600)},
-		4500: {m(7, 4500)}, // and so was 7
+	w := func(closes int64) analysis.Window { return analysis.WindowOf(m(0, closes)) }
+	pending := map[analysis.Window][]analysis.Market{
+		w(900):  {m(1, 900), m(2, 900)},
+		w(1800): {m(3, 1800)},
+		w(2700): {m(4, 2700), m(5, 2700)}, // market 5 was held back last time
+		w(3600): {m(6, 3600)},
+		w(4500): {m(7, 4500)}, // and so was 7
 	}
 	got := readOrder(pending, map[int64]string{5: "bucket 22 held 106 yes at the close and its settlement rows cover 0", 7: "the same", 99: "not pending any more"})
-	want := []int64{3600, 1800, 900, 4500, 2700}
+	want := []analysis.Window{w(3600), w(1800), w(900), w(4500), w(2700)}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -79,6 +81,22 @@ func TestReadOrder(t *testing.T) {
 	}
 	if got := readOrder(nil, nil); len(got) != 0 {
 		t.Fatalf("nothing pending: %v", got)
+	}
+}
+
+// A ladder window and a round window closing at the same instant are two windows: each is read
+// whole on its own, the round's first, and a held-back ladder leg sends only its own window back.
+func TestReadOrderKeepsFamiliesApart(t *testing.T) {
+	round := analysis.Market{ID: 1, Closes: 75600}
+	leg := analysis.Market{ID: 2, Closes: 75600, Family: store.FamilyLadders}
+	pending := map[analysis.Window][]analysis.Market{analysis.WindowOf(round): {round}, analysis.WindowOf(leg): {leg}}
+	got := readOrder(pending, nil)
+	if len(got) != 2 || got[0] != analysis.WindowOf(round) || got[1] != analysis.WindowOf(leg) {
+		t.Fatalf("got %v", got)
+	}
+	got = readOrder(pending, map[int64]string{2: "held back"})
+	if len(got) != 2 || got[0] != analysis.WindowOf(round) {
+		t.Fatalf("a held-back ladder leg moved the round's window: %v", got)
 	}
 }
 
@@ -99,11 +117,16 @@ func TestNewDecisions(t *testing.T) {
 }
 
 func TestVersionIDs(t *testing.T) {
-	got := versionIDs([]analysis.Bucket{{ID: 1, VersionID: 12}, {ID: 2, VersionID: 3}, {ID: 3, VersionID: 12}, {ID: 4, VersionID: 7}})
-	if len(got) != 3 || got[0] != 3 || got[1] != 7 || got[2] != 12 {
-		t.Fatalf("got %v", got)
+	buckets := []analysis.Bucket{{ID: 1, VersionID: 12}, {ID: 2, VersionID: 3}, {ID: 3, VersionID: 12}, {ID: 4, VersionID: 7},
+		{ID: 5, VersionID: 22, Family: store.FamilyLadders}, {ID: 6, VersionID: 4, Family: store.FamilyRounds}}
+	got := versionIDs(buckets, store.FamilyRounds)
+	if len(got) != 4 || got[0] != 3 || got[1] != 4 || got[2] != 7 || got[3] != 12 {
+		t.Fatalf("rounds: got %v", got)
 	}
-	if got := versionIDs(nil); len(got) != 0 {
+	if got := versionIDs(buckets, store.FamilyLadders); len(got) != 1 || got[0] != 22 {
+		t.Fatalf("ladders: got %v", got)
+	}
+	if got := versionIDs(nil, store.FamilyRounds); len(got) != 0 {
 		t.Fatalf("got %v", got)
 	}
 }

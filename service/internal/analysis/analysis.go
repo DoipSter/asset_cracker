@@ -6,15 +6,38 @@
 // nothing here can return NaN or Inf: an undefined figure is reported as 0 with the verdict
 // "unresolved", because the page must never be handed a number that is not one.
 //
-// The unit of inference throughout is the 15-minute WINDOW (every market sharing one closes_at,
-// all coins together). Bets inside a window, and the five coins in the same minutes, are not
-// independent, so the sample size is windows, never bets or rows.
+// The unit of inference throughout is the WINDOW: every market of one family sharing one
+// closes_at, all coins together. For the rounds that is a 15-minute window; for the ladders, every
+// leg closing at the same instant. Bets inside a window, and the coins in the same minutes, are
+// not independent, so the sample size is windows, never bets or rows. The scorecard scores the
+// rounds only: it is the 15-minute model's.
 package analysis
 
 import (
 	"math"
 	"sort"
+
+	"github.com/doipster/asset_cracker/service/internal/store"
 )
+
+// Window names one window: its family and its close. A ladder leg closing at 5 pm ET shares its
+// close with a 15-minute round, and the two are different windows.
+type Window struct {
+	Family string // store.FamilyRounds or store.FamilyLadders
+	Closes int64  // unix seconds
+}
+
+// Ladder reports whether a market of this family is a ladder leg. Anything not named a ladder is
+// a round, as every market was before the ladders were read.
+func Ladder(family string) bool { return family == store.FamilyLadders }
+
+// WindowOf is the window a market belongs to.
+func WindowOf(m Market) Window {
+	if Ladder(m.Family) {
+		return Window{store.FamilyLadders, m.Closes}
+	}
+	return Window{store.FamilyRounds, m.Closes}
+}
 
 // The verdict rule. These are CONVENTIONS, chosen in advance and stated in the JSON as such. They
 // are not measurements of anything.
@@ -67,12 +90,13 @@ func BandOf(tau float64) int {
 	return len(Bands) - 1
 }
 
-// Market is one settled round.
+// Market is one settled round, or one ladder leg a bucket traded.
 type Market struct {
 	ID     int64
 	Coin   string
 	Closes int64  // unix seconds: the window it belongs to
 	Result string // "yes" or "no"
+	Family string // store.FamilyRounds or store.FamilyLadders; "" is a round
 }
 
 // BandSum is one market's scored rows in one band: how many, the summed squared errors of the
@@ -118,12 +142,13 @@ type Trade struct {
 
 // BucketRound is what one bucket made on one market, how many bets it placed there, what those
 // bets cost it (fees inside: the money it put at risk), and how many orders filled (buys and
-// sales together).
+// sales together). FirstBet is the unix second its first bet there was placed, 0 if it placed none.
 type BucketRound struct {
 	PnLCents    int64
 	Bets        int
 	StakedCents int64
 	Orders      int
+	FirstBet    int64
 }
 
 // PricedSale is an early sale re-priced as if only the displayed size had filled.
@@ -256,6 +281,9 @@ func Settle(m Market, trades []Trade, settled map[Holding]Paid) MarketFacts {
 			r.PnLCents -= t.CostCents
 			r.StakedCents += t.CostCents
 			r.Bets++
+			if r.FirstBet == 0 || t.Second < r.FirstBet {
+				r.FirstBet = t.Second
+			}
 		}
 		f.Rounds[t.BucketID] = r
 	}

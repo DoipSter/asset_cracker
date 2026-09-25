@@ -7,20 +7,29 @@ import (
 	"github.com/doipster/asset_cracker/service/internal/store"
 )
 
-// MarketsFrom maps the store's listed rounds into this package's Market.
+// MarketsFrom maps the store's listed rounds and ladder legs into this package's Market.
 func MarketsFrom(rows []store.AnalysisMarket) []Market {
 	out := make([]Market, len(rows))
 	for i, r := range rows {
-		out[i] = Market{ID: r.ID, Coin: r.Coin, Closes: r.Closes, Result: r.Result}
+		out[i] = Market{ID: r.ID, Coin: r.Coin, Closes: r.Closes, Result: r.Result, Family: r.Family}
 	}
 	return out
 }
 
-// StoreMarkets maps this package's Market back to the store's listed-round type.
+// StoreMarkets maps this package's Market back to the store's listed-market type.
 func StoreMarkets(markets []Market) []store.AnalysisMarket {
 	out := make([]store.AnalysisMarket, len(markets))
 	for i, m := range markets {
-		out[i] = store.AnalysisMarket{ID: m.ID, Coin: m.Coin, Closes: m.Closes, Result: m.Result}
+		out[i] = store.AnalysisMarket{ID: m.ID, Coin: m.Coin, Closes: m.Closes, Result: m.Result, Family: WindowOf(m).Family}
+	}
+	return out
+}
+
+// WindowsFrom maps the store's open windows into this package's Window.
+func WindowsFrom(keys map[store.AnalysisWindowKey]bool) map[Window]bool {
+	out := make(map[Window]bool, len(keys))
+	for k := range keys {
+		out[WindowOf(Market{Family: k.Family, Closes: k.Closes})] = true
 	}
 	return out
 }
@@ -32,7 +41,7 @@ func BucketsFrom(rows []store.AnalysisBucket) ([]Bucket, map[int64]int64) {
 	ledger := map[int64]int64{}
 	for _, r := range rows {
 		b := Bucket{ID: r.ID, VersionID: r.VersionID, Strategy: r.Strategy, Frozen: r.Frozen, Replaced: r.Replaced, AllocatedCents: r.AllocatedCents,
-			Engine: fmt.Sprintf("v%d", r.Version), World: "real"}
+			Engine: fmt.Sprintf("v%d", r.Version), World: "real", Family: WindowOf(Market{Family: r.Family}).Family}
 		if r.Anti {
 			b.World, b.Strategy = "anti", strings.TrimPrefix(r.Strategy, "Anti ")
 		}
@@ -46,7 +55,7 @@ func BucketsFrom(rows []store.AnalysisBucket) ([]Bucket, map[int64]int64) {
 func MetricRows(snaps []Snapshot) []store.MetricSnapshot {
 	out := make([]store.MetricSnapshot, len(snaps))
 	for i, sn := range snaps {
-		out[i] = store.MetricSnapshot{VersionID: sn.VersionID, FirstClose: sn.FirstClose, LastClose: sn.LastClose,
+		out[i] = store.MetricSnapshot{VersionID: sn.VersionID, PeriodStart: sn.PeriodStart, FirstClose: sn.FirstClose, LastClose: sn.LastClose,
 			Decisions: sn.Decisions, Orders: sn.Orders, Trials: sn.Trials, Metrics: sn.Metrics, GateConfig: sn.GateConfig, GatePassed: sn.GatePassed}
 	}
 	return out

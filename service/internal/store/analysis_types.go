@@ -5,18 +5,29 @@ import "encoding/json"
 // These types are what the analysis reads return. The analysis package maps them into its own
 // figures (Reconcile, Settle, the scorecard). This package does not import analysis.
 
-// AnalysisMarket is one settled round as listed for the promotion-gate reads.
+// AnalysisMarket is one settled round, or one traded ladder leg, as listed for the promotion-gate
+// reads.
 type AnalysisMarket struct {
 	ID     int64
 	Coin   string
 	Closes int64 // unix seconds
 	Result string
+	Family string // FamilyRounds or FamilyLadders, as strategy.family names them
 }
 
-// AnalysisBucket is one sim bucket of the kalshi15m family as listed for those reads.
+// AnalysisWindowKey names one window: every market of one family closing at one instant. A
+// ladder leg can close at the same instant as a 15-minute round (5 pm ET is a quarter hour), and
+// the two are different windows.
+type AnalysisWindowKey struct {
+	Family string
+	Closes int64 // unix seconds
+}
+
+// AnalysisBucket is one sim bucket of either family as listed for those reads.
 type AnalysisBucket struct {
 	ID, VersionID, LedgerAccount int64
 	Strategy                     string
+	Family                       string // FamilyRounds or FamilyLadders
 	Version                      int
 	Anti, Frozen, Replaced       bool
 	// AllocatedCents is the sustainment allocation taken from this bucket to date (bucket_skim):
@@ -67,15 +78,17 @@ type AnalysisWindowData struct {
 	Decisions   []AnalysisDecisionCount
 }
 
-// MetricSnapshot is one row for metric_snapshot: a gate decision on one version.
+// MetricSnapshot is one row for metric_snapshot: a gate decision on one version. The period it
+// covers runs from PeriodStart to LastClose (unix seconds), both included.
 type MetricSnapshot struct {
-	VersionID  int64
-	FirstClose int64
-	LastClose  int64
-	Decisions  int64
-	Orders     int
-	Trials     int
-	Metrics    json.RawMessage
-	GateConfig json.RawMessage
-	GatePassed bool
+	VersionID   int64
+	PeriodStart int64
+	FirstClose  int64
+	LastClose   int64
+	Decisions   int64
+	Orders      int
+	Trials      int
+	Metrics     json.RawMessage
+	GateConfig  json.RawMessage
+	GatePassed  bool
 }

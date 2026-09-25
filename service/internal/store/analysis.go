@@ -16,28 +16,57 @@ import (
 // index. A settled round is read once its settlement rows are in (AnalysisWindow) and never
 // again; the caller caches it.
 
-// The analysis reads ONLY the 15-minute series (FifteenMinuteSeries, in store.go). Its three
-// listings of markets are these; AnalysisWindow reads only the markets AnalysisMarkets listed,
-// and AnalysisUnsettled starts from trade_order, which a ladder market never has.
+// The analysis reads the 15-minute series (FifteenMinuteSeries, in store.go) and, of the ladders,
+// only the legs a bucket ordered on (tradedLadderLegs): a ladder records thousands of legs a day
+// and nobody bets on most of them, and listing them all would flood the reads FifteenMinuteSeries
+// keeps them out of. Its three listings of markets are these; AnalysisWindow reads only the
+// markets AnalysisMarkets listed. A window is keyed by family AND close (AnalysisWindowKey): the
+// ladders close at 5 pm ET, which is also the close of a 15-minute round, and a ladder leg
+// waiting for its result must not hold that round's window out of the evidence.
+//
+// Each query is the 15-minute one as it was, plus a second part for the ladder legs that starts
+// from the markets trade_order names (a few hundred) and reaches market by its key. Measured on
+// 2026-09-24: 62,218 of the 63,833 markets were ladder legs, about 30,000 more a day, and 470
+// markets had an order; one predicate over both families scanned every market (55 ms, and
+// growing with the ladders), where the 15-minute query alone walks its instruments' index.
 const (
-	sqlAnalysisSettledCount = `
-		select count(*) from market m join instrument i on i.id = m.instrument_id
-		 where m.result in ('yes', 'no') and m.closes_at is not null and ` + FifteenMinuteSeries
+	// tradedLadderLegs is the FROM of a ladder part: every leg of an above/below ladder
+	// (instrument spec "ladder": true, migration 0014) that has at least one order.
+	tradedLadderLegs = `(select distinct o.market_id from trade_order o) t
+		  join market m on m.id = t.market_id
+		  join instrument i on i.id = m.instrument_id and i.spec @> '{"ladder": true}'::jsonb`
 
+	sqlAnalysisSettledCount = `
+		select (select count(*) from market m join instrument i on i.id = m.instrument_id
+		         where m.result in ('yes', 'no') and m.closes_at is not null and ` + FifteenMinuteSeries + `)
+		     + (select count(*) from ` + tradedLadderLegs + `
+		         where m.result in ('yes', 'no') and m.closes_at is not null)`
+
+	// The family is named as strategy.family names it (FamilyRounds, FamilyLadders).
 	sqlAnalysisMarkets = `
-		select m.id, i.underlying, extract(epoch from m.closes_at)::bigint, m.result
+		select m.id, i.underlying, extract(epoch from m.closes_at)::bigint, m.result, 'kalshi15m'
 		  from market m join instrument i on i.id = m.instrument_id
 		 where m.result in ('yes', 'no') and m.closes_at is not null and m.closes_at >= $1
 		   and ` + FifteenMinuteSeries + `
-		 order by m.closes_at, m.id`
+		union all
+		select m.id, i.underlying, extract(epoch from m.closes_at)::bigint, m.result, 'kalshiladder'
+		  from ` + tradedLadderLegs + `
+		 where m.result in ('yes', 'no') and m.closes_at is not null and m.closes_at >= $1
+		 order by 3, 1`
 
+	// A round nobody bet on is waited for an hour; a traded round, and a traded ladder leg, until
+	// its result comes.
 	sqlAnalysisOpenWindows = `
-		select distinct extract(epoch from m.closes_at)::bigint
+		select 'kalshi15m', extract(epoch from m.closes_at)::bigint
 		  from market m join instrument i on i.id = m.instrument_id
 		 where m.result is null and m.closes_at < $1
 		   and (m.closes_at > $1 - interval '1 hour'
 		        or exists (select 1 from trade_order o where o.market_id = m.id))
-		   and ` + FifteenMinuteSeries
+		   and ` + FifteenMinuteSeries + `
+		union
+		select 'kalshiladder', extract(epoch from m.closes_at)::bigint
+		  from ` + tradedLadderLegs + `
+		 where m.result is null and m.closes_at < $1`
 )
 
 // AnalysisSettledCount is how many rounds have a result: the measured figure the caller checks
@@ -64,7 +93,7 @@ func (s *Store) AnalysisMarkets(ctx context.Context, closedSince time.Time) ([]A
 	var out []AnalysisMarket
 	for rows.Next() {
 		var m AnalysisMarket
-		if err := rows.Scan(&m.ID, &m.Coin, &m.Closes, &m.Result); err != nil {
+		if err := rows.Scan(&m.ID, &m.Coin, &m.Closes, &m.Result, &m.Family); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -82,21 +111,22 @@ func (s *Store) AnalysisTrials(ctx context.Context) (int, error) {
 	return n, err
 }
 
-// AnalysisOpenWindows is the closes_at (unix seconds) of every round that has closed and can
-// still get a result. The five coins settle a few seconds apart, and a window is only scored
+// AnalysisOpenWindows is every window (family and closes_at) with a market that has closed and
+// can still get a result. The five coins settle a few seconds apart, and a window is only scored
 // whole. "Can still get a result" is UnsettledMarkets' own rule, so the two cannot disagree: a
 // round nobody bet on is asked about for an hour and then never again, and after that hour it
-// no longer keeps the rest of its window out. It is simply missing from the scorecard.
-func (s *Store) AnalysisOpenWindows(ctx context.Context, now time.Time) (map[int64]bool, error) {
+// no longer keeps the rest of its window out. It is simply missing from the scorecard. A traded
+// ladder leg is waited for until its result comes, as a traded round is.
+func (s *Store) AnalysisOpenWindows(ctx context.Context, now time.Time) (map[AnalysisWindowKey]bool, error) {
 	rows, err := s.pool.Query(ctx, sqlAnalysisOpenWindows, now)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[int64]bool{}
+	out := map[AnalysisWindowKey]bool{}
 	for rows.Next() {
-		var w int64
-		if err := rows.Scan(&w); err != nil {
+		var w AnalysisWindowKey
+		if err := rows.Scan(&w.Family, &w.Closes); err != nil {
 			return nil, err
 		}
 		out[w] = true
@@ -126,15 +156,16 @@ func (s *Store) AnalysisModelVersions(ctx context.Context) ([]int64, error) {
 	return out, rows.Err()
 }
 
-// AnalysisBuckets lists every sim bucket of the kalshi15m family, live and frozen, with the
-// strategy version it belongs to. A twin is reported under its original's name, world "anti".
+// AnalysisBuckets lists every sim bucket of both families, live and frozen, with the strategy
+// version it belongs to and its family. A twin is reported under its original's name, world
+// "anti".
 func (s *Store) AnalysisBuckets(ctx context.Context) ([]AnalysisBucket, error) {
 	rows, err := s.pool.Query(ctx, `
-		select b.id, b.strategy_version_id, st.name, v.version, coalesce((v.params->>'anti')::boolean, false),
+		select b.id, b.strategy_version_id, st.name, st.family, v.version, coalesce((v.params->>'anti')::boolean, false),
 		       b.status = 'frozen', b.replaced_by_bucket_id is not null, b.ledger_account_id,
 		       coalesce((select sum(k.winnings_cents + k.replenish_cents + k.tax_cents + k.fees_cents) from bucket_skim k where k.bucket_id = b.id), 0)::bigint
 		  from bucket b join strategy_version v on v.id = b.strategy_version_id join strategy st on st.id = v.strategy_id
-		 where b.mode = 'sim' and st.family = 'kalshi15m' order by b.id`)
+		 where b.mode = 'sim' and st.family in ('kalshi15m', 'kalshiladder') order by b.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +173,7 @@ func (s *Store) AnalysisBuckets(ctx context.Context) ([]AnalysisBucket, error) {
 	var out []AnalysisBucket
 	for rows.Next() {
 		var b AnalysisBucket
-		if err := rows.Scan(&b.ID, &b.VersionID, &b.Strategy, &b.Version, &b.Anti, &b.Frozen, &b.Replaced, &b.LedgerAccount, &b.AllocatedCents); err != nil {
+		if err := rows.Scan(&b.ID, &b.VersionID, &b.Strategy, &b.Family, &b.Version, &b.Anti, &b.Frozen, &b.Replaced, &b.LedgerAccount, &b.AllocatedCents); err != nil {
 			return nil, err
 		}
 		out = append(out, b)
@@ -151,8 +182,9 @@ func (s *Store) AnalysisBuckets(ctx context.Context) ([]AnalysisBucket, error) {
 }
 
 // AnalysisWindowData reads the markets of one settled window: every market in `markets` must
-// share one closes_at. Four queries, each bounded to the window's own minutes. Reconcile and
-// Settle live in the analysis package, which maps this into facts.
+// share one closes_at and one family. For a window of rounds, four queries, each bounded to the
+// window's own minutes. For a window of ladder legs, the first two only (see below). Reconcile
+// and Settle live in the analysis package, which maps this into facts.
 //
 // modelVersions are the versions whose journal carries the model the scorecard scores;
 // versions is EVERY version whose journal rows are counted (metric_snapshot.n_decisions): the
@@ -166,12 +198,24 @@ func (s *Store) AnalysisWindowData(ctx context.Context, modelVersions, versions 
 	}
 	ids := make([]int64, len(markets))
 	for i, m := range markets {
+		if m.Closes != markets[0].Closes || m.Family != markets[0].Family {
+			return out, fmt.Errorf("one window, one close and one family: market %d is %s at %d, market %d is %s at %d",
+				markets[0].ID, markets[0].Family, markets[0].Closes, m.ID, m.Family, m.Closes)
+		}
 		ids[i] = m.ID
 	}
 	closes := time.Unix(markets[0].Closes, 0)
 	// A round is open for 15 minutes; the margin is for a market listed a little early. Nothing
 	// is journaled or traded after the close.
 	from, to := closes.Add(-20*time.Minute), closes.Add(time.Minute)
+	ladder := markets[0].Family == FamilyLadders
+	if ladder {
+		// A ladder leg is open for days, and a bucket may buy it at any time before its close, so
+		// any bound below the close would be a guess. trade_order is not partitioned and its
+		// market_id index (0011) bounds this read to the window's own legs; the book a sale is
+		// priced from is bounded by the sale's own time.
+		from = time.Unix(0, 0)
+	}
 
 	// 1. Every order that filled anything, and for a SELL the bid ladder on its side in the latest
 	// snapshot of that market at or before it (in practice the same instant: the engine sold off
@@ -253,6 +297,13 @@ func (s *Store) AnalysisWindowData(ctx context.Context, modelVersions, versions 
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return out, fmt.Errorf("settlements: %w", err)
+	}
+	if ladder {
+		// Neither 3 nor 4 for the ladders. The scorecard scores the 15-minute model, not the
+		// ladder's. And a ladder version journals a look at every two-sided leg every minute for
+		// days, so counting its rows on a window would walk that whole span of decision: its
+		// n_decisions is reported as 0 (the analysis says so on its row).
+		return out, nil
 	}
 
 	// 3. The scorecard's sums. One row per evaluation (a second of one market): the originals
@@ -363,8 +414,9 @@ func metricSnapshotLatest(ctx context.Context, q dbq) (map[int64]int64, error) {
 }
 
 // InsertMetricSnapshots stores gate decisions, one row each, in one transaction. A decision is a
-// version's, on sim, over the period from 900 s before its first window's close (when that round
-// opened) to its last window's close, both ends included. A row that is already there for the
+// version's, on sim, over the period from PeriodStart to its last window's close, both ends
+// included: for the rounds, 900 s before its first window's close (when that round opened); for
+// the ladders, its first bet counted (analysis.LeaderRow.PeriodStart). A row that is already there for the
 // same version and last close is not written again: the check is part of the insert, so a
 // refresh that stored its rows and then lost the connection cannot double them on its retry.
 // Returns how many rows were written.
@@ -387,12 +439,15 @@ func (s *Store) InsertMetricSnapshots(ctx context.Context, snaps []MetricSnapsho
 func insertMetricSnapshots(ctx context.Context, q dbq, snaps []MetricSnapshot) (int, error) {
 	written := 0
 	for _, sn := range snaps {
+		if sn.PeriodStart <= 0 || sn.PeriodStart > sn.FirstClose {
+			return 0, fmt.Errorf("metric_snapshot for version %d: period start %d is not before its first close %d", sn.VersionID, sn.PeriodStart, sn.FirstClose)
+		}
 		tag, err := q.Exec(ctx, `
 			insert into metric_snapshot (strategy_version_id, bucket_id, mode, period, n_decisions, n_trades, trials_at_the_time, metrics, gate_config, gate_passed)
 			select $1, null, 'sim', tstzrange(to_timestamp($2), to_timestamp($3), '[]'), $4, $5, $6, $7, $8, $9
 			 where not exists (select 1 from metric_snapshot
 			                    where strategy_version_id = $1 and mode = 'sim' and bucket_id is null and upper(period) = to_timestamp($3))`,
-			sn.VersionID, float64(sn.FirstClose-900), float64(sn.LastClose), sn.Decisions, sn.Orders, sn.Trials, sn.Metrics, sn.GateConfig, sn.GatePassed)
+			sn.VersionID, float64(sn.PeriodStart), float64(sn.LastClose), sn.Decisions, sn.Orders, sn.Trials, sn.Metrics, sn.GateConfig, sn.GatePassed)
 		if err != nil {
 			return 0, fmt.Errorf("metric_snapshot for version %d: %w", sn.VersionID, err)
 		}
@@ -403,7 +458,8 @@ func insertMetricSnapshots(ctx context.Context, q dbq, snaps []MetricSnapshot) (
 
 // AnalysisUnsettled is what is still in play, by bucket: early sales in rounds with no result
 // yet, and the cost of bets still open (bought, not sold, round not settled). Bounded to orders
-// placed since `since`.
+// placed since `since`, except on a ladder leg: a leg is open for days, so a bet on one is open
+// however long ago it was placed.
 //
 // An order counts when it has at least one fill, whatever its status says, exactly as in
 // AnalysisWindow: a partly filled sale is a sale, and an order that filled nothing sold nothing
@@ -414,8 +470,8 @@ func (s *Store) AnalysisUnsettled(ctx context.Context, since time.Time) (sells m
 	rows, err := s.pool.Query(ctx, `
 		select o.bucket_id, count(*) filter (where o.action = 'sell'),
 		       coalesce(sum(round(coalesce((o.detail->>'cost')::numeric, 0) * 100) * case o.action when 'buy' then 1 else -1 end), 0)::bigint
-		  from trade_order o join market m on m.id = o.market_id
-		 where o.placed_at >= $1 and m.result is null
+		  from trade_order o join market m on m.id = o.market_id join instrument i on i.id = m.instrument_id
+		 where (o.placed_at >= $1 or i.spec @> '{"ladder": true}'::jsonb) and m.result is null
 		   and exists (select 1 from fill f where f.order_id = o.id)
 		 group by 1`, since)
 	if err != nil {

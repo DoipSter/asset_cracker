@@ -211,12 +211,14 @@ const (
 	sqlReadOnly = `set transaction read only`
 
 	// The close of the first settled market: the default lower bound, read and not guessed.
-	// market is small (a few hundred rows a day) and not partitioned.
-	// Like the analysis, only the 15-minute series (store.FifteenMinuteSeries).
+	// market is not partitioned. The 15-minute series only (store.FifteenMinuteSeries): the
+	// sales this check re-prices are the rounds', and the analysis' fills are the rounds' alone.
+	// The ladder legs the analysis also reads (its leaderboard) are held to settlement and have
+	// no sale to compare.
 	sqlFirstClose = `select min(m.closes_at) from market m join instrument i on i.id = m.instrument_id
 		 where m.result in ('yes', 'no') and m.closes_at is not null and ` + store.FifteenMinuteSeries
 
-	// store.AnalysisMarkets' listing, with the ticker and an upper bound.
+	// The 15-minute part of store.AnalysisMarkets' listing, with the ticker and an upper bound.
 	sqlMarkets = `
 		select m.id, m.ticker, i.underlying, m.closes_at, m.result
 		  from market m join instrument i on i.id = m.instrument_id
@@ -224,7 +226,8 @@ const (
 		   and ` + store.FifteenMinuteSeries + `
 		 order by m.closes_at, m.id`
 
-	// store.AnalysisOpenWindows' rule, word for word, bounded to the range ($1 = now).
+	// The 15-minute part of store.AnalysisOpenWindows' rule, word for word, bounded to the range
+	// ($1 = now).
 	sqlOpenWindows = `
 		select distinct extract(epoch from m.closes_at)::bigint
 		  from market m join instrument i on i.id = m.instrument_id
@@ -234,7 +237,7 @@ const (
 		   and ` + store.FifteenMinuteSeries + `
 		   and m.closes_at >= $2 and m.closes_at < $3`
 
-	// store.AnalysisBuckets' listing, without the ledger account.
+	// The kalshi15m part of store.AnalysisBuckets' listing, without the ledger account.
 	sqlBuckets = `
 		select b.id, b.strategy_version_id, st.name, v.version, coalesce((v.params->>'anti')::boolean, false)
 		  from bucket b join strategy_version v on v.id = b.strategy_version_id join strategy st on st.id = v.strategy_id

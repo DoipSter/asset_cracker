@@ -72,7 +72,7 @@ const gateNote = "The promotion gate, a rule chosen in advance. A strategy versi
 	"(the windows at which a true return of min_edge_per_dollar would be found with probability `power` at threshold z, given the spread the bootstrap measured); " +
 	"edge: return_lower, the after-fee return per dollar staked less z bootstrap standard errors, is above zero as published (four places); " +
 	"drawdown: the deepest fall of its realised P&L from a running peak, over every life, is within max_drawdown_cents; " +
-	"calibration: the model it trades on is scored by the scorecard (the live engine's originals; a twin or an archived engine is not) on at least min_windows windows and does not read `model worse`. " +
+	"calibration: the model it trades on is scored by the scorecard (the live engine's originals on the 15-minute rounds; a twin, an archived engine or a ladder version is not) on at least min_windows windows and does not read `model worse`. " +
 	"That last check is weak and says so: it is the absence of a finding against the model, not a finding for it; a non-inferiority margin was not stated in advance. " +
 	"z is the two-sided Bonferroni cut for `trials` versions, the leaderboard's own threshold, so `edge` passes exactly when the return's bootstrap t reaches what the verdict needs. " +
 	"The gate is not evaluated, and nothing is stored, while coverage is partial or trials could not be read. " +
@@ -234,8 +234,9 @@ type gateInputs struct {
 	lower           float64 // as published
 	drawdown        Drawdown
 	// calibration: whether the model this version trades on is the one the scorecard scores,
-	// and the scorecard's overall row
+	// and the scorecard's overall row; unscored says why not, "" for the stock reason
 	modelScored bool
+	unscored    string
 	overall     ScoreRow
 }
 
@@ -264,6 +265,8 @@ func evaluateGate(cfg GateConfig, in gateInputs) Gate {
 	}
 	add("drawdown", in.drawdown.MaxCents <= cfg.MaxDrawdownCents, fmt.Sprintf("deepest fall %d cents, limit %d", in.drawdown.MaxCents, cfg.MaxDrawdownCents))
 	switch {
+	case !in.modelScored && in.unscored != "":
+		add("calibration", false, in.unscored)
 	case !in.modelScored:
 		add("calibration", false, "the model this version trades on is not scored; only the live engine's originals are")
 	case in.overall.NWindows < cfg.MinWindows:
@@ -284,15 +287,16 @@ func notEvaluated(why string) Gate { return Gate{Checks: []Check{}, Why: why} }
 // Snapshot is one row for metric_snapshot: a gate decision on one version, with everything it
 // was decided from.
 type Snapshot struct {
-	VersionID  int64
-	FirstClose int64 // unix s: the close of the earliest window with a bet; the period opens 900 s before it
-	LastClose  int64 // unix s: the close of the latest
-	Decisions  int64 // journal rows of this version on the settled markets in those windows
-	Orders     int   // orders that filled anything, buys and sales
-	Trials     int
-	Metrics    json.RawMessage // the leaderboard row, whole
-	GateConfig json.RawMessage
-	GatePassed bool
+	VersionID   int64
+	PeriodStart int64 // unix s: where the period opens (LeaderRow.PeriodStart)
+	FirstClose  int64 // unix s: the close of the earliest window with a bet
+	LastClose   int64 // unix s: the close of the latest
+	Decisions   int64 // journal rows of this version on the settled markets in those windows
+	Orders      int   // orders that filled anything, buys and sales
+	Trials      int
+	Metrics     json.RawMessage // the leaderboard row, whole
+	GateConfig  json.RawMessage
+	GatePassed  bool
 }
 
 // Snapshots is what a document has to store: one Snapshot per leaderboard row whose gate was
@@ -316,7 +320,7 @@ func Snapshots(doc Document) []Snapshot {
 		if err != nil {
 			continue
 		}
-		out = append(out, Snapshot{VersionID: r.VersionID, FirstClose: r.FirstClose, LastClose: r.LastClose, Decisions: r.Decisions, Orders: r.Orders,
+		out = append(out, Snapshot{VersionID: r.VersionID, PeriodStart: r.PeriodStart, FirstClose: r.FirstClose, LastClose: r.LastClose, Decisions: r.Decisions, Orders: r.Orders,
 			Trials: doc.Conventions.Trials, Metrics: row, GateConfig: cfg, GatePassed: r.Gate.Passed})
 	}
 	return out

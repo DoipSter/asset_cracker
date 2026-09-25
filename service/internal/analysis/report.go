@@ -16,6 +16,7 @@ type Bucket struct {
 	Strategy      string // "Scalper"; a twin carries its original's name and World "anti"
 	Engine        string // "v" and the strategy version's number: "v1", "v2", or "v3" for the third engine
 	World         string // "real" or "anti"
+	Family        string // store.FamilyRounds or store.FamilyLadders; "" is the rounds
 	Frozen        bool
 	Replaced      bool // ran out and was staked again: the next life is another bucket
 	// AllocatedCents is the sustainment allocation taken from this bucket to date.
@@ -117,6 +118,7 @@ type LeaderRow struct {
 	Strategy  string `json:"strategy"`
 	Engine    string `json:"engine"`
 	World     string `json:"world"`
+	Family    string `json:"family"` // kalshi15m (the rounds) or kalshiladder (the daily and weekly ladders)
 	Lives     int    `json:"lives"`
 	BookCents int64  `json:"book_cents"` // cash plus open bets AT COST. Not equity: api/buckets marks the same bets at the bid
 	// AllocatedCents is the sustainment allocation taken from the version's buckets to date,
@@ -152,8 +154,13 @@ type LeaderRow struct {
 	Series     [][2]int64 `json:"series"`
 	FirstClose int64      `json:"first_close"`
 	LastClose  int64      `json:"last_close"`
-	Drawdown   Drawdown   `json:"drawdown"`
-	Gate       Gate       `json:"gate"`
+	// PeriodStart (unix seconds) is where the period the row covers begins, the lower end of a
+	// stored decision's period: for the rounds, 900 s before first_close, when that round opened;
+	// for the ladders, the first bet counted, since a leg is open for days and a bet may come at
+	// any time before its close.
+	PeriodStart int64    `json:"period_start"`
+	Drawdown    Drawdown `json:"drawdown"`
+	Gate        Gate     `json:"gate"`
 }
 
 type Leaderboard struct {
@@ -167,7 +174,7 @@ type Document struct {
 	ComputedAt      float64     `json:"computed_at"`
 	Stale           bool        `json:"stale"` // true when the last refresh failed and this is the one before it
 	StaleReason     string      `json:"stale_reason,omitempty"`
-	WindowsRecorded int         `json:"windows_recorded"`
+	WindowsRecorded int         `json:"windows_recorded"` // 15-minute windows; the ladders' are counted on their leaderboard rows
 	Coverage        Coverage    `json:"coverage"`
 	Conventions     Conventions `json:"conventions"`
 	Gate            GateConfig  `json:"gate"`
@@ -179,8 +186,8 @@ type Document struct {
 // Inputs is everything Build needs, already read.
 type Inputs struct {
 	ComputedAt     float64
-	Facts          []MarketFacts  // every settled market aggregated so far
-	Incomplete     map[int64]bool // windows (closes, unix s) to leave out: see Coverage.WindowsIncomplete
+	Facts          []MarketFacts   // every settled market aggregated so far
+	Incomplete     map[Window]bool // windows to leave out: see Coverage.WindowsIncomplete
 	Buckets        []Bucket
 	BookCents      map[int64]int64 // live buckets: ledger cash plus open bets at cost
 	UnsettledSells map[int64]int   // by bucket: early sales in rounds with no result yet
@@ -208,13 +215,16 @@ const (
 		"The displayed size is the BEST BID LEVEL ALONE. The simulator books a sale one cent under the bid, and size bid within that cent is not counted, " +
 		"so contracts_beyond_bid is an upper bound on the size that was not there. " +
 		"contracts_sold, contracts_beyond_bid, share_beyond and both P&L figures cover only the sells_priced sales: settled rounds where depth was recorded. " +
-		"Proceeds and cost are the recorded ones pro rata, fees inside; the fee's round-up to a cent is not recomputed, so a sale can be off by under a cent."
+		"Proceeds and cost are the recorded ones pro rata, fees inside; the fee's round-up to a cent is not recomputed, so a sale can be off by under a cent. " +
+		"The 15-minute rounds only: the ladders are not included."
 	leaderboardWhat = "Per strategy version. Windows are the independent sample, not bets. Lifetime includes every earlier life of a strategy that ran out. " +
 		"lifetime_pnl_cents is realised trading P&L on settled windows (payouts and sale proceeds less what the bets cost, fees inside), before any sustainment allocation; " +
 		"allocated_cents is that allocation, taken from the version's buckets to date, so lifetime_pnl_cents less allocated_cents is what the buckets kept; " +
 		"bets and windows count the same settled windows. It is not book or equity less the seed. " +
 		"book_cents is the live buckets' ledger cash plus their open bets AT COST; 0 if no bucket is live. It is not equity: api/buckets equity_cents marks the same bets at the bid. " +
 		"A first-engine version spans its BTC and ETH buckets, which api/buckets lists apart. " +
+		"A ladder version (family kalshiladder) is scored the same way, a window being every leg closing at one instant, all coins together; " +
+		"its decisions are not counted (0), its period_start is its first bet counted, and its gate's calibration check fails, because no scorecard scores the ladder model. " +
 		"The verdict threshold is conventions.leaderboard_min_abs_t, raised for the conventions.trials versions compared here at once. " +
 		"staked_cents is what the bets cost (fees inside), and return_per_dollar is lifetime_pnl_cents over it: the after-fee return on every dollar put at risk. " +
 		"return_se is its standard error from resampling the windows with replacement (gate.bootstrap_resamples draws, seeded, so the figure reproduces); " +
@@ -250,17 +260,29 @@ func partialNote(c Coverage) string {
 // Build combines the cached per-market facts into the document. It never returns a nil slice
 // (the page iterates them) and never a NaN or Inf.
 func Build(in Inputs) Document {
-	var facts []MarketFacts
-	windows, left := map[int64]bool{}, map[int64]bool{}
+	// facts is every market in a complete window, both families: the leaderboard's. rounds is the
+	// 15-minute ones alone: the scorecard's and the fills'. A window is its family and its close,
+	// so a ladder leg still waiting for its result does not keep the round that closed at the same
+	// instant out.
+	var facts, rounds []MarketFacts
+	windows, left := map[int64]bool{}, map[Window]bool{}
+	incomplete := map[Window]bool{}
+	for w := range in.Incomplete {
+		incomplete[WindowOf(Market{Family: w.Family, Closes: w.Closes})] = true
+	}
 	for _, f := range in.Facts {
-		if in.Incomplete[f.Closes] {
-			left[f.Closes] = true
+		w := WindowOf(f.Market)
+		if incomplete[w] {
+			left[w] = true
 			continue
 		}
-		windows[f.Closes] = true
 		facts = append(facts, f)
+		if !Ladder(f.Family) {
+			windows[f.Closes] = true
+			rounds = append(rounds, f)
+		}
 	}
-	for w := range in.Incomplete {
+	for w := range incomplete {
 		left[w] = true
 	}
 	cov := Coverage{MarketsSettled: in.MarketsSettled, MarketsAggregated: len(in.Facts), MarketsUnreconciled: max(in.Unreconciled, 0),
@@ -286,8 +308,8 @@ func Build(in Inputs) Document {
 		// themselves are still shown: a zero would be a number that is not the real one either.
 		rule = thresholds{}
 	}
-	doc.Scorecard = buildScorecard(facts, rule)
-	doc.Fills = buildFills(facts, in.Buckets, in.UnsettledSells)
+	doc.Scorecard = buildScorecard(rounds, rule)
+	doc.Fills = buildFills(rounds, in.Buckets, in.UnsettledSells)
 	// The gate is decided only when a verdict could be: everything read, and the trials known.
 	// Its z is the leaderboard threshold, which the partial rule has just set to 0.
 	decide := ""
@@ -417,22 +439,23 @@ func buildScorecard(facts []MarketFacts, rule thresholds) Scorecard {
 }
 
 // scoredEngine is the engine whose journal the scorecard scores (store.AnalysisModelVersions:
-// the live engine's version-3 originals). A version of any other engine, or a twin, trades a
-// model the scorecard does not see, and the gate's calibration check says so.
+// the live engine's version-3 originals of the rounds). A version of any other engine, a twin,
+// or a ladder version trades a model the scorecard does not see, and the gate's calibration
+// check says so.
 const scoredEngine = "v3"
 
 // version is what the fills and leaderboard group by: a strategy version, whatever bucket or
 // life the money was in.
 type version struct {
-	id                      int64
-	strategy, engine, world string
+	id                              int64
+	strategy, engine, world, family string
 }
 
 func versionsOf(buckets []Bucket) (byBucket map[int64]int64, versions map[int64]version) {
 	byBucket, versions = map[int64]int64{}, map[int64]version{}
 	for _, b := range buckets {
 		byBucket[b.ID] = b.VersionID
-		versions[b.VersionID] = version{b.VersionID, b.Strategy, b.Engine, b.World}
+		versions[b.VersionID] = version{b.VersionID, b.Strategy, b.Engine, b.World, WindowOf(Market{Family: b.Family}).Family}
 	}
 	return
 }
@@ -503,6 +526,7 @@ func buildLeaderboard(facts []MarketFacts, buckets []Bucket, book map[int64]int6
 	type tally struct {
 		windows      map[int64]*window // closes -> the version's P&L and stake in cents, windows with at least one bet
 		bets, orders int
+		firstBet     int64 // unix s of the earliest bet counted
 	}
 	tallies := map[int64]*tally{}
 	for id := range versions {
@@ -521,6 +545,9 @@ func buildLeaderboard(facts []MarketFacts, buckets []Bucket, book map[int64]int6
 			}
 			w.pnl, w.staked = w.pnl+float64(r.PnLCents), w.staked+float64(r.StakedCents)
 			t.bets, t.orders = t.bets+r.Bets, t.orders+r.Orders
+			if r.FirstBet > 0 && (t.firstBet == 0 || r.FirstBet < t.firstBet) {
+				t.firstBet = r.FirstBet
+			}
 		}
 	}
 	out := Leaderboard{What: leaderboardWhat, Rows: []LeaderRow{}}
@@ -543,10 +570,17 @@ func buildLeaderboard(facts []MarketFacts, buckets []Bucket, book map[int64]int6
 		// t and the share are rounded once, and the verdict and the flags are decided on the rounded
 		// figures, so what the row shows and what it says can never disagree.
 		tt, share := round(st.T, 2), round(TopWindowShare(per), 2)
-		row := LeaderRow{VersionID: id, Strategy: v.strategy, Engine: v.engine, World: v.world, Lives: 1, LifetimePnLCents: int64(total), Bets: t.bets,
+		row := LeaderRow{VersionID: id, Strategy: v.strategy, Engine: v.engine, World: v.world, Family: v.family, Lives: 1, LifetimePnLCents: int64(total), Bets: t.bets,
 			Windows: st.N, MeanWindowPnLCents: int64(round(st.Mean, 0)), SECents: int64(round(st.SE, 0)), T: tt,
 			TopWindowShare: share, Verdict: Verdict(Stat{N: st.N, T: tt}, rule.leaderboard, "ahead", "behind"), Flags: []string{},
 			Orders: t.orders, FirstClose: first, LastClose: last, Drawdown: DrawdownOf(per), Series: thin(series, SeriesPoints)}
+		switch {
+		case first == 0: // no window: no period
+		case Ladder(v.family) && t.firstBet > 0:
+			row.PeriodStart = t.firstBet
+		default:
+			row.PeriodStart = first - 900 // the first round opened 900 s before its close
+		}
 		// The period is the windows with a bet; the journal rows counted are every one this version
 		// wrote on the settled markets inside it, whether or not it bet on them.
 		for _, f := range facts {
@@ -570,8 +604,15 @@ func buildLeaderboard(facts []MarketFacts, buckets []Bucket, book map[int64]int6
 		case st.N == 0:
 			row.Gate = notEvaluated("no settled window with a bet")
 		default:
-			row.Gate = evaluateGate(gate, gateInputs{windows: st.N, needed: row.WindowsNeeded, ret: Ratio{N: ret.N, Value: row.ReturnPerDollar, SE: row.ReturnSE},
-				lower: row.ReturnLower, drawdown: row.Drawdown, modelScored: v.engine == scoredEngine && v.world == "real", overall: overall})
+			in := gateInputs{windows: st.N, needed: row.WindowsNeeded, ret: Ratio{N: ret.N, Value: row.ReturnPerDollar, SE: row.ReturnSE},
+				lower: row.ReturnLower, drawdown: row.Drawdown, modelScored: v.engine == scoredEngine && v.world == "real" && !Ladder(v.family), overall: overall}
+			if Ladder(v.family) {
+				in.unscored = "the ladder model is not scored: the scorecard scores the 15-minute rounds only"
+			}
+			row.Gate = evaluateGate(gate, in)
+		}
+		if Ladder(v.family) {
+			row.Flags = append(row.Flags, "a ladder version: a window is every leg closing at one instant, its journal rows are not counted, and no scorecard scores its model")
 		}
 		if partial != "" {
 			row.Flags = append(row.Flags, partial+"; lifetime_pnl_cents, bets, windows and t cover those only, and no verdict is given until all are read")

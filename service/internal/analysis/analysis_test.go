@@ -465,7 +465,7 @@ func TestLeaderboardKeepsEveryLife(t *testing.T) {
 		round1(5, 3600, 2, 1000, 1), round1(6, 3600, 3, -500, 1),
 		round1(7, 4500, 2, 999999, 9)} // window 4500 is incomplete: left out everywhere
 	// window 4500 is left out because a market in it has no result yet; every SETTLED market is read
-	doc := Build(Inputs{Facts: facts, Buckets: buckets, BookCents: map[int64]int64{2: 101000, 4: 100000}, Incomplete: map[int64]bool{4500: true}, MarketsSettled: 7, Trials: 18})
+	doc := Build(Inputs{Facts: facts, Buckets: buckets, BookCents: map[int64]int64{2: 101000, 4: 100000}, Incomplete: map[Window]bool{{Closes: 4500}: true}, MarketsSettled: 7, Trials: 18})
 	if doc.WindowsRecorded != 4 || doc.Coverage != (Coverage{MarketsSettled: 7, MarketsAggregated: 7, WindowsIncomplete: 1, Complete: true}) {
 		t.Errorf("coverage: %d %+v", doc.WindowsRecorded, doc.Coverage)
 	}
@@ -629,7 +629,7 @@ func TestFillsByStrategy(t *testing.T) {
 		{Market: Market{ID: 2, Closes: 1800}, Sales: []PricedSale{{BucketID: 2, Qty: 52, Beyond: 0, PnLCents: 400, CappedCents: 400}, {BucketID: 3, Qty: 4, PnLCents: -10, CappedCents: -10}}},
 		{Market: Market{ID: 3, Closes: 2700}, Sales: []PricedSale{{BucketID: 2, Qty: 1000, Beyond: 1000, PnLCents: 5, CappedCents: -5}}}, // incomplete window
 	}
-	doc := Build(Inputs{Facts: facts, Buckets: buckets, UnsettledSells: map[int64]int{2: 3, 99: 1}, Incomplete: map[int64]bool{2700: true}})
+	doc := Build(Inputs{Facts: facts, Buckets: buckets, UnsettledSells: map[int64]int{2: 3, 99: 1}, Incomplete: map[Window]bool{{Closes: 2700}: true}})
 	rows := doc.Fills.ByStrategy
 	want := FillRow{Strategy: "Scalper", Engine: "v2", World: "real", Sells: 6, SellsPriced: 2, ContractsSold: 400, ContractsBeyondBid: 340, ShareBeyond: 0.85,
 		SalePnLCents: 10000, SalePnLCappedCents: -6609, UnsettledSells: 3, SellsWithoutDepth: 1}

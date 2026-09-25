@@ -215,10 +215,11 @@ func (c *analysisCache) compute(ctx context.Context, db *store.Store) (analysis.
 	// The unsettled windows are listed BEFORE the settled markets. Each statement sees its own
 	// moment, so a result landing between the two leaves its window marked unsettled for one more
 	// minute. The other order would score that window with a coin missing.
-	incomplete, err := db.AnalysisOpenWindows(ctx, now)
+	open, err := db.AnalysisOpenWindows(ctx, now)
 	if err != nil {
 		return none, err
 	}
+	incomplete := analysis.WindowsFrom(open)
 	if err := c.listSettled(ctx, db, now); err != nil {
 		return none, err
 	}
@@ -233,11 +234,13 @@ func (c *analysisCache) compute(ctx context.Context, db *store.Store) (analysis.
 
 	// Read the windows not yet read, whole windows at a time, newest first; the windows tried
 	// before and held back come after those, so that a round whose settlement is never written
-	// cannot use up the budget every minute and starve the refill behind it.
-	pending := map[int64][]analysis.Market{}
+	// cannot use up the budget every minute and starve the refill behind it. A window is a family
+	// and a close: the ladder legs closing at 5 pm ET are read apart from the round that closes then.
+	pending := map[analysis.Window][]analysis.Market{}
 	for id, m := range c.markets {
 		if _, done := c.facts[id]; !done {
-			pending[m.Closes] = append(pending[m.Closes], m)
+			w := analysis.WindowOf(m)
+			pending[w] = append(pending[w], m)
 		}
 	}
 	windows := readOrder(pending, c.unreconciled)
@@ -246,13 +249,17 @@ func (c *analysisCache) compute(ctx context.Context, db *store.Store) (analysis.
 		if err != nil {
 			return none, err
 		}
-		all := versionIDs(buckets)
+		rounds := versionIDs(buckets, store.FamilyRounds)
 		read := 0
 		for _, w := range windows {
 			if read >= analysisMarketsPerRefresh {
 				break
 			}
-			data, err := db.AnalysisWindowData(ctx, versions, all, analysis.StoreMarkets(pending[w]))
+			model, counted := versions, rounds
+			if analysis.Ladder(w.Family) { // the store reads neither for a ladder window: see AnalysisWindowData
+				model, counted = nil, nil
+			}
+			data, err := db.AnalysisWindowData(ctx, model, counted, analysis.StoreMarkets(pending[w]))
 			if err != nil {
 				return none, err
 			}
@@ -350,11 +357,14 @@ func newDecisions(snaps []analysis.Snapshot, stored map[int64]int64) []analysis.
 	return out
 }
 
-// versionIDs is the distinct strategy versions of some buckets, in order.
-func versionIDs(buckets []analysis.Bucket) []int64 {
+// versionIDs is the distinct strategy versions of the buckets of one family, in order.
+func versionIDs(buckets []analysis.Bucket, family string) []int64 {
 	seen := map[int64]bool{}
 	var out []int64
 	for _, b := range buckets {
+		if analysis.WindowOf(analysis.Market{Family: b.Family}).Family != family {
+			continue
+		}
 		if !seen[b.VersionID] {
 			seen[b.VersionID] = true
 			out = append(out, b.VersionID)
@@ -364,11 +374,12 @@ func versionIDs(buckets []analysis.Bucket) []int64 {
 	return out
 }
 
-// readOrder is the order the pending windows (by closes) are read in: the ones never tried, newest
-// first, then the ones with a market that was tried before and held back, newest first.
-func readOrder(pending map[int64][]analysis.Market, heldBack map[int64]string) []int64 {
-	again := map[int64]bool{}
-	windows := make([]int64, 0, len(pending))
+// readOrder is the order the pending windows are read in: the ones never tried, newest first,
+// then the ones with a market that was tried before and held back, newest first. Of two windows
+// closing at the same instant, the rounds' is read first.
+func readOrder(pending map[analysis.Window][]analysis.Market, heldBack map[int64]string) []analysis.Window {
+	again := map[analysis.Window]bool{}
+	windows := make([]analysis.Window, 0, len(pending))
 	for w, markets := range pending {
 		windows = append(windows, w)
 		for _, m := range markets {
@@ -378,10 +389,14 @@ func readOrder(pending map[int64][]analysis.Market, heldBack map[int64]string) [
 		}
 	}
 	sort.Slice(windows, func(i, j int) bool {
-		if again[windows[i]] != again[windows[j]] {
-			return again[windows[j]]
+		a, b := windows[i], windows[j]
+		if again[a] != again[b] {
+			return again[b]
 		}
-		return windows[i] > windows[j]
+		if a.Closes != b.Closes {
+			return a.Closes > b.Closes
+		}
+		return !analysis.Ladder(a.Family) && analysis.Ladder(b.Family)
 	})
 	return windows
 }
