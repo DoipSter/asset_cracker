@@ -3,6 +3,7 @@ package kalshi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -152,5 +153,29 @@ func TestTheLadderWatchFollowsTheRecord(t *testing.T) {
 	}
 	if r.waiting["TRADED-OLD"] == nil || r.waiting["UNTRADED-OLD"] != nil || r.waiting["UNTRADED-RECENT"] == nil || !r.merged.Equal(now) {
 		t.Fatalf("waiting %v, merged %v", r.waiting, r.merged)
+	}
+}
+
+// A leg a bucket traded is asked about before untraded ones, however new: at a 5 pm close hundreds
+// of legs are due at once and one pass asks about twenty, oldest first, so a traded leg could wait
+// behind all of them while its bets stayed open and no value snapshot was written.
+func TestTradedLegsAreAskedFirst(t *testing.T) {
+	close := time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC)
+	waiting := map[string]*awaiting{}
+	for i := 0; i < 300; i++ {
+		waiting[fmt.Sprintf("LEG-%03d", i)] = &awaiting{id: int64(i), closes: close.Add(-time.Duration(300-i) * time.Minute)} // LEG-299 is the newest
+	}
+	fake := &ladderFake{traded: map[int64]bool{299: true, 150: true}}
+	r := &LadderRecorder{Series: "KXBTCD", Sink: fake, waiting: waiting}
+	now := close.Add(time.Minute)
+	got := dueResults(waiting, now, ladderResultAsks, r.tradedDue(context.Background(), now))
+	if len(got) != ladderResultAsks || got[0] != "LEG-150" || got[1] != "LEG-299" || got[2] != "LEG-000" || fake.asked != 1 {
+		t.Fatalf("asked first: %v (Traded asked %d times)", got[:3], fake.asked)
+	}
+	// Twenty due or fewer: every one is asked this pass, and the record is not asked which were traded.
+	few := map[string]*awaiting{"A": {id: 1, closes: close}, "B": {id: 2, closes: close}}
+	r.waiting = few
+	if tr := r.tradedDue(context.Background(), now); tr != nil || fake.asked != 1 {
+		t.Fatalf("asked with only %d due: %v", len(few), tr)
 	}
 }

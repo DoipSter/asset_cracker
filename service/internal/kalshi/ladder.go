@@ -163,8 +163,12 @@ type LadderSink interface {
 	SaveRows(ctx context.Context, rows []LadderRow) ([]int64, error)
 	// SaveResult stores a result if none is stored yet (first writer wins).
 	SaveResult(ctx context.Context, marketID int64, m MarketInfo) (bool, error)
-	// Unsettled lists this series' markets that closed in [since, before) with no result.
+	// Unsettled lists this series' markets that closed in [since, before) with no result, and
+	// every traded one however old (store.UnsettledBetween).
 	Unsettled(ctx context.Context, since, before time.Time) (map[string]Pending, error)
+	// Traded says which of these markets a bucket has an order on: their results are asked for
+	// first, because until one is stored its bets stay open and no value snapshot is written.
+	Traded(ctx context.Context, marketIDs []int64) (map[int64]bool, error)
 }
 
 // Pacer spaces requests at least gap apart. One is shared by every series' recorder, so that
@@ -404,7 +408,7 @@ func resultGap(age time.Duration) time.Duration {
 }
 
 // dueResults lists the closed markets to ask about now, oldest close first, at most n.
-func dueResults(waiting map[string]*awaiting, now time.Time, n int) []string {
+func dueResults(waiting map[string]*awaiting, now time.Time, n int, traded map[int64]bool) []string {
 	var due []string
 	for t, w := range waiting {
 		if !now.Before(w.closes.Add(time.Second)) && !now.Before(w.nextTry) {
@@ -413,6 +417,9 @@ func dueResults(waiting map[string]*awaiting, now time.Time, n int) []string {
 	}
 	sort.Slice(due, func(a, b int) bool {
 		wa, wb := waiting[due[a]], waiting[due[b]]
+		if ta, tb := traded[wa.id], traded[wb.id]; ta != tb {
+			return ta // a leg a bucket traded comes before any other
+		}
 		if !wa.closes.Equal(wb.closes) {
 			return wa.closes.Before(wb.closes)
 		}
@@ -422,6 +429,28 @@ func dueResults(waiting map[string]*awaiting, now time.Time, n int) []string {
 		due = due[:n]
 	}
 	return due
+}
+
+// tradedDue is which due legs a bucket traded, asked only when more are due than one pass asks
+// about: at most ladderResultAsks, oldest first, used to leave a traded leg behind hundreds of
+// untraded ones closing at the same 5 pm. nil when the question is not needed or not answered.
+func (r *LadderRecorder) tradedDue(ctx context.Context, now time.Time) map[int64]bool {
+	due := dueResults(r.waiting, now, len(r.waiting), nil)
+	if len(due) <= ladderResultAsks {
+		return nil
+	}
+	ids := make([]int64, len(due))
+	for i, t := range due {
+		ids[i] = r.waiting[t].id
+	}
+	wctx, cancel := context.WithTimeout(ctx, ladderWriteTimeout)
+	defer cancel()
+	traded, err := r.Sink.Traded(wctx, ids)
+	if err != nil {
+		slog.Warn("ladder recorder: which legs were traded not read; results are asked for oldest first", "series", r.Series, "err", err)
+		return nil
+	}
+	return traded
 }
 
 type ladderKnown struct {
@@ -689,7 +718,7 @@ func (r *LadderRecorder) settle(ctx context.Context, now time.Time) {
 			delete(r.open, t)
 		}
 	}
-	for _, t := range dueResults(r.waiting, now, ladderResultAsks) {
+	for _, t := range dueResults(r.waiting, now, ladderResultAsks, r.tradedDue(ctx, now)) {
 		w := r.waiting[t]
 		if err := r.Pace.Wait(ctx); err != nil {
 			return

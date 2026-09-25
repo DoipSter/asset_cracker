@@ -203,7 +203,7 @@ func TestDueResultsOldestFirstAndCapped(t *testing.T) {
 		"NEW": {closes: c}, "OLD": {closes: c.Add(-time.Hour)}, "LATER": {closes: c.Add(-time.Hour), nextTry: c.Add(time.Minute)},
 		"OPEN": {closes: c.Add(time.Minute)}, "OLDB": {closes: c.Add(-time.Hour)},
 	}
-	if got := dueResults(w, c.Add(2*time.Second), 2); strings.Join(got, ",") != "OLD,OLDB" {
+	if got := dueResults(w, c.Add(2*time.Second), 2, nil); strings.Join(got, ",") != "OLD,OLDB" {
 		t.Errorf("due = %v", got)
 	}
 	if resultGap(time.Minute) != 0 || resultGap(time.Hour) != 10*time.Minute || resultGap(24*time.Hour) != time.Hour {
@@ -216,6 +216,19 @@ type ladderFake struct {
 	rows    [][]LadderRow
 	results map[int64]string
 	next    int64
+	traded  map[int64]bool // the markets a bucket has an order on
+	asked   int            // Traded calls
+}
+
+func (f *ladderFake) Traded(_ context.Context, ids []int64) (map[int64]bool, error) {
+	f.asked++
+	out := map[int64]bool{}
+	for _, id := range ids {
+		if f.traded[id] {
+			out[id] = true
+		}
+	}
+	return out, nil
 }
 
 func (f *ladderFake) SaveMarkets(_ context.Context, ms []LadderNew) (map[string]int64, error) {

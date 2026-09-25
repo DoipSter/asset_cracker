@@ -91,6 +91,10 @@ func (s *ladderSink) SaveResult(ctx context.Context, marketID int64, m kalshi.Ma
 	return s.db.RecordResult(ctx, marketID, m.Result, m.ExpirationValue, settled)
 }
 
+func (s *ladderSink) Traded(ctx context.Context, marketIDs []int64) (map[int64]bool, error) {
+	return s.db.TradedMarkets(ctx, marketIDs)
+}
+
 func (s *ladderSink) Unsettled(ctx context.Context, since, before time.Time) (map[string]kalshi.Pending, error) {
 	found, err := s.db.UnsettledBetween(ctx, s.instrumentID, since, before)
 	out := map[string]kalshi.Pending{}

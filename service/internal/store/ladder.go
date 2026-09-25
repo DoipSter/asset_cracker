@@ -159,6 +159,28 @@ func (s *Store) DailyCloses(ctx context.Context, symbol string, n int) ([]float6
 	return out, rows.Err()
 }
 
+// TradedMarkets is which of these markets a bucket has an order on. trade_order.market_id is
+// indexed (0011).
+func (s *Store) TradedMarkets(ctx context.Context, marketIDs []int64) (map[int64]bool, error) {
+	out := map[int64]bool{}
+	if len(marketIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `select distinct market_id from trade_order where market_id = any($1)`, marketIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
 // UnsettledBetween lists an instrument's markets that closed before `before` with no result yet,
 // by ticker: those that closed at or after `since`, and every one a bucket traded however long ago
 // it closed, since until its result is stored the bets on it stay open (UnsettledMarkets' rule
