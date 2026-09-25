@@ -103,6 +103,64 @@ func TestMarkIsReadAtLoad(t *testing.T) {
 	}
 }
 
+// A skim that committed but whose answer was lost suspends v3: money was in it and memory may be
+// behind the ledger. The rebuild reads the mark from the ledger along with the cash. It used to
+// keep the mark from before the skim, so the next win was charged again on the part of the first
+// gain the bucket had kept.
+func TestALostSkimAnswerIsNotSkimmedTwice(t *testing.T) {
+	g := newRig(t)
+	r := g.start(true)
+	g.buy100()
+	g.s.setPolicy(2000, 0, 0, 0) // 20% to winnings
+	g.s.on["RecordSkim"] = func(n int) behaviour {
+		if n == 1 {
+			return behaviour{err: context.DeadlineExceeded, land: true} // it committed as the client gave up
+		}
+		return behaviour{}
+	}
+	g.advance(10*time.Minute + time.Second)
+	g.s.setResult(mktA, "yes") // as the poller does: the result is stored before the runner settles
+	g.settle(mktA, "yes")
+	if len(g.s.skims) != 1 {
+		t.Fatalf("%d skims recorded, want the one that landed", len(g.s.skims))
+	}
+	g.wantState(stateSuspended)
+	first := g.s.skims[0]
+	mark := first.BookCents - first.Taken()
+
+	g.advance(healDelay3)
+	r.Tick(context.Background())
+	g.wantState(stateRunning)
+	g.equalsLedger(r)
+	id := g.bucketID()
+	r.mu.Lock()
+	got := r.hwm[id]
+	r.mu.Unlock()
+	if got != mark {
+		t.Fatalf("mark after the rebuild %d, want the ledger's %d: the skim that landed", got, mark)
+	}
+
+	// The next win is skimmed on its own gain, above the mark the first skim left.
+	g.s.addMarket(503, "KXBTC15M-B", "BTC", t0.Add(30*time.Minute), strike)
+	g.advance(6 * time.Minute)
+	before := g.contracts(r)
+	g.look(503, above, up("100"))
+	if g.contracts(r) == before {
+		t.Fatal("the rig's second bet did not fill")
+	}
+	g.advance(15 * time.Minute)
+	g.s.setResult(503, "yes")
+	g.settle(503, "yes")
+	if len(g.s.skims) != 2 {
+		t.Fatalf("%d skims after the second win, want 2", len(g.s.skims))
+	}
+	second := g.s.skims[1]
+	if second.HWMBefore != mark || second.Taken() != (second.BookCents-mark)*2000/10000 {
+		t.Fatalf("second skim %+v: want it above the mark %d, taking 20%% of %d", second, mark, second.BookCents-mark)
+	}
+	g.equalsLedger(r)
+}
+
 // A bucket whose last bet loses with less than the floor left is closed at that settlement:
 // reaped into replenishment, frozen, not replaced, and gone from the held set.
 func TestRunOutIsClosedAtSettlement(t *testing.T) {

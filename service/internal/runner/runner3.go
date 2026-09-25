@@ -349,14 +349,8 @@ func (o Options3) load(ctx context.Context, db Store3, on bool) (*loaded3, error
 			l.plumbing = l.plumbing || b.plumbing
 			l.feePerFill = l.feePerFill || b.params.FeePerFill // one Paper serves every bucket: the pessimistic reading wins
 		}
-		// The allocator's mark: the bucket's last recorded high, else what it was seeded with. The
-		// seed is the ledger's, because the operator may deploy a bucket at a figure of their own
-		// (DeployBucket); a bucket with no seed on record is marked at the convention.
-		seed := h.SeedCents
-		if seed <= 0 {
-			seed = seed3Cents
-		}
-		mark, err := db.HighWaterMark(ctx, h.ID, seed)
+		// The allocator's mark: the bucket's last recorded high, else what it was seeded with.
+		mark, err := db.HighWaterMark(ctx, h.ID, markSeed(h))
 		if err != nil {
 			return nil, fmt.Errorf("v3 high-water mark of bucket %d: %w", h.ID, err)
 		}
@@ -369,6 +363,16 @@ func (o Options3) load(ctx context.Context, db Store3, on bool) (*loaded3, error
 		l.driftTol = *plumbTol
 	}
 	return l, nil
+}
+
+// markSeed is the allocator's mark for a bucket with no skim on record. The seed is the ledger's,
+// because the operator may deploy a bucket at a figure of their own (DeployBucket); a bucket with
+// no seed on record is marked at the convention. The load and the rebuild read the mark with it.
+func markSeed(h store.HeldBucket) int64 {
+	if h.SeedCents > 0 {
+		return h.SeedCents
+	}
+	return seed3Cents
 }
 
 // applyLocked swaps a load in: the held set, what was decided about the versions, and an EMPTY
@@ -1742,6 +1746,7 @@ var errGenMoved = errors.New("v3's state moved while the rebuild was reading; th
 type fresh struct {
 	engine *k3.Engine
 	paper  *broker.Paper
+	hwm    map[int64]int64 // the allocator's marks, read as the load reads them
 	fills  int
 	note   string
 }
@@ -1794,7 +1799,7 @@ func (r *Runner3) rebuild(ctx context.Context) (err error) {
 		report.Reason = err.Error()
 	default:
 		report.OK, report.Fills, report.Note = true, got.fills, got.note
-		r.engine, r.paper = got.engine, got.paper
+		r.engine, r.paper, r.hwm = got.engine, got.paper, got.hwm
 		r.state, r.reason, r.failures, r.pendingIDs, r.probe = stateRunning, "", 0, nil, nil
 		r.gen++
 		slog.Info("v3 rebuilt from the database", "fills", got.fills, "took", report.Took.String(), "note", got.note)
@@ -1816,6 +1821,18 @@ func (r *Runner3) read(ctx context.Context, pending []string, ids []int64, bucke
 	fills, err := r.db.BucketFills(ctx, ids)
 	if err != nil {
 		return nil, fmt.Errorf("reading the fills: %w", err)
+	}
+	// And the allocator's marks, as the load reads them. A skim that committed but whose answer
+	// was lost suspends v3 with memory's mark from before it; keeping that mark charged the next
+	// win again on the part of the first gain the bucket kept. Read between the two cash reads, so
+	// a skim landing now moves the cash and sends this attempt round again.
+	out.hwm = make(map[int64]int64, len(buckets))
+	for _, b := range buckets {
+		mark, err := r.db.HighWaterMark(ctx, b.ID, markSeed(b.HeldBucket))
+		if err != nil {
+			return nil, fmt.Errorf("reading bucket %d's high-water mark: %w", b.ID, err)
+		}
+		out.hwm[b.ID] = mark
 	}
 	// The two reads are not one snapshot. If the cash moved between them (a late commit landing
 	// right now), the fills may or may not contain it: this attempt proves nothing. Try again.

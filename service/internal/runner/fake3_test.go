@@ -733,7 +733,8 @@ func (s *fakeStore) CurrentSkimPolicy(ctx context.Context) (store.SkimPolicy, er
 }
 
 func (s *fakeStore) RecordSkim(ctx context.Context, setup store.SimSetup, k store.Skim) error {
-	if b := s.hook(ctx, "RecordSkim"); b.err != nil {
+	b := s.hook(ctx, "RecordSkim")
+	if b.err != nil && !b.land {
 		return b.err
 	}
 	s.mu.Lock()
@@ -745,7 +746,7 @@ func (s *fakeStore) RecordSkim(ctx context.Context, setup store.SimSetup, k stor
 		return errors.New("the fake check constraint: gain_cents > 0")
 	}
 	s.skims = append(s.skims, k)
-	return nil
+	return b.err // with land set, the skim committed and the answer was lost
 }
 
 func (s *fakeStore) SaveEngineState(ctx context.Context, series string, state any) error {
