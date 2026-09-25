@@ -202,6 +202,11 @@ type Runner3 struct {
 	lastSweep  time.Time
 	rebuilt    rebuildReport
 	hwm        map[int64]int64 // bucket id -> the allocator's high-water mark, in cents
+	// rosters is roster memory no engine carries yet, by bucket: what the last start loaded, or
+	// what an engine held when applyLocked replaced it with an empty one. The next rebuild that
+	// swaps in gives it to the fresh accounts (rostersLocked), so neither a restart nor a rebuild
+	// sends a roster back to warmup.
+	rosters map[int64]k3.RosterMemory
 
 	// panicNote carries a recovered panic from an entry point that may not wait on mu to the next
 	// holder of mu, which suspends v3 with it. Book() shows it at once.
@@ -214,7 +219,7 @@ type Runner3 struct {
 
 	skippedStep    atomic.Int64
 	skippedSettled atomic.Int64
-	stateDirty     atomic.Bool // the learned offsets changed; Run saves them
+	stateDirty     atomic.Bool // the learned offsets or a roster's memory changed; Run saves them
 }
 
 // Family is the market family this runner holds buckets for: store.FamilyRounds or FamilyLadders.
@@ -377,13 +382,15 @@ func markSeed(h store.HeldBucket) int64 {
 
 // applyLocked swaps a load in: the held set, what was decided about the versions, and an EMPTY
 // engine and Paper for the rebuild to fill. Everything that named a bucket or a round is
-// cleared; the model and the chart markers are kept. Callers hold r.mu and have suspended v3.
+// cleared; the model, the chart markers and the rosters' memory are kept. Callers hold r.mu and
+// have suspended v3.
 func (r *Runner3) applyLocked(l *loaded3) {
 	r.setup = l.setup
 	r.buckets, r.ids = l.buckets, l.ids
 	r.refused, r.seeded = l.refused, l.seeded
 	r.plumbing, r.feePerFill = l.plumbing, l.feePerFill
 	r.hwm = l.hwm
+	r.rosters = r.rostersLocked() // the rebuild hands it on to the buckets still held
 	r.engine, _ = k3.NewEngine()
 	r.paper = r.newPaper()
 	r.pendingIDs, r.probe = nil, nil
@@ -429,11 +436,13 @@ func NewRunner3(ctx context.Context, db Store3, coins []Coin3, opts Options3) (*
 	}
 	var saved savedState3
 	if found, err := db.LoadEngineState(ctx, opts.prefix(), &saved); err != nil {
-		slog.Warn("v3 could not load its learned offsets; it starts from the constants", "err", err) // costs no money (plan 5.4, step 6)
+		// Costs no money (plan 5.4, step 6). A roster starts in warmup, as it did before its memory was saved.
+		slog.Warn("v3 could not load its learned offsets and roster memory; it starts from the constants and rosters warm up", "err", err)
 	} else if found {
 		for coin, offsets := range saved.Offsets {
 			r.model.SeedOffsets(coin, offsets)
 		}
+		r.rosters = saved.Rosters
 	}
 	r.applyLocked(l) // nothing else can see r yet: no lock needed
 
@@ -854,9 +863,27 @@ func (r *Runner3) heldLocked() ([]int64, []bucket3) {
 	return append([]int64{}, r.ids...), append([]bucket3{}, r.buckets...)
 }
 
+// rostersLocked is every roster's memory: what the engine holds, over what is still waiting for
+// a rebuild to take it. The engine's is newer wherever both have a bucket.
+func (r *Runner3) rostersLocked() map[int64]k3.RosterMemory {
+	out := map[int64]k3.RosterMemory{}
+	for id, m := range r.rosters {
+		out[id] = m
+	}
+	if r.engine != nil {
+		for id, m := range r.engine.Rosters() {
+			out[id] = m
+		}
+	}
+	return out
+}
+
 // savedState3 is all the third engine saves: what the ledger cannot know.
 type savedState3 struct {
 	Offsets map[string][][2]float64 `json:"offsets"` // per coin: {close, measured index offset}
+	// Rosters is each roster bucket's memory: its members' shadows and the tickers it handed out.
+	// Without it every start put the roster back in warmup for Lookback clocks.
+	Rosters map[int64]k3.RosterMemory `json:"rosters,omitempty"`
 }
 
 // Seed primes each coin's volatility and index offset from the exchanges, as the second engine's
@@ -1319,6 +1346,7 @@ func (r *Runner3) settleLocked(ctx context.Context, marketID int64, ticker, resu
 	rows := r.engine.SettleRows(ticker, result)
 	if len(rows) == 0 {
 		if result == "yes" || result == "no" {
+			r.engine.SettleShadows(ticker, result) // a roster's members are scored on markets no bucket held
 			r.forgetLocked(ticker)
 		}
 		return
@@ -1482,13 +1510,16 @@ func (r *Runner3) forgetLocked(ticker string) {
 // ---- v3's own goroutine: heal, probe, sweep, cash check, prune --------------------------------
 
 // Run is v3's goroutine. It is started whenever v3 holds a bucket or is on, also with AC_V3 off.
-// It and Heal are the only callers, besides Book and Snapshot, that may WAIT on r.mu.
+// It and Heal are the only callers, besides Book and Snapshot, that may WAIT on r.mu. When it
+// stops it saves what changed since the last save: the service closes the database only after
+// Run has returned.
 func (r *Runner3) Run(ctx context.Context) {
 	t := time.NewTicker(tick3)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			r.saveOnStop(ctx)
 			return
 		case <-t.C:
 			r.Tick(ctx)
@@ -1522,6 +1553,12 @@ func (r *Runner3) Tick(ctx context.Context) {
 	minute := healed || r.now().Sub(r.lastSweep) >= sweepEvery3
 	if minute {
 		r.lastSweep = r.now()
+		// A roster's memory is saved once a minute at most, and when Run stops. A minute lost to a
+		// crash is mostly learned again: the sweep scores what was pending, and a member still
+		// eligible is observed again at the next look.
+		if r.engine.RostersChanged() {
+			r.stateDirty.Store(true)
+		}
 	}
 	r.mu.Unlock()
 	if minute {
@@ -1585,7 +1622,8 @@ func (r *Runner3) writeProbe(ctx context.Context) {
 // sweep settles, from market.result, every open position whose close has passed, in EVERY held
 // bucket. The poller tells an engine about a result exactly once; v3 does not depend on that
 // call. Never while suspended. It needs no book, no model and no version status, so it runs with
-// AC_V3 off and for a bucket whose version was benched or retired with a bet open.
+// AC_V3 off and for a bucket whose version was benched or retired with a bet open. A market a
+// roster's shadow waits on is read the same way, held or not (Engine.ShadowsDue).
 func (r *Runner3) sweep(ctx context.Context) {
 	due := func() map[int64]string { // market id -> ticker
 		r.mu.Lock()
@@ -1595,8 +1633,8 @@ func (r *Runner3) sweep(ctx context.Context) {
 		if r.state == stateSuspended {
 			return nil
 		}
-		out := map[int64]string{}
 		at := k3.UnixSeconds(r.now())
+		out := r.engine.ShadowsDue(at)
 		for _, a := range r.engine.Accounts {
 			for _, p := range a.Open() {
 				if p.Close <= at {
@@ -1705,7 +1743,9 @@ func (r *Runner3) prune() {
 	defer r.mu.Unlock()
 	defer r.fenceLocked("prune")
 	now := k3.UnixSeconds(r.now())
-	r.engine.Prune(now)
+	if n := r.engine.Prune(now); n > 0 {
+		slog.Warn("v3 dropped roster shadows whose market has no result days after its close; they score nothing", "shadows", n)
+	}
 	for key, at := range r.lastAt {
 		if now-at > 3600 {
 			delete(r.lastAt, key)
@@ -1725,16 +1765,31 @@ func (r *Runner3) prune() {
 	}
 }
 
+// saveOnStop is Run's last write, only if something changed: a load that failed at the start left
+// the constants and no roster memory in r, and those must not replace what was saved.
+func (r *Runner3) saveOnStop(ctx context.Context) {
+	defer func() { r.caught("Run", recover()) }()
+	r.mu.Lock()
+	changed := r.engine.RostersChanged()
+	r.mu.Unlock()
+	if r.stateDirty.Swap(false) || changed {
+		r.saveState(ctx)
+	}
+}
+
 func (r *Runner3) saveState(ctx context.Context) {
 	state := savedState3{Offsets: map[string][][2]float64{}}
 	for coin := range r.coins {
 		state.Offsets[coin] = r.model.Offsets(coin)
 	}
+	r.mu.Lock()
+	state.Rosters = r.rostersLocked()
+	r.mu.Unlock()
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeBudget3)
 	defer cancel()
 	if err := r.db.SaveEngineState(wctx, r.opts.prefix(), state); err != nil {
-		r.stateDirty.Store(true)                                                                 // try again next tick
-		slog.Warn("v3 could not save its learned offsets; no money depends on them", "err", err) // plan 5.4, step 6
+		r.stateDirty.Store(true)                                                                                   // try again next tick
+		slog.Warn("v3 could not save its learned offsets and roster memory; no money depends on them", "err", err) // plan 5.4, step 6
 	}
 }
 
@@ -1799,7 +1854,9 @@ func (r *Runner3) rebuild(ctx context.Context) (err error) {
 		report.Reason = err.Error()
 	default:
 		report.OK, report.Fills, report.Note = true, got.fills, got.note
+		got.engine.RestoreRosters(r.rostersLocked()) // the memory the fresh accounts cannot read from the ledger
 		r.engine, r.paper, r.hwm = got.engine, got.paper, got.hwm
+		r.rosters = nil
 		r.state, r.reason, r.failures, r.pendingIDs, r.probe = stateRunning, "", 0, nil, nil
 		r.gen++
 		slog.Info("v3 rebuilt from the database", "fills", got.fills, "took", report.Took.String(), "note", got.note)
@@ -2009,6 +2066,8 @@ func (r *Runner3) ReleaseAfterReset() {
 	r.buckets = nil
 	r.ids = nil
 	r.engine, _ = k3.NewEngine()
+	r.rosters = nil
+	r.stateDirty.Store(true) // the saved roster memory names deleted buckets: save none
 	r.paper = r.newPaper()
 	r.pendingIDs = nil
 	r.probe = nil

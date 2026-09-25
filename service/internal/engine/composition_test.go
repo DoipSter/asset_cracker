@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -26,8 +28,8 @@ func fillClocks(c *Composition, n int, aPnL, bPnL int64) {
 	for i := 0; i < n; i++ {
 		close := float64(1000 + i*900)
 		c.settled = append(c.settled,
-			shadowSettled{Member: c.Members[0].Name, Close: close, Cost: 70, PnL: aPnL},
-			shadowSettled{Member: c.Members[1].Name, Close: close, Cost: 70, PnL: bPnL},
+			ShadowSettled{Member: c.Members[0].Name, Close: close, Cost: 70, PnL: aPnL},
+			ShadowSettled{Member: c.Members[1].Name, Close: close, Cost: 70, PnL: bPnL},
 		)
 	}
 }
@@ -48,7 +50,7 @@ func TestAssignSitOutWarmupWindowReserveAndNoLookAhead(t *testing.T) {
 
 	fillClocks(c, 16, -70, 30) // B has been winning
 	// A future clock that would flip A into the lead must not be visible.
-	c.settled = append(c.settled, shadowSettled{Member: c.Members[0].Name, Close: now + 5000, Cost: 70, PnL: 30})
+	c.settled = append(c.settled, ShadowSettled{Member: c.Members[0].Name, Close: now + 5000, Cost: 70, PnL: 30})
 
 	owner, how := c.WindowOwner(window, now)
 	if owner != 1 || how != PickWindow {
@@ -199,8 +201,8 @@ func TestFromShapeRoster(t *testing.T) {
 
 func TestShadowSettleIsCausal(t *testing.T) {
 	c := &Composition{Lookback: 2, Members: []Params{{Name: "A"}, {Name: "B"}}}
-	c.Observe("A", "T1", "yes", 100, 70)
-	c.Observe("B", "T1", "yes", 100, 70)
+	c.Observe("A", Market{Ticker: "T1", Close: 100}, "yes", 70)
+	c.Observe("B", Market{Ticker: "T1", Close: 100}, "yes", 70)
 	if _, n := c.windowScore("A", 200, 99); n != 0 {
 		t.Fatal("pending is not a score")
 	}
@@ -213,5 +215,132 @@ func TestShadowSettleIsCausal(t *testing.T) {
 	}
 	if _, n := c.windowScore("A", 100, 100); n != 0 {
 		t.Fatal("this clock's own close must not elect it")
+	}
+}
+
+// The memory survives being saved and read back: the same owner, the same claim on a ticker
+// handed out before, and nothing that names a member the roster does not have.
+func TestRosterMemoryRoundTrip(t *testing.T) {
+	c := rosterAB(t, AssignBoth, 4, false)
+	fillClocks(c, 6, -70, 30)
+	c.Observe(c.Members[0].Name, Market{Ticker: "T-open", MarketID: 9, Close: 7000}, "yes", 60)
+	idx, how := c.Pick("T-open", 7000, 6500, 500, []int{0, 1})
+	if idx < 0 {
+		t.Fatalf("nobody claimed: %s", how)
+	}
+	mem := c.Memory()
+	blob, err := json.Marshal(mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back RosterMemory
+	if err := json.Unmarshal(blob, &back); err != nil {
+		t.Fatal(err)
+	}
+	back.Settled = append(back.Settled, ShadowSettled{Member: "Z", Close: 1000, Cost: 70, PnL: 30})
+	back.Pending = append(back.Pending, ShadowPending{Member: "Z", Ticker: "T-z", Close: 7000, Cost: 50})
+	back.Reserved["T-z"] = RosterClaim{Member: "Z", How: PickWindow, Close: 7000}
+
+	d := rosterAB(t, AssignBoth, 4, false)
+	d.Restore(back)
+	if !reflect.DeepEqual(d.Memory(), mem) {
+		t.Fatalf("restored\n %+v\nsaved\n %+v", d.Memory(), mem)
+	}
+	if !d.TakeDirty() || d.TakeDirty() {
+		t.Fatal("a restore is a change to save, once")
+	}
+	o1, h1 := c.WindowOwner(7900, 7000)
+	o2, h2 := d.WindowOwner(7900, 7000)
+	if o1 != o2 || h1 != h2 || h2 != PickWindow {
+		t.Fatalf("owner %d %s before, %d %s after", o1, h1, o2, h2)
+	}
+	if i, h := d.Pick("T-open", 7000, 6600, 400, []int{0, 1}); i != idx || h != how {
+		t.Fatalf("the claim moved: %d %s, was %d %s", i, h, idx, how)
+	}
+}
+
+// Prune keeps every clock a pick can still read, so no owner changes; it drops reservations on
+// closed tickers and, after shadowGiveUp, shadows whose result never came, and counts those.
+func TestPruneKeepsWhatAPickReads(t *testing.T) {
+	c := rosterAB(t, AssignBoth, 4, false)
+	nameA, nameB := c.Members[0].Name, c.Members[1].Name
+	for i := 0; i < 10; i++ { // B leads early, A the last five clocks
+		close := float64(1000 + i*900)
+		a, b := int64(-70), int64(30)
+		if i >= 5 {
+			a, b = 30, -70
+		}
+		c.settled = append(c.settled, ShadowSettled{Member: nameA, Close: close, Cost: 70, PnL: a})
+		if i%2 == 0 { // B sits out every other clock: its own latest four reach further back
+			c.settled = append(c.settled, ShadowSettled{Member: nameB, Close: close, Cost: 70, PnL: b})
+		}
+	}
+	now := 1000 + 9*900 + 60.0
+	c.reserved["T-closed"] = reservation{idx: 1, how: PickReserve, close: now - 60}
+	c.reserved["T-open"] = reservation{idx: 0, how: PickWindow, close: now + 840}
+	c.pending = append(c.pending,
+		ShadowPending{Member: nameA, Ticker: "T-waiting", Close: now - 60, Cost: 50},
+		ShadowPending{Member: nameB, Ticker: "T-lost", Close: now - shadowGiveUp - 1, Cost: 50})
+	type seen struct {
+		idx int
+		how string
+	}
+	owners := func() (out []seen) {
+		for _, w := range []float64{now + 840, now + 1740} {
+			for _, at := range []float64{now, now + 900} {
+				i, h := c.WindowOwner(w, at)
+				out = append(out, seen{i, h})
+			}
+		}
+		return out
+	}
+	before := owners()
+	if before[0] != (seen{0, PickWindow}) {
+		t.Fatalf("A leads the last four clocks and owns the next: %v", before[0])
+	}
+	c.TakeDirty()
+	if n := c.Prune(now); n != 1 {
+		t.Fatalf("dropped %d unscored, want the one past shadowGiveUp", n)
+	}
+	if after := owners(); !reflect.DeepEqual(before, after) {
+		t.Fatalf("owners %v before, %v after", before, after)
+	}
+	if _, ok := c.reserved["T-closed"]; ok {
+		t.Fatal("a closed ticker's reservation was kept")
+	}
+	if _, ok := c.reserved["T-open"]; !ok {
+		t.Fatal("an open ticker's reservation was dropped")
+	}
+	if len(c.pending) != 1 || c.pending[0].Ticker != "T-waiting" {
+		t.Fatalf("pending %+v", c.pending)
+	}
+	per := map[string]int{}
+	for _, s := range c.settled {
+		per[s.Member]++
+	}
+	if per[nameA] != 4 || per[nameB] != 4 {
+		t.Fatalf("kept per member %v, want each member's latest four", per)
+	}
+	if !c.TakeDirty() {
+		t.Fatal("a prune that dropped something is a change to save")
+	}
+	if c.Prune(now); c.TakeDirty() {
+		t.Fatal("a prune that dropped nothing is not a change")
+	}
+}
+
+// Only yes or no scores a shadow; anything else leaves it waiting.
+func TestShadowWaitsOnAResultThatIsNotYesOrNo(t *testing.T) {
+	c := &Composition{Lookback: 2, Members: []Params{{Name: "A"}, {Name: "B"}}}
+	c.Observe("A", Market{Ticker: "T1", Close: 100}, "yes", 70)
+	for _, result := range []string{"scalar", ""} {
+		c.Settle("T1", result)
+		if len(c.pending) != 1 || len(c.settled) != 0 {
+			t.Fatalf("%q scored the shadow", result)
+		}
+	}
+	c.Settle("T1", "no")
+	if len(c.pending) != 0 || len(c.settled) != 1 || c.settled[0].PnL != -70 {
+		t.Fatalf("pending %+v settled %+v", c.pending, c.settled)
 	}
 }

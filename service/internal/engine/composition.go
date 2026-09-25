@@ -50,30 +50,58 @@ type Composition struct {
 	StructuralOnly bool
 	Assign         string // both | window | reserve
 
-	pending  []shadowPending
-	settled  []shadowSettled
+	// The memory: every member's shadows and the tickers handed out. It outlives the engine it
+	// was learned in (Memory and Restore): the runner saves it across a restart and hands it to
+	// the engine a rebuild makes, so neither sends the roster back to warmup.
+	pending  []ShadowPending
+	settled  []ShadowSettled
 	reserved map[string]reservation
+	dirty    bool // the memory changed since the last TakeDirty
 }
 
 type reservation struct {
-	idx int
-	how string
+	idx   int
+	how   string
+	close float64 // the ticker's close: past it nobody claims, and Prune drops the reservation
 }
 
-type shadowPending struct {
-	Member string
-	Ticker string
-	Side   string
-	Close  float64
-	Cost   int64 // cents for one contract
+// ShadowPending is a member's would-be unit entry on one market, waiting for its result.
+type ShadowPending struct {
+	Member   string  `json:"member"`
+	Ticker   string  `json:"ticker"`
+	MarketID int64   `json:"market_id"` // the sweep reads the result by it
+	Side     string  `json:"side"`
+	Close    float64 `json:"close"`
+	Cost     int64   `json:"cost"` // cents for one contract
 }
 
-type shadowSettled struct {
-	Member string
-	Close  float64
-	Cost   int64
-	PnL    int64
+// ShadowSettled is a scored shadow: what a member's unit entry on one clock cost and made.
+type ShadowSettled struct {
+	Member string  `json:"member"`
+	Close  float64 `json:"close"`
+	Cost   int64   `json:"cost"`
+	PnL    int64   `json:"pnl"`
 }
+
+// RosterClaim is a reservation as it is saved: the member by name.
+type RosterClaim struct {
+	Member string  `json:"member"`
+	How    string  `json:"how"`
+	Close  float64 `json:"close"`
+}
+
+// RosterMemory is a composition's memory in the form it is saved and handed on. Members are by
+// name, so memory restored into a roster keeps only what names one of its members.
+type RosterMemory struct {
+	Pending  []ShadowPending        `json:"pending,omitempty"`
+	Settled  []ShadowSettled        `json:"settled,omitempty"`
+	Reserved map[string]RosterClaim `json:"reserved,omitempty"` // by ticker
+}
+
+// shadowGiveUp is how long after its close a shadow may wait for its result before Prune drops
+// it unscored. [CONVENTION] The rounds' results come within minutes; one the poller never gets
+// (it lets an untraded round go an hour after its close) would otherwise wait for ever.
+const shadowGiveUp = 72 * 3600.0
 
 // newComposition is the live picker for a version that carries members. Nil when it does not.
 func newComposition(p Params) *Composition {
@@ -151,7 +179,7 @@ func (c *Composition) Pick(ticker string, windowClose, now, tau float64, eligibl
 	}
 	owner, ownerHow := c.WindowOwner(windowClose, now)
 	if owner >= 0 && containsIdx(eligible, owner) {
-		c.reserve(ticker, owner, ownerHow)
+		c.reserve(ticker, owner, ownerHow, windowClose)
 		return owner, ownerHow
 	}
 	if c.Assign == AssignWindow {
@@ -166,7 +194,7 @@ func (c *Composition) Pick(ticker string, windowClose, now, tau float64, eligibl
 		if idx < 0 {
 			return -1, PickSitOut
 		}
-		c.reserve(ticker, idx, PickReserve)
+		c.reserve(ticker, idx, PickReserve, windowClose)
 		return idx, PickReserve
 	}
 	// both: leftovers to a later specialist than the owner.
@@ -180,18 +208,19 @@ func (c *Composition) Pick(ticker string, windowClose, now, tau float64, eligibl
 	if idx < 0 {
 		return -1, PickSitOut
 	}
-	c.reserve(ticker, idx, PickReserve)
+	c.reserve(ticker, idx, PickReserve, windowClose)
 	return idx, PickReserve
 }
 
-func (c *Composition) reserve(ticker string, idx int, how string) {
+func (c *Composition) reserve(ticker string, idx int, how string, closeAt float64) {
 	if ticker == "" || idx < 0 {
 		return
 	}
 	if _, ok := c.reserved[ticker]; ok {
 		return
 	}
-	c.reserved[ticker] = reservation{idx: idx, how: how}
+	c.reserved[ticker] = reservation{idx: idx, how: how, close: closeAt}
+	c.dirty = true
 }
 
 func (c *Composition) laterThan(i, owner int) bool {
@@ -238,28 +267,30 @@ func containsIdx(idxs []int, want int) bool {
 	return false
 }
 
-// Observe notes a member's would-be unit entry on ticker, once. Pending until Settle.
-func (c *Composition) Observe(member, ticker, side string, closeAt float64, costCents int64) {
-	if member == "" || ticker == "" || costCents <= 0 {
+// Observe notes a member's would-be unit entry on market m, once. Pending until Settle.
+func (c *Composition) Observe(member string, m Market, side string, costCents int64) {
+	if member == "" || m.Ticker == "" || costCents <= 0 {
 		return
 	}
 	for _, p := range c.pending {
-		if p.Ticker == ticker && p.Member == member {
+		if p.Ticker == m.Ticker && p.Member == member {
 			return
 		}
 	}
 	for _, s := range c.settled {
-		if s.Member == member && s.Close == closeAt {
+		if s.Member == member && s.Close == m.Close {
 			return
 		}
 	}
-	c.pending = append(c.pending, shadowPending{Member: member, Ticker: ticker, Side: side, Close: closeAt, Cost: costCents})
+	c.pending = append(c.pending, ShadowPending{Member: member, Ticker: m.Ticker, MarketID: m.MarketID, Side: side, Close: m.Close, Cost: costCents})
+	c.dirty = true
 }
 
-// Settle scores every pending shadow on ticker against the market's result. Called from
-// ApplySettlement whether or not the composition itself held a position there.
+// Settle scores every pending shadow on ticker against the market's result, yes or no; any
+// other result scores nothing and the shadows wait on. Called from ApplySettlement whether or
+// not the composition itself held a position there, and from SettleShadows when no bucket did.
 func (c *Composition) Settle(ticker, result string) {
-	if c == nil {
+	if c == nil || (result != "yes" && result != "no") {
 		return
 	}
 	kept := c.pending[:0]
@@ -272,9 +303,125 @@ func (c *Composition) Settle(ticker, result string) {
 		if (result == "yes" && p.Side == "yes") || (result == "no" && p.Side == "no") {
 			payout = 100
 		}
-		c.settled = append(c.settled, shadowSettled{Member: p.Member, Close: p.Close, Cost: p.Cost, PnL: payout - p.Cost})
+		c.settled = append(c.settled, ShadowSettled{Member: p.Member, Close: p.Close, Cost: p.Cost, PnL: payout - p.Cost})
+		c.dirty = true
 	}
 	c.pending = kept
+}
+
+// Memory is a copy of what the composition remembers.
+func (c *Composition) Memory() RosterMemory {
+	m := RosterMemory{Pending: append([]ShadowPending(nil), c.pending...), Settled: append([]ShadowSettled(nil), c.settled...)}
+	for ticker, r := range c.reserved {
+		if r.idx < 0 || r.idx >= len(c.Members) {
+			continue
+		}
+		if m.Reserved == nil {
+			m.Reserved = map[string]RosterClaim{}
+		}
+		m.Reserved[ticker] = RosterClaim{Member: c.Members[r.idx].Name, How: r.how, Close: r.close}
+	}
+	return m
+}
+
+// Restore replaces what the composition remembers with m, keeping only what names one of its
+// members. It marks the memory changed, so the runner saves it once more.
+func (c *Composition) Restore(m RosterMemory) {
+	idx := make(map[string]int, len(c.Members))
+	for i, mp := range c.Members {
+		idx[mp.Name] = i
+	}
+	c.pending, c.settled = nil, nil
+	for _, p := range m.Pending {
+		if _, ok := idx[p.Member]; ok {
+			c.pending = append(c.pending, p)
+		}
+	}
+	for _, s := range m.Settled {
+		if _, ok := idx[s.Member]; ok {
+			c.settled = append(c.settled, s)
+		}
+	}
+	c.reserved = map[string]reservation{}
+	for ticker, r := range m.Reserved {
+		if i, ok := idx[r.Member]; ok {
+			c.reserved[ticker] = reservation{idx: i, how: r.How, close: r.Close}
+		}
+	}
+	c.dirty = true
+}
+
+// TakeDirty reports whether the memory changed since the last call.
+func (c *Composition) TakeDirty() bool {
+	d := c.dirty
+	c.dirty = false
+	return d
+}
+
+// Prune forgets what no later pick can read, and returns how many shadows it dropped unscored.
+// A reservation goes once its ticker has closed. A settled shadow goes once it is not among its
+// member's Lookback latest clocks closed by now: a member's score reads only those, and the
+// warmup count (distinct clocks across members) is still at least Lookback whenever it was.
+// None is kept when the owner is not adaptive, since nothing reads them. A pending shadow goes
+// shadowGiveUp after its close, unscored.
+func (c *Composition) Prune(now float64) (dropped int) {
+	for ticker, r := range c.reserved {
+		if r.close < now {
+			delete(c.reserved, ticker)
+			c.dirty = true
+		}
+	}
+	keptPending := c.pending[:0]
+	for _, p := range c.pending {
+		if p.Close+shadowGiveUp < now {
+			dropped++
+			continue
+		}
+		keptPending = append(keptPending, p)
+	}
+	c.pending = keptPending
+	keep := 0
+	if c.Assign != AssignReserve && !c.StructuralOnly && c.Lookback > 0 {
+		keep = c.Lookback
+	}
+	latest := map[string][]float64{} // per member, its distinct closes by now
+	for _, s := range c.settled {
+		if s.Close <= now && !containsClose(latest[s.Member], s.Close) {
+			latest[s.Member] = append(latest[s.Member], s.Close)
+		}
+	}
+	oldest := map[string]float64{} // per member, the oldest close it keeps
+	for member, closes := range latest {
+		if len(closes) > keep {
+			sort.Sort(sort.Reverse(sort.Float64Slice(closes)))
+			if keep > 0 {
+				oldest[member] = closes[keep-1]
+			} else {
+				oldest[member] = math.Inf(1)
+			}
+		}
+	}
+	keptSettled := c.settled[:0]
+	for _, s := range c.settled {
+		if cut, ok := oldest[s.Member]; ok && s.Close <= now && s.Close < cut {
+			continue
+		}
+		keptSettled = append(keptSettled, s)
+	}
+	if dropped > 0 || len(keptSettled) != len(c.settled) {
+		c.dirty = true
+	}
+	c.settled = keptSettled
+	return dropped
+}
+
+func containsClose(closes []float64, want float64) bool {
+	for _, c := range closes {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }
 
 // clocksSettled is how many distinct prior clocks have a shadow whose close is at or before now

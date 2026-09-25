@@ -338,7 +338,7 @@ func (a *Account) decideRoster(coin string, m Market, sides broker.Sides, v View
 	var eligible []int
 	for i, mp := range c.Members {
 		if side, cost, ok := shadowEntry(mp, coin, m, sides, v, now); ok {
-			c.Observe(mp.Name, m.Ticker, side, m.Close, cost)
+			c.Observe(mp.Name, m, side, cost)
 		}
 		saved := a.Params
 		a.Params = mp
@@ -1144,11 +1144,7 @@ func (e *Engine) SettleRows(ticker, result string) []SettleRow {
 // ApplySettlement pays out and closes the positions SettleRows listed. The runner calls it only
 // after RecordSettlements has committed those very rows.
 func (e *Engine) ApplySettlement(ticker, result string) []Event {
-	for _, a := range e.Accounts {
-		if a.Composition != nil {
-			a.Composition.Settle(ticker, result)
-		}
-	}
+	e.SettleShadows(ticker, result)
 	var events []Event
 	for _, row := range e.SettleRows(ticker, result) {
 		a := e.Account(row.BucketID)
@@ -1179,10 +1175,79 @@ func (e *Engine) ApplySettlement(ticker, result string) []Event {
 
 // Prune forgets every window that closed at or before now and holds nothing. A window whose
 // positions were all sold early never sees a settlement, so the runner calls this too.
-func (e *Engine) Prune(now float64) {
+//
+// It prunes the rosters' memory too (Composition.Prune), and returns how many of their shadows
+// were dropped unscored.
+func (e *Engine) Prune(now float64) (dropped int) {
 	for _, a := range e.Accounts {
 		a.prune(now)
+		if a.Composition != nil {
+			dropped += a.Composition.Prune(now)
+		}
 	}
+	return dropped
+}
+
+// SettleShadows scores the rosters' shadows on ticker. ApplySettlement does this along with the
+// positions; the runner calls it for a result no bucket held, so a member is scored on every
+// market it would have bought, as the replay scores it, not only on those a bucket held.
+func (e *Engine) SettleShadows(ticker, result string) {
+	for _, a := range e.Accounts {
+		if a.Composition != nil {
+			a.Composition.Settle(ticker, result)
+		}
+	}
+}
+
+// ShadowsDue is every market with a roster shadow waiting on it that closed by now, by id: the
+// sweep reads their results with the positions', so a result the poller's one call did not
+// reach (v3 busy or suspended, or the process down) still scores them.
+func (e *Engine) ShadowsDue(now float64) map[int64]string {
+	out := map[int64]string{}
+	for _, a := range e.Accounts {
+		if a.Composition == nil {
+			continue
+		}
+		for _, p := range a.Composition.pending {
+			if p.MarketID > 0 && p.Close <= now {
+				out[p.MarketID] = p.Ticker
+			}
+		}
+	}
+	return out
+}
+
+// Rosters is every roster account's memory, by bucket: what the runner saves across a restart
+// and hands to the engine a rebuild makes.
+func (e *Engine) Rosters() map[int64]RosterMemory {
+	out := map[int64]RosterMemory{}
+	for _, a := range e.Accounts {
+		if a.Composition != nil {
+			out[a.BucketID] = a.Composition.Memory()
+		}
+	}
+	return out
+}
+
+// RestoreRosters gives each roster account the memory kept under its bucket. A bucket's version
+// never changes, and Restore keeps only what names a member, so memory cannot cross versions.
+func (e *Engine) RestoreRosters(m map[int64]RosterMemory) {
+	for _, a := range e.Accounts {
+		if mem, ok := m[a.BucketID]; ok && a.Composition != nil {
+			a.Composition.Restore(mem)
+		}
+	}
+}
+
+// RostersChanged reports whether any roster's memory changed since the last call.
+func (e *Engine) RostersChanged() bool {
+	changed := false
+	for _, a := range e.Accounts {
+		if a.Composition != nil && a.Composition.TakeDirty() {
+			changed = true
+		}
+	}
+	return changed
 }
 
 func (a *Account) prune(upTo float64) {
