@@ -1,8 +1,14 @@
-# Calibrated belief protocol (DRAFT: not in force)
+# Calibrated belief protocol
 
-**Status: a draft for the owner's yes.** Nothing in it has been run. No outcome has been read
-for it. It becomes a protocol, with a `T_c`, only when Brad says yes and the file is committed
-without this heading. Until then it is a description of what would be measured and how.
+**Status: in force.** Brad said yes on 2026-09-24, in a chat session with the agent that
+committed this file, and chose **Fold** (below). Nothing in it had been run, and no outcome had
+been read for it, when it was committed.
+
+**`T_c`** is the committer time (UTC) of the last commit that changed this file, printed by
+`git log -1 --format='%H %cI' -- docs/calibration-protocol.md`. Any later commit to this file is a
+new protocol with a new `T_c`. Mechanical slips are corrected under the rule of section 0.1 of
+`docs/v3-measurement-protocol.md`, applied to this file, in the append-only
+`docs/calibration-protocol-errata.md`.
 
 ## Why this exists
 
@@ -76,24 +82,36 @@ only where `p_cal` beats the ask after fee and staleness. Sizing, the window cap
 time filters are the builder's as before. Such a version is a trial like every other and is
 judged at the corrected threshold on the leaderboard.
 
+## What a no means for the project
+
+**[OWNER, 2026-09-24]** Chosen before TRAIN, so that a no ends the search instead of starting
+another variant: if TEST says no, strategy work is parked. No new strategy version is registered
+or deployed, and no engine feature for trading is built, until the owner decides otherwise in
+writing. The recorders keep running.
+
 ## Relation to the long-shot protocol
 
 `docs/longshot-protocol.md` (H15) asks whether buying the other side of a long shot priced at
 10 cents or less, five minutes before the close, pays after the fee: an outcome-minus-price
 statistic by price band. Fitting a calibrator on the same rounds computes that relation and
-more. Two honest ways to hold both:
+more. Two honest ways to hold both were drafted, and the owner chose the first (2026-09-24):
 
-- **Fold** (recommended): H15's question becomes one row of the calibrator's TEST report (the
+- **Fold** (chosen): H15's question becomes one row of the calibrator's TEST report (the
   (0.90, 1.00] mid band at (240, 300] s, outcome minus price after fee), computed once with the
-  rest and reported in `docs/longshot-protocol-errata.md` as the answer to H15. The long-shot
-  protocol's other horizons (Hh, Hd, Hw, on the ladders) are untouched.
-- **Wait**: `T_c` of this protocol is set no earlier than the commit of H15's result.
+  rest, and that row is the answer to H15. H15 is not run on its own sample (the first 480
+  windows after the long-shot protocol's `T_c`): the look disclosed below saw that population.
+  The long-shot protocol's other horizons (Hh, Hd, Hw, on the ladders) are untouched.
+- **Wait** (not chosen): `T_c` of this protocol set no earlier than the commit of H15's result.
+
+The draft said the answer to H15, and the disclosure below, would be entered in
+`docs/longshot-protocol-errata.md`. That file admits names and syntax only (its own header, and
+section 0.1 of `docs/v3-measurement-protocol.md`), so neither is entered there: both are recorded
+here, and H15's answer is reported with this protocol's TEST result.
 
 Disclosed: on 2026-09-22 (21:30–22:00 PT) outcome-minus-price by mid band and τ bin WAS computed
 by hand on the H15 population after the long-shot protocol's `T_c`, in a chat session, to choose
 a builder shape (Mid-round Favourite). That look is what motivated this document. It is recorded
-here so that any result from this protocol or from H15 is read knowing it happened; it is also
-owed to the long-shot errata, pending the owner's yes.
+here so that any result from this protocol or from H15 is read knowing it happened.
 
 ## What this protocol does not do
 
