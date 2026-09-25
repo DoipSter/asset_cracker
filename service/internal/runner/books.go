@@ -146,9 +146,9 @@ var ErrAwaitingSettlement = errors.New("between their round's close and its sett
 //   - an open bet's round has already closed: until it settles, which takes some seconds, nothing
 //     can price it, it counts 0, and a range measured from such a row reads the whole stake as
 //     earned. This is the same test the sustainment allocation waits on, a condition and not a
-//     number of seconds. It is ErrAwaitingSettlement for as long as the poller is still asking
-//     for the round's result; past that the bet will stay open, every minute will be refused,
-//     and the error is a plain one so that it is logged as a fault until someone looks.
+//     number of seconds. It is ErrAwaitingSettlement until the result is late (kalshi.LateAfter);
+//     past that the poller keeps asking for a traded round's result, every minute is refused
+//     until it comes, and the error is a plain one so that it is logged as a fault while it waits.
 //
 // A bet with no bid in a round still open (a losing side late on) is not refused: it is fairly
 // worth about nothing, and the row says how many such bets it holds.
@@ -169,7 +169,7 @@ func SnapshotRefusal(books []Book, now time.Time) error {
 	switch {
 	case waiting == 0:
 		return nil
-	case longest > kalshi.GiveUpAfter.Seconds():
+	case longest > kalshi.LateAfter.Seconds():
 		return fmt.Errorf("%d open bets belong to rounds that closed up to %.0f s ago and were never settled: they cannot be priced, and no snapshot will be written until they are resolved", waiting, longest)
 	}
 	return fmt.Errorf("%d open bets are %w (the longest for %.0f s) and cannot be priced", waiting, ErrAwaitingSettlement, longest)

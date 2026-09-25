@@ -17,7 +17,9 @@ type Sink interface {
 	// SaveResult records how a round settled. It reports true only for the call that stored
 	// it, so whatever acts on a settlement acts once.
 	SaveResult(ctx context.Context, marketID int64, m MarketInfo, closes time.Time) (bool, error)
-	// Unsettled lists rounds that closed recently with no result stored, by ticker.
+	// Unsettled lists the closed rounds with no result stored that can still get one, by ticker:
+	// every round a bucket traded, and any other for an hour after its close
+	// (store.UnsettledMarkets). The watch follows this list, at the start and every resweepEvery.
 	Unsettled(ctx context.Context, before time.Time) (map[string]Pending, error)
 }
 
@@ -30,7 +32,11 @@ type Status struct {
 	Quotes       Quotes    `json:"quotes"`
 	LastQuotesAt time.Time `json:"last_quotes_at"`
 	Awaiting     int       `json:"awaiting_results"`
-	LastError    string    `json:"last_error,omitempty"`
+	// NotBinary counts the rounds awaited whose result Kalshi gave as something other than yes or
+	// no ("scalar", the only other value its API lists). Nothing settles them: they are logged as
+	// errors and asked about until someone decides.
+	NotBinary int    `json:"results_not_yes_or_no"`
+	LastError string `json:"last_error,omitempty"`
 }
 
 // Pending is a closed round still waiting for its result.
@@ -50,6 +56,7 @@ type awaiting struct {
 	id      int64
 	closes  time.Time
 	nextTry time.Time
+	other   string // a result that is neither yes nor no, once seen: logged once, counted
 }
 
 // Poller follows one series: which round is open, its live quotes once a second, and how each
@@ -72,9 +79,44 @@ func (p *Poller) Status() Status {
 	return p.status
 }
 
-// GiveUpAfter is how long to keep asking for a round's result. Kalshi normally reports it
-// about five seconds after the close.
-const GiveUpAfter = 15 * time.Minute
+// LateAfter is when a round's result is late. Kalshi normally reports it about five seconds after
+// the close. Past this the watch asks once a minute, and the value snapshot treats a bet in the
+// round as a fault (runner.SnapshotRefusal).
+const LateAfter = 15 * time.Minute
+
+// The watch's pace [CONVENTIONS]: every pass for a minute after the close, then every ten seconds,
+// then once a minute once the result is late. And how often the watch is brought back in line with
+// the record's rule (Sink.Unsettled): it used to give up on every round after LateAfter while a
+// restart asked again about a traded one, so a late result waited for a restart, and until then
+// the bets in the round stayed open, no value snapshot was written and nothing was skimmed.
+const (
+	resweepEvery = time.Minute
+	askSoon      = 10 * time.Second
+	askLate      = time.Minute
+	untradedFor  = time.Hour // store.UnsettledMarkets' own hour for a round nobody traded
+)
+
+// resweep makes the watch the record's list: adds every round it lists, and drops a round it no
+// longer lists once that round is past untradedFor (settled, or nobody traded it). A round closed
+// within the hour is kept whether listed or not: the list is read as of `now`, and a round closing
+// this second may not be in it yet.
+func (p *Poller) resweep(ctx context.Context, now time.Time, waiting map[string]*awaiting) error {
+	listed, err := p.Sink.Unsettled(ctx, now)
+	if err != nil {
+		return err
+	}
+	for ticker, pd := range listed {
+		if _, ok := waiting[ticker]; !ok {
+			waiting[ticker] = &awaiting{id: pd.ID, closes: pd.Closes}
+		}
+	}
+	for ticker, w := range waiting {
+		if _, ok := listed[ticker]; !ok && now.Sub(w.closes) > untradedFor {
+			delete(waiting, ticker)
+		}
+	}
+	return nil
+}
 
 // Run polls until ctx ends.
 func (p *Poller) Run(ctx context.Context) {
@@ -83,11 +125,18 @@ func (p *Poller) Run(ctx context.Context) {
 	}
 	var current *round
 	waiting := map[string]*awaiting{}
-	if old, err := p.Sink.Unsettled(ctx, p.Now()); err == nil {
-		for ticker, pd := range old { // rounds a previous run left without a result
-			waiting[ticker] = &awaiting{id: pd.ID, closes: pd.Closes}
+	var swept time.Time
+	sweep := func() {
+		now := p.Now()
+		if now.Sub(swept) < resweepEvery {
+			return
+		}
+		swept = now // a failed read is tried again at the next sweep, not every second
+		if err := p.resweep(ctx, now, waiting); err != nil && ctx.Err() == nil {
+			slog.Warn("kalshi poll: the unsettled rounds were not read; the watch keeps what it has", "series", p.Series, "err", err)
 		}
 	}
+	sweep() // rounds a previous run left without a result
 
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
@@ -97,9 +146,16 @@ func (p *Poller) Run(ctx context.Context) {
 			return
 		case <-tick.C:
 		}
+		sweep()
 		err := p.step(ctx, &current, waiting)
+		other := 0
+		for _, w := range waiting {
+			if w.other != "" {
+				other++
+			}
+		}
 		p.mu.Lock()
-		p.status.Awaiting = len(waiting)
+		p.status.Awaiting, p.status.NotBinary = len(waiting), other
 		p.status.LastError = ""
 		if err != nil {
 			p.status.LastError = err.Error()
@@ -159,7 +215,12 @@ func (p *Poller) step(ctx context.Context, current **round, waiting map[string]*
 		p.status.Quotes, p.status.Strike = q, *cur.info.FloorStrike
 		p.mu.Unlock()
 	}
+	return p.askResults(ctx, now, waiting)
+}
 
+// askResults asks Kalshi for the result of every awaited round that is due, stores a yes or no,
+// and paces the rest.
+func (p *Poller) askResults(ctx context.Context, now time.Time, waiting map[string]*awaiting) error {
 	for ticker, w := range waiting {
 		if now.Before(w.closes.Add(time.Second)) || now.Before(w.nextTry) {
 			continue
@@ -179,12 +240,20 @@ func (p *Poller) step(ctx context.Context, current **round, waiting map[string]*
 			delete(waiting, ticker)
 			continue
 		}
+		if err == nil && m.Result != "" && m.Result != w.other {
+			// Kalshi's API lists one other result, "scalar", which pays the YES side its settlement
+			// value. Nothing here settles on it: said loudly, once, and asked about again.
+			w.other = m.Result
+			slog.Error("round determined neither yes nor no; its bets stay open until someone decides how it pays",
+				"series", p.Series, "ticker", ticker, "result", m.Result, "closed", w.closes.UTC().Format(time.RFC3339))
+		}
+		// Not given up: the watch follows the record's rule (resweep), which keeps a traded round
+		// until its result is stored and lets another go an hour after its close.
 		switch age := now.Sub(w.closes); {
-		case age > GiveUpAfter:
-			slog.Warn("no result for round; giving up", "ticker", ticker)
-			delete(waiting, ticker)
+		case age > LateAfter:
+			w.nextTry = now.Add(askLate)
 		case age > time.Minute:
-			w.nextTry = now.Add(10 * time.Second)
+			w.nextTry = now.Add(askSoon)
 		}
 	}
 	return nil

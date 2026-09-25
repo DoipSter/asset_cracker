@@ -159,13 +159,15 @@ func (s *Store) DailyCloses(ctx context.Context, symbol string, n int) ([]float6
 	return out, rows.Err()
 }
 
-// UnsettledBetween lists an instrument's markets that closed in [since, before) with no result
-// yet, by ticker. Unlike UnsettledMarkets it keeps no one-hour rule: a daily or weekly market's
-// result is wanted however long it takes to come, up to the caller's `since`.
+// UnsettledBetween lists an instrument's markets that closed before `before` with no result yet,
+// by ticker: those that closed at or after `since`, and every one a bucket traded however long ago
+// it closed, since until its result is stored the bets on it stay open (UnsettledMarkets' rule
+// for the rounds, with the caller's `since` in place of its hour).
 func (s *Store) UnsettledBetween(ctx context.Context, instrumentID int64, since, before time.Time) (map[string]UnsettledMarket, error) {
 	rows, err := s.pool.Query(ctx, `
 		select m.ticker, m.id, m.closes_at from market m
-		 where m.instrument_id = $1 and m.result is null and m.closes_at < $2 and m.closes_at >= $3`,
+		 where m.instrument_id = $1 and m.result is null and m.closes_at < $2
+		   and (m.closes_at >= $3 or exists (select 1 from trade_order o where o.market_id = m.id))`,
 		instrumentID, before, since)
 	if err != nil {
 		return nil, err

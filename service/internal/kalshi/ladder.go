@@ -34,7 +34,12 @@ const (
 	ladderWriteTimeout = 30 * time.Second
 	ladderMaxPages     = 20 // 1,000 markets a page; 425 were open in the largest series on 2026-09-21
 	ladderResultAsks   = 20 // [CONVENTION] result requests per series per pass
-	ladderGiveUpAfter  = 72 * time.Hour
+	// ladderUntradedFor is how long a leg nobody traded is asked about after its close. A leg a
+	// bucket traded is asked about until its result is stored (store.UnsettledBetween lists it
+	// however old); it used to be given up after this too, and a restart did not ask again either,
+	// so its bets would have stayed open for good.
+	ladderUntradedFor  = 72 * time.Hour
+	ladderResweepEvery = time.Hour // [CONVENTION] the watch brought back in line with that list
 )
 
 // text is a value Kalshi sends as decimal text ("0.4500", "12.00"). A bare JSON number is kept as
@@ -443,6 +448,7 @@ type LadderRecorder struct {
 	open      map[string]ladderKnown // markets seen open, by ticker
 	waiting   map[string]*awaiting   // closed, result not stored yet
 	loaded    bool                   // the unsettled markets of an earlier run have been read
+	merged    time.Time              // when the watch last followed the record's list
 	nextProbe time.Time
 	probes    int
 	fails     int
@@ -498,9 +504,9 @@ func (r *LadderRecorder) pass(ctx context.Context) error {
 	if r.open == nil {
 		r.open, r.waiting = map[string]ladderKnown{}, map[string]*awaiting{}
 	}
-	if !r.loaded {
+	if !r.loaded || r.now().Sub(r.merged) >= ladderResweepEvery {
 		if err := r.loadUnsettled(ctx); err != nil {
-			slog.Warn("ladder recorder: unsettled markets of an earlier run not read; will retry", "series", r.Series, "err", err)
+			slog.Warn("ladder recorder: unsettled markets not read; will retry", "series", r.Series, "err", err)
 		}
 	}
 	markets, err := listAll(func(cursor string) (ladderPage, error) {
@@ -647,17 +653,26 @@ func (r *LadderRecorder) probe(ctx context.Context, p ladderPoint, listAt time.T
 	return probeDiff(p, book, listAt, bookAt)
 }
 
+// loadUnsettled makes the watch the record's list, at the start and every ladderResweepEvery:
+// adds every leg it lists (an earlier run's, or one given up on), and drops a leg it no longer
+// lists once that leg is past ladderUntradedFor (settled, or nobody traded it).
 func (r *LadderRecorder) loadUnsettled(ctx context.Context) error {
 	now := r.now()
 	wctx, cancel := context.WithTimeout(ctx, ladderWriteTimeout)
 	defer cancel()
-	old, err := r.Sink.Unsettled(wctx, now.Add(-ladderGiveUpAfter), now)
+	r.merged = now // a failed read is tried again at the next resweep, not every pass
+	listed, err := r.Sink.Unsettled(wctx, now.Add(-ladderUntradedFor), now)
 	if err != nil {
 		return err
 	}
-	for t, p := range old {
+	for t, p := range listed {
 		if _, ok := r.waiting[t]; !ok {
 			r.waiting[t] = &awaiting{id: p.ID, closes: p.Closes}
+		}
+	}
+	for t, w := range r.waiting {
+		if _, ok := listed[t]; !ok && now.Sub(w.closes) > ladderUntradedFor {
+			delete(r.waiting, t)
 		}
 	}
 	r.loaded = true
@@ -701,11 +716,13 @@ func (r *LadderRecorder) settle(ctx context.Context, now time.Time) {
 			delete(r.waiting, t)
 			continue
 		}
-		if age := now.Sub(w.closes); age > ladderGiveUpAfter {
-			slog.Warn("ladder recorder: no result; giving up", "series", r.Series, "ticker", t, "closed", w.closes.UTC().Format(time.RFC3339), "result", m.Result)
-			delete(r.waiting, t)
-		} else {
-			w.nextTry = now.Add(resultGap(age))
+		if err == nil && m.Result != "" && m.Result != w.other {
+			// "scalar", the one other result Kalshi's API lists: nothing here settles on it.
+			w.other = m.Result
+			slog.Error("ladder leg determined neither yes nor no; its bets stay open until someone decides how it pays",
+				"series", r.Series, "ticker", t, "result", m.Result, "closed", w.closes.UTC().Format(time.RFC3339))
 		}
+		// Not given up here: loadUnsettled drops a leg once the record no longer lists it.
+		w.nextTry = now.Add(resultGap(now.Sub(w.closes)))
 	}
 }
