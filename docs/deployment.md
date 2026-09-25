@@ -90,6 +90,12 @@ commit everyone can see that includes what the Pi runs now, and the script refus
 
 `deploy/pi/deploy.sh rollback` does step 7's switch on demand; it is logged too.
 
+**Batch releases (owner, 2026-09-24).** Every release restarts the service, and a restart costs
+the record: in the 48 hours to 2026-09-24 there were 34, and all 416 of Kalshi's 429 replies in
+that time came within three minutes of one, while the poller, the ladder recorders and the
+catalogue refresh all start at once and the engine rebuilds its books. Release when a change needs
+to be live, carrying everything that is ready; not one release per commit. See `CONTRIBUTING.md`.
+
 `ssh acdeploy@rpi-v5-1.local cat /opt/assetcracker/releases.log` answers "what went out, when,
 by whom". Releases before 2026-09-23 predate the log; the unit's journal has them
 (`msg="asset cracker service running" version=...`).

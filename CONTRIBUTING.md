@@ -82,6 +82,26 @@ nothing ever trades and the test quietly tests nothing.
 Linux, on Python 3.12 and 3.13. Windows is where the app runs; Linux catches anything that
 quietly depends on Windows path handling. A red branch does not merge.
 
+## The platform, until the calibration protocol reports (owner, 2026-09-24)
+
+The Go service under `service/` has not shown an edge. On 2026-09-23 every 15-minute version on
+the leaderboard had lost money after fees, and none could be told from zero. Until
+`docs/calibration-protocol.md` has reported its TEST result, three rules hold (INT-21):
+
+- **No new strategy versions.** Nothing registers (`strategy_register`, the buckets page's New
+  strategy) or deploys (`strategy_deploy`, the Deploy form) a version that is not already on the
+  registry. Every `strategy_version` row raises the significance bar for all of them (the trials
+  correction), and every variant tried is another look at the same tape.
+- **No new bank or bucket bookkeeping.** No new paydays, reserves, allocation rules, bucket
+  switches or history views until a version passes the promotion gate. Fixes to what exists are
+  welcome.
+- **Batch releases.** A prod release restarts the service. In the 48 hours to 2026-09-24 there
+  were 34 restarts, and all 416 of Kalshi's 429 replies in that time came within three minutes of
+  one, while the engine rebuilt its books. Release when a change needs to be live, and carry
+  everything that is ready in one release.
+
+Still wanted: measurement (the calibration protocol's tool, before its TRAIN ends) and fixes.
+
 ## Simulation only
 
 Every balance in this project is imaginary. `START_BALANCE` is a number in a file and no
