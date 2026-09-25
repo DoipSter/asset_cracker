@@ -1,8 +1,9 @@
 # Calibrated belief protocol
 
 **Status: in force.** Brad said yes on 2026-09-24, in a chat session with the agent that
-committed this file, and chose **Fold** (below). Nothing in it had been run, and no outcome had
-been read for it, when it was committed.
+committed this file, and chose **Fold** (below). On 2026-09-25, before TRAIN's first close, he
+amended it to fix what the first text left open ("Conventions fixed before TRAIN"). Nothing in it
+had been run, and no outcome had been read for it, when either text was committed.
 
 **`T_c`** is the committer time (UTC) of the last commit that changed this file, printed by
 `git log -1 --format='%H %cI' -- docs/calibration-protocol.md`. Any later commit to this file is a
@@ -72,6 +73,55 @@ On TEST, by τ bin and overall: Brier and log loss of `p_cal`, of `mid`, and of 
 least three of the five bins, with a paired bootstrap over close times **[CONVENTION: 2,000
 resamples]** giving the improvement a 90% interval above zero. "No" is an accepted result and
 registers nothing.
+
+## Conventions fixed before TRAIN
+
+**[OWNER, amendment of 2026-09-25]** The first text left these open. They are fixed here before
+TRAIN's first close (2026-09-26 00:00 UTC), so that the tool writes them down and decides nothing.
+Brad chose the estimator's scale, the strict reading of the pass rule, and how H15's row is
+computed; the rest follows the precedent of `cmd/measure3` and was put to him before he chose.
+
+- **Rows.** An observation is the LAST evaluation row inside its τ bin that has a two-sided book
+  (`0 < yes_bid < yes_ask < 1`, read from the row's `quotes`) and a v3 model view
+  (`(model->'v3'->>'ok')::boolean`, with `model->'v3'->>'p_model'` present). τ is
+  `closes_at − at` in seconds, and a bin (lo, hi] holds lo < τ ≤ hi. The interaction's
+  `1[τ < 120 s]` is read as written.
+- **Features.** `mid = (yes_bid + yes_ask) / 2` and `spread = yes_ask − yes_bid`, from the row's
+  `quotes`; `p_model` and `vol_ratio` are the view's journaled figures (`vol_ratio` is the model's
+  volatility over the coin's default, `sqrt(sigma2) / default_sigma`). `logit(p_model)` holds
+  `p_model` at least 1e-6 from 0 and 1, as the scorecard's log loss does **[CONVENTION]**.
+- **Coding.** An intercept `a`; one indicator for each τ bin except (600, 900], and for each coin
+  except BTC. Every column but the intercept is standardised with TRAIN's mean and population
+  standard deviation, frozen, and applied unchanged to TEST; a column that is constant on TRAIN
+  is left out and reported.
+- **Estimator [OWNER].** The coefficients maximise `Σ log L − ½ · λ_ridge · Σ β²` over the
+  standardised columns, with λ_ridge = 1, the log-likelihood summed over TRAIN's observations,
+  and the intercept not penalised (scikit-learn's `LogisticRegression(C=1)`). Newton's method from
+  zero, until no coefficient moves by more than 1e-10, within 100 iterations; a fit that does not
+  converge is a mechanical failure. `b` and `c` are reported on the unstandardised scale. Standard
+  errors are sandwich estimates clustered by close time, and are reported only.
+- **The TEST figures.** Brier and log loss are means over observations, overall and by τ bin, for
+  `p_cal`, `mid` and the blend `mid + 0.5 · (p_model − mid)`; log loss holds every probability at
+  least 1e-6 from 0 and 1. The improvement is the mid's log loss less `p_cal`'s.
+- **The pass rule, read strictly [OWNER].** Useful when (i) the overall improvement is above zero
+  and the 5th percentile of its value over 2,000 paired bootstrap resamples is above zero, and
+  (ii) in at least three of the five bins, the bin's improvement is above zero and the 5th
+  percentile of its value over the same resamples is above zero. A resample draws close times with
+  replacement, each drawn close bringing all of its observations, from seed 20260925
+  **[CONVENTION]**; a bin's percentile is taken over the resamples that hold at least one of its
+  observations.
+- **H15's row [OWNER].** Computed by the long-shot protocol's own rules (its sections 2 and 3) on
+  the rounds of its five series closing in TEST: both sides of the book; the FIRST row with
+  `closes_at − 300 s ≤ at < closes_at − 240 s`; its eligibility and size rules;
+  `r = (1 − y) − c − f` with its fee; a mean per window; its block jackknife, with 6-hour blocks
+  of close time aligned to 00:00 UTC **[CONVENTION]**; "profitable" when `t ≥ t_{0.9875, B−1}`,
+  else "not shown"; and its secondary figures beside it.
+- **When a span runs.** No earlier than one hour after its last close **[CONVENTION]**; a round
+  with no `yes` or `no` result by then is left out and listed.
+- **The files.** Under `research/calibration/`, the tool commits `train-attempt.json` (the rounds
+  and evaluation rows it will read) before it reads any outcome, then `train-result.json`; the
+  same for TEST, which it refuses to run until TRAIN's result is committed and held by the remote.
+  Every run, complete or not, is appended to `runs.jsonl`.
 
 ## How a yes becomes a strategy
 
