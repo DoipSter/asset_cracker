@@ -203,9 +203,11 @@ const (
 	scorecardWhat = "Brier score of the model's probability against the market's own mid price, on settled rounds. Lower is better. " +
 		"The unit is one 15-minute window (all coins together), because bets inside a window are not independent: each window is scored on its own, " +
 		"and brier_model, brier_market and diff are means over windows. " +
-		"The model figure is decision.model_prob of the second engine (v2): the RAW model probability of YES, before any strategy blends it with the market " +
-		"(the blended figure is not journaled). The market figure is decision.market_prob: the middle of the Yes bid and ask, or the ask alone when there is no bid. " +
-		"One row is one second of one round in which at least one v2 strategy journaled a decision; idle strategies journal only on a change and every 15 s, " +
+		"The model figure is decision.model_prob of the live engine's originals (v3): the RAW model probability of YES, before any strategy blends it with the market " +
+		"(the blended figure is not journaled). The market figure is decision.market_prob: the middle of the Yes bid and ask, formed only when both sides show a bid. " +
+		"A second with no two-sided book or no model view has no market price and is not scored. Until 2026-09-24 the engine journaled such a second " +
+		"with a market figure of 0, and this scorecard scored that 0 as the market's price (32% to 82% of its rows by band on the day it was measured); those rows are left out now. " +
+		"One row is one second of one round in which the live engine journaled a decision: on an order, on a change, and every 15 s, " +
 		"so seconds are not evenly covered. " +
 		"logloss_model and logloss_market are the same rows' log loss (-ln of the probability given to what happened, probabilities held at least 1e-6 from 0 and 1), " +
 		"made the same way: per window, then a mean over windows, with logloss_diff = model - market and its SE. They are a second reading of calibration; " +

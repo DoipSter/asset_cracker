@@ -309,6 +309,12 @@ func (s *Store) AnalysisWindowData(ctx context.Context, modelVersions, versions 
 	// 3. The scorecard's sums. One row per evaluation (a second of one market): the originals
 	// journal the same model_prob for it, so the first is taken. decision is reached through
 	// (strategy_version_id, at), evaluation through (market_id, at).
+	// Only seconds with a market price: a two-sided book and a model view (engine.Decision's
+	// HasProb). The third engine journaled a second without one with market_prob 0, not NULL,
+	// until 2026-09-24, and the scorecard scored that 0 as the market's price: 32% to 82% of its
+	// rows by band on the day it was measured, most of them in the last two minutes. A two-sided
+	// mid lies strictly between 0 and 1, so market_prob > 0 is exactly HasProb; rows written since
+	// store NULL instead.
 	// Band edges and the log-loss clamp are the same numbers as analysis.Bands / LogLossClamp,
 	// written here so this package does not import analysis.
 	band := "case when tau >= 600 then 0 when tau >= 300 then 1 when tau >= 120 then 2 when tau >= 60 then 3 else 4 end"
@@ -329,7 +335,7 @@ func (s *Store) AnalysisWindowData(ctx context.Context, modelVersions, versions 
 			  join market m on m.id = e.market_id
 			 where d.strategy_version_id = any($1) and d.at >= $2 and d.at < $3
 			   and e.at >= $2 and e.at < $3 and e.market_id = any($4)
-			   and d.model_prob is not null and d.market_prob is not null
+			   and d.model_prob is not null and d.market_prob is not null and d.market_prob > 0
 			 order by d.evaluation_id, d.id)
 		select market_id, `+band+` as band, count(*), sum((p - y) * (p - y))::float8, sum((q - y) * (q - y))::float8,
 		       sum(`+logloss("p")+`)::float8, sum(`+logloss("q")+`)::float8

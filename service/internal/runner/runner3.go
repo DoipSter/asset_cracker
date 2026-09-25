@@ -1218,7 +1218,7 @@ func (r *Runner3) bucket(id int64) *bucket3 {
 
 func (r *Runner3) decisionRow(d k3.Decision) store.DecisionRow {
 	row := store.DecisionRow{BucketID: d.BucketID, ModelProb: d.ModelProb, MarketProb: d.MarketProb, Edge: d.Edge, Side: d.Side,
-		Action: d.Action, BlockedBy: d.BlockedBy, Why: d.Why}
+		Action: d.Action, BlockedBy: d.BlockedBy, Why: d.Why, NoModelProb: !d.HasModel, NoMarketProb: !d.HasProb}
 	if b := r.bucket(d.BucketID); b != nil {
 		row.VersionID = b.VersionID
 	}

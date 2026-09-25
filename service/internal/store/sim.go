@@ -532,6 +532,18 @@ type DecisionRow struct {
 	ModelProb, MarketProb, Edge  float64
 	Side, Action, BlockedBy, Why string
 	SizeAlone                    *int
+	// NoModelProb and NoMarketProb say the engine formed no such figure (no model view; no
+	// two-sided book), and the third engine's insert stores NULL for it rather than a 0 the
+	// scorecard would read as a price. The frozen engines never set them.
+	NoModelProb, NoMarketProb bool
+}
+
+// probOrNull is a decision's probability as stored: NULL when the engine formed none.
+func probOrNull(missing bool, p float64) any {
+	if missing {
+		return nil
+	}
+	return p
 }
 
 // TradeRow is a simulated fill: a buy that opened a bet, or a sell that closed one early.

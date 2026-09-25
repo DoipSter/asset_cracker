@@ -454,12 +454,12 @@ func recordOrdersTx(ctx context.Context, tx pgx.Tx, setup SimSetup, r StepRecord
 	decisionIDs := make([]int64, len(r.Decisions))
 	for i, d := range r.Decisions {
 		// The same statement as RecordStep's. Human weights are not applied yet, so the size
-		// after weighting is the strategy's own.
+		// after weighting is the strategy's own. A probability the engine did not form is NULL.
 		if err := tx.QueryRow(ctx, `insert into decision (at, evaluation_id, bucket_id, strategy_version_id, model_prob,
 		            market_prob, side, edge, action, blocked_by, reason, size_alone, human_weight, size_applied)
 		        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, nullif($10, ''), $11, $12, 1, $12) returning id`,
-			r.At, r.EvaluationID, d.BucketID, d.VersionID, d.ModelProb, d.MarketProb, d.Side, d.Edge, d.Action,
-			d.BlockedBy, d.Why, d.SizeAlone).Scan(&decisionIDs[i]); err != nil {
+			r.At, r.EvaluationID, d.BucketID, d.VersionID, probOrNull(d.NoModelProb, d.ModelProb), probOrNull(d.NoMarketProb, d.MarketProb),
+			d.Side, d.Edge, d.Action, d.BlockedBy, d.Why, d.SizeAlone).Scan(&decisionIDs[i]); err != nil {
 			return fmt.Errorf("decision: %w", err)
 		}
 	}

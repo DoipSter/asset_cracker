@@ -195,6 +195,7 @@ type Decision struct {
 	BucketID   int64
 	Strategy   string
 	HasProb    bool    // false: there was no model view or no two-sided book, and the three figures below are empty
+	HasModel   bool    // the model had a view: ModelProb is its figure (it can be set while HasProb is false)
 	ModelProb  float64 // the RAW p_model, so the scorecard means the same for every engine
 	MarketProb float64 // the mid
 	P          float64 // the blend the engine acted on
@@ -356,7 +357,7 @@ func (a *Account) decideRoster(coin string, m Market, sides broker.Sides, v View
 	if idx < 0 {
 		d := Decision{BucketID: a.BucketID, Strategy: a.Params.Name, Action: "none", Intent: -1, BlockedBy: BlockedNoMember, Why: BlockedNoMember, Pick: how, Owner: ownerName}
 		if v.OK {
-			d.ModelProb = v.PModel
+			d.ModelProb, d.HasModel = v.PModel, true
 		}
 		return []Decision{d}, nil
 	}
@@ -420,7 +421,7 @@ func (a *Account) decideOnce(coin string, m Market, sides broker.Sides, v View, 
 	tp, two := touch(sides)
 	blank := Decision{BucketID: a.BucketID, Strategy: prm.Name, Action: "none", Intent: -1}
 	if v.OK {
-		blank.ModelProb = v.PModel
+		blank.ModelProb, blank.HasModel = v.PModel, true
 	}
 	if two && v.OK {
 		// The weight on the model is the version's, or its late-window one inside lambda_late_tau
