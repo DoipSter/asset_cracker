@@ -94,7 +94,8 @@ the leaderboard had lost money after fees, and none could be told from zero. Unt
   correction), and every variant tried is another look at the same tape.
 - **No new bank or bucket bookkeeping.** No new paydays, reserves, allocation rules, bucket
   switches or history views until a version passes the promotion gate. Fixes to what exists are
-  welcome.
+  welcome. The owner excepted two on 2026-09-25 (TSK-51): deployed capital drawn on the home
+  page's value chart, and the tax reserve counted as a debit against the total.
 - **Batch releases.** A prod release restarts the service. In the 48 hours to 2026-09-24 there
   were 34 restarts, and all 416 of Kalshi's 429 replies in that time came within three minutes of
   one, while the engine rebuilt its books. Release when a change needs to be live, and carry

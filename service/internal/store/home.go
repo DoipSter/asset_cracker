@@ -35,6 +35,71 @@ func EarnedBetween(then, now ValueSnapshot) int64 {
 	return (now.ValueCents - now.ContributedCents) - (then.ValueCents - then.ContributedCents)
 }
 
+// TaxMove is one change in the tax reserve's balance: the tax part of an allocation, or money
+// moved in or out by hand. Outside is true when the owners ('external') were the other side of
+// the transfer: a tax bill paid out of the reserve, or the owners putting money straight in.
+type TaxMove struct {
+	At      time.Time
+	Cents   int64 // positive: into the reserve
+	Outside bool
+}
+
+// TaxHistory is the tax reserve's moves, oldest first.
+//
+// The home page counts the reserve as owed, not as the house's: money set aside for tax leaves
+// the total the moment it is set aside, as a debit against what was earned. Paying the bill out
+// of the reserve later changes nothing, because that money had already left.
+type TaxHistory []TaxMove
+
+// Reserve is what the reserve held at t.
+func (h TaxHistory) Reserve(t time.Time) int64 {
+	var sum int64
+	for _, m := range h {
+		if !m.At.After(t) {
+			sum += m.Cents
+		}
+	}
+	return sum
+}
+
+// SetAside is what the house had put into the reserve by t, net of anything it took back: every
+// move but the owners' own. It is the debit against the house's earnings to that moment.
+func (h TaxHistory) SetAside(t time.Time) int64 {
+	var sum int64
+	for _, m := range h {
+		if !m.At.After(t) && !m.Outside {
+			sum += m.Cents
+		}
+	}
+	return sum
+}
+
+// TaxReserveMoves reads the tax reserve's history from the ledger. Only allocations and moves by
+// hand touch the reserve, so this is a handful of rows, reached through ledger_entry's account index.
+func (s *Store) TaxReserveMoves(ctx context.Context) (TaxHistory, error) {
+	rows, err := s.pool.Query(ctx, `
+		select t.at, e.amount_cents,
+		       exists (select 1 from ledger_entry x join ledger_account xa on xa.id = x.account_id
+		                where x.transfer_id = e.transfer_id and xa.kind = 'external')
+		  from ledger_entry e
+		  join ledger_account a on a.id = e.account_id and a.kind = 'tax_reserve' and a.mode = 'sim'
+		  join ledger_transfer t on t.id = e.transfer_id
+		 order by t.at, e.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := TaxHistory{}
+	for rows.Next() {
+		var m TaxMove
+		if err := rows.Scan(&m.At, &m.Cents, &m.Outside); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // InsertSnapshots appends a batch of snapshots, all or nothing.
 func (s *Store) InsertSnapshots(ctx context.Context, rows []ValueSnapshot) error {
 	if len(rows) == 0 {

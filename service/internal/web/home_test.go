@@ -57,9 +57,11 @@ func TestEarned(t *testing.T) {
 
 // fakeHistory is a value history held in memory: total snapshots oldest first.
 type fakeHistory struct {
-	totals []store.ValueSnapshot
-	fail   error
-	groups map[string]store.ValueSnapshot // the group rows of every batch; nil means the one lone row below
+	totals   []store.ValueSnapshot
+	fail     error
+	groups   map[string]store.ValueSnapshot // the group rows of every batch; nil means the one lone row below
+	deployed []store.ValueSnapshot          // the live engine's group rows, oldest first
+	tax      store.TaxHistory
 }
 
 func (f fakeHistory) SnapshotAt(_ context.Context, _, _ string, t time.Time) (store.ValueSnapshot, bool, error) {
@@ -91,15 +93,21 @@ func (f fakeHistory) SnapshotsTakenAt(_ context.Context, _ string, keys []string
 	return map[string]store.ValueSnapshot{"strategies": {At: at, ValueCents: 600_000, ContributedCents: 600_000}}, nil
 }
 
-func (f fakeHistory) SnapshotSeries(_ context.Context, _, _ string, since time.Time, _ int) ([][2]int64, error) {
+func (f fakeHistory) SnapshotSeries(_ context.Context, scope, key string, since time.Time, _ int) ([][2]int64, error) {
+	rows := f.totals
+	if scope == "group" && key == "v3" {
+		rows = f.deployed
+	}
 	out := [][2]int64{}
-	for _, s := range f.totals {
+	for _, s := range rows {
 		if !s.At.Before(since) {
 			out = append(out, [2]int64{s.At.Unix(), s.ValueCents})
 		}
 	}
 	return out, nil
 }
+
+func (f fakeHistory) TaxReserveMoves(context.Context) (store.TaxHistory, error) { return f.tax, nil }
 
 func (f fakeHistory) RealisedByCoin(context.Context, time.Time) (map[string]int64, error) {
 	return map[string]int64{"BTC": -420}, nil
@@ -198,8 +206,11 @@ func TestHomeBeforeAnythingExists(t *testing.T) {
 	if len(got.Series) != 1 || got.Series[0] != [2]int64{1_790_000_000, 0} {
 		t.Errorf("series %v, want only the value right now", got.Series)
 	}
-	if len(got.Composition) != 3 || got.Composition[0].Key != "v3" || got.Composition[0].Earned == nil || *got.Composition[0].Earned != 0 {
+	if len(got.Composition) != 4 || got.Composition[0].Key != "v3" || got.Composition[0].Earned == nil || *got.Composition[0].Earned != 0 {
 		t.Errorf("composition: %+v", got.Composition)
+	}
+	if tax := got.Composition[3]; tax.Key != "tax" || tax.Earned == nil || *tax.Earned != 0 {
+		t.Errorf("the tax line: %+v", tax)
 	}
 	var order []string
 	for _, a := range got.Assets {
@@ -336,6 +347,83 @@ func TestHomeAddsUp(t *testing.T) {
 	btc := got.Assets[0]
 	if btc.Stake != 500 || btc.Value == nil || *btc.Value != 620 || btc.Earned == nil || *btc.Earned != -420 || btc.Round == nil || btc.Round.YesBid != 0.41 {
 		t.Errorf("BTC: %+v", btc)
+	}
+}
+
+// Money in the tax reserve is owed. Setting it aside is a debit against what was earned, and it
+// leaves the total; the owners' own moves in and out of the reserve (a tax bill paid) change
+// neither. The history is read the same way, and deployed capital is drawn beside the total.
+func TestHomeCountsTaxAsOwed(t *testing.T) {
+	now := time.Unix(1_790_000_000, 0)
+	at := func(d time.Duration) time.Time { return now.Add(-d) }
+	// $100.00 from the owners seeded one bucket. Allocations then set $2.00 and $1.00 aside for
+	// tax, 3 h and 30 min ago; the owners put $0.50 into the reserve and paid a $0.80 bill.
+	tax := store.TaxHistory{{At: at(3 * time.Hour), Cents: 200}, {At: at(30 * time.Minute), Cents: 100},
+		{At: at(20 * time.Minute), Cents: 50, Outside: true}, {At: at(10 * time.Minute), Cents: -80, Outside: true}}
+	hist := fakeHistory{tax: tax,
+		totals: []store.ValueSnapshot{{At: at(2 * time.Hour), ValueCents: 9_850, ContributedCents: 10_000},
+			{At: at(15 * time.Minute), ValueCents: 9_900, ContributedCents: 10_050}},
+		groups: map[string]store.ValueSnapshot{"v3": {ValueCents: 9_650, ContributedCents: 9_800}, "legacy": {},
+			"money": {ValueCents: 200, ContributedCents: 200}},
+		deployed: []store.ValueSnapshot{{At: at(2 * time.Hour), ValueCents: 9_650}, {At: at(15 * time.Minute), ValueCents: 9_550}}}
+	w, err := loadWindow(context.Background(), hist, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	books := []runner.Book{{Engine: "v3", Series: "KXBTC15M", Buckets: []runner.BucketBook{{BucketID: 1, Name: "kalshi15m3 Value v3",
+		Engine: "v3", World: "real", Version: 3, CashCents: 9_500}}}}
+	capital := store.Capital{Money: store.MoneyBuckets{TaxReserve: 270, TaxFromOutside: -30, External: 9_970},
+		Buckets: []store.BucketCapital{{ID: 1, Version: 3, ContributedCents: 9_700}}, ReadAt: now}
+	raw, _ := json.Marshal(homeDoc(testSources(books, capital), "1H", w, now, nil))
+	var got struct {
+		Total struct {
+			Value       int64   `json:"value_cents"`
+			Earned      int64   `json:"earned_cents"`
+			Pct         float64 `json:"earned_pct"`
+			Contributed int64   `json:"contributed_cents"`
+			Lifetime    int64   `json:"lifetime_earned_cents"`
+		}
+		Series      [][2]int64
+		Deployed    [][2]int64 `json:"deployed_series"`
+		Money       map[string]int64
+		Composition []struct {
+			Key    string
+			Value  int64  `json:"value_cents"`
+			Earned *int64 `json:"earned_cents"`
+		}
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	// Trading lost $0.50 over the hour and $1.00 was set aside: -$1.50. Over its life the house
+	// has $95.00 of the owners' $100.00: $2.00 lost trading, $3.00 owed in tax.
+	if tt := got.Total; tt.Value != 9_500 || tt.Earned != -150 || tt.Contributed != 10_000 || tt.Lifetime != -500 {
+		t.Errorf("total: %+v", tt)
+	}
+	if want := -150.0 / 9_650 * 100; got.Total.Pct < want-1e-9 || got.Total.Pct > want+1e-9 {
+		t.Errorf("earned %v%%, want %v%% of what the house held then, the reserve left out", got.Total.Pct, want)
+	}
+	var value, earned int64
+	for _, c := range got.Composition {
+		if c.Earned == nil {
+			t.Fatalf("%s earned null", c.Key)
+		}
+		value, earned = value+c.Value, earned+*c.Earned
+	}
+	last := got.Composition[len(got.Composition)-1]
+	if last.Key != "tax" || last.Value != -270 || *last.Earned != -100 || value != 9_500 || earned != -150 {
+		t.Errorf("the lines add to %d and %d with the tax line %+v", value, earned, last)
+	}
+	if got.Money["tax_reserve_cents"] != 270 {
+		t.Errorf("the reserve still holds its cash until the bill is paid: %v", got.Money)
+	}
+	// Each point less what the reserve held then: $2.00, then $3.50, then $2.70.
+	want := [][2]int64{{at(2 * time.Hour).Unix(), 9_650}, {at(15 * time.Minute).Unix(), 9_550}, {now.Unix(), 9_500}}
+	if len(got.Series) != 3 || got.Series[0] != want[0] || got.Series[1] != want[1] || got.Series[2] != want[2] {
+		t.Errorf("series %v, want %v", got.Series, want)
+	}
+	if len(got.Deployed) != 3 || got.Deployed[1] != [2]int64{at(15 * time.Minute).Unix(), 9_550} || got.Deployed[2] != [2]int64{now.Unix(), 9_500} {
+		t.Errorf("deployed series %v", got.Deployed)
 	}
 }
 
@@ -642,7 +730,9 @@ func fourGroupWorld(now time.Time) ([]runner.Book, store.Capital, fakeHistory) {
 	capital := store.Capital{ReadAt: now, Money: store.MoneyBuckets{Winnings: 1_000, Replenishment: 41, TaxReserve: 300, External: 216_341},
 		Buckets: []store.BucketCapital{{ID: 1, Version: 1, ContributedCents: 15_000}, {ID: 30, Version: 2, ContributedCents: 100_000}, {ID: 20, Version: 2, Anti: true, ContributedCents: 100_000}}}
 	at := now.Add(-2 * time.Hour)
+	// The reserve's $3.00 was set aside three hours ago, before any range the tests ask for begins.
 	hist := fakeHistory{totals: []store.ValueSnapshot{{At: at, ValueCents: 216_000, ContributedCents: 216_341}},
+		tax: store.TaxHistory{{At: now.Add(-3 * time.Hour), Cents: 300}},
 		groups: map[string]store.ValueSnapshot{
 			"strategies": {At: at, ValueCents: 99_500, ContributedCents: 100_000},
 			"anti":       {At: at, ValueCents: 100_200, ContributedCents: 100_000},
@@ -698,7 +788,7 @@ func TestThreeGroupsAddUp(t *testing.T) {
 	now := time.Unix(1_790_000_000, 0)
 	books, capital, hist := fourGroupWorld(now)
 	doc, raw := composed(t, books, capital, hist, now)
-	if keys := compositionKeys(doc); strings.Join(keys, " ") != "v3 legacy money" {
+	if keys := compositionKeys(doc); strings.Join(keys, " ") != "v3 legacy money tax" {
 		t.Fatalf("composition order: %v\n%s", keys, raw)
 	}
 	if live := doc.Composition[0]; live.Key != "v3" || live.Label != "Live engine" || live.Buckets != 0 || live.Value != 0 || live.Earned == nil || *live.Earned != 0 {
@@ -710,8 +800,11 @@ func TestThreeGroupsAddUp(t *testing.T) {
 	if money := doc.Composition[2]; money.Key != "money" || money.Label != "Money buckets" || money.Buckets != 4 || money.Earned == nil || *money.Earned != 0 {
 		t.Errorf("money line: %+v", money)
 	}
-	if doc.Total.Earned == nil || *doc.Total.Earned != -139 {
-		t.Errorf("total earned %v, want -139", doc.Total.Earned)
+	if tax := doc.Composition[3]; tax.Key != "tax" || tax.Label != "Tax owed" || tax.Value != -300 || tax.Earned == nil || *tax.Earned != 0 {
+		t.Errorf("tax line: %+v; set aside before the range, it owes $3.00 and cost nothing within it", tax)
+	}
+	if doc.Total.Earned == nil || *doc.Total.Earned != -139 || doc.Total.Value != 214_520+1_341-300 {
+		t.Errorf("total earned %v, want -139; value %d, want the reserve left out", doc.Total.Earned, doc.Total.Value)
 	}
 }
 
@@ -733,10 +826,10 @@ func TestLiveEngineGroupAddsUpToTheTotal(t *testing.T) {
 		}
 		earnedSum += *c.Earned
 	}
-	if strings.Join(keys, " ") != "v3 legacy money" {
+	if strings.Join(keys, " ") != "v3 legacy money tax" {
 		t.Errorf("composition order: %v", keys)
 	}
-	if value != doc.Total.Value || doc.Total.Value != 215_861+199_850 {
+	if value != doc.Total.Value || doc.Total.Value != 215_861-300+199_850 {
 		t.Errorf("composition adds up to %d, total is %d", value, doc.Total.Value)
 	}
 	if doc.Total.Earned == nil || earnedSum != *doc.Total.Earned || earnedSum != -139-150 {

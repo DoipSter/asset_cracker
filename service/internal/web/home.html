@@ -371,7 +371,7 @@ footer a{color:inherit;text-decoration:underline;text-underline-offset:2px}
   <section id="p-home" aria-label="Home">
     <div class="ledger">
       <div class="lede">
-        <span class="k">Total value · all buckets, marked to market</span>
+        <span class="k">Total value · all buckets, marked to market, less taxes owed</span>
         <p class="total" id="total">—</p>
         <div class="gainwrap" id="gainwrap">
           <button type="button" class="earn" id="earn" aria-expanded="false" aria-controls="gain">&nbsp;</button>
@@ -476,6 +476,11 @@ function sparkPath(pts,w,h){pts=cleanPts(pts);if(pts.length<2)return null;
   if(hi===lo){hi+=1;lo-=1}var d="",y=function(v){return(h-1)-(v-lo)/(hi-lo)*(h-2)};
   pts.forEach(function(p,i){d+=(i?"L":"M")+((p[0]-x0)/((x1-x0)||1)*w).toFixed(1)+" "+y(p[1]).toFixed(1)});
   return{d:d,y0:y(pts[0][1]),yn:y(pts[pts.length-1][1])}}
+/* sparkPaths draws several series on one shared axis, x and y, so their gaps and slopes compare; the first must have two points */
+function sparkPaths(list,w,h){list=list.map(cleanPts);if(list[0].length<2)return null;
+  var x0=Infinity,x1=-Infinity,lo=Infinity,hi=-Infinity;list.forEach(function(pts){pts.forEach(function(p){x0=Math.min(x0,p[0]);x1=Math.max(x1,p[0]);lo=Math.min(lo,p[1]);hi=Math.max(hi,p[1])})});
+  if(hi===lo){hi+=1;lo-=1}var y=function(v){return(h-1)-(v-lo)/(hi-lo)*(h-2)};
+  return list.map(function(pts){if(pts.length<2)return null;var d="";pts.forEach(function(p,i){d+=(i?"L":"M")+((p[0]-x0)/((x1-x0)||1)*w).toFixed(1)+" "+y(p[1]).toFixed(1)});return{d:d,y0:y(pts[0][1]),yn:y(pts[pts.length-1][1])}})}
 function assets(){var l=objs((S.home||{}).assets).filter(function(a){return str(a.coin)});return l.length?l:DEF_COINS.map(function(c){return{coin:c}})}
 function coins(){return assets().map(function(a){return a.coin})}
 function assetOf(c){var a=assets();for(var i=0;i<a.length;i++)if(a[i].coin===c)return a[i];return null}
@@ -591,8 +596,10 @@ function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.to
   else when=SCALE_WORDS[rg]||rg;
   setHTML($("earn"),'<span class="f '+c+'">'+sgn(e)+'</span><span class="f '+c+'">'+pct(p)+"</span><em>earned "+esc(when)+"</em>"+(num(t.unmarked_bets)>0?"<em> · "+t.unmarked_bets+" open bet"+(t.unmarked_bets>1?"s have":" has")+" no bid right now, counted at $0, so the total reads low until "+(t.unmarked_bets>1?"they settle":"it settles")+"</em>":""));
   chips($("scale"),SCALES,S.scale,"s");
-  var sp=sparkPath(h.series,300,34);
-  setHTML($("spark"),sp?'<svg class="spark" viewBox="0 0 300 34" preserveAspectRatio="none" role="img" aria-label="Total value over the period"><line x1="0" x2="300" y1="'+sp.y0.toFixed(1)+'" y2="'+sp.y0.toFixed(1)+'" stroke="var(--rule)" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/><path d="'+sp.d+'" fill="none" stroke="var(--ink)" stroke-opacity=".55" stroke-width="1.25" vector-effect="non-scaling-stroke"/></svg>':"");
+  /* Deployed capital is drawn on the total's own axis: the gap between the lines is the money buckets, and the dashed line falling alone is capital leaving the strategies */
+  var sps=sparkPaths([h.series,h.deployed_series],300,34),sp=sps&&sps[0],dp=sps&&sps[1],TOT='stroke="var(--ink)" stroke-opacity=".55" stroke-width="1.25"',DEP='stroke="var(--mute)" stroke-width="1.25" stroke-dasharray="4 3"';
+  setHTML($("spark"),sp?'<svg class="spark" viewBox="0 0 300 34" preserveAspectRatio="none" role="img" aria-label="Total value'+(dp?" and deployed capital":"")+' over the period"><line x1="0" x2="300" y1="'+sp.y0.toFixed(1)+'" y2="'+sp.y0.toFixed(1)+'" stroke="var(--rule)" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/>'+(dp?'<path d="'+dp.d+'" fill="none" '+DEP+' vector-effect="non-scaling-stroke"/>':"")+'<path d="'+sp.d+'" fill="none" '+TOT+' vector-effect="non-scaling-stroke"/></svg>'+
+    (dp?'<p class="leg"><svg width="16" height="6" aria-hidden="true"><line x1="0" x2="16" y1="3" y2="3" '+TOT+'/></svg> total &nbsp;<svg width="16" height="6" aria-hidden="true"><line x1="0" x2="16" y1="3" y2="3" '+DEP+'/></svg> deployed capital</p>':""):"");
   var bank=h.bank&&typeof h.bank==="object"?h.bank:{},bankName=str(bank.name)||"The bank",opened=bank.opened_at?iso(bank.opened_at):"";
   var rows='<div class="row hd" data-acct="bank"><span class="k">'+esc(bankName)+'</span><span class="k v">Value</span>'+dots("bank",bankName)+'</div>';
   rows+='<p class="what">'+(opened?"Opened "+esc(opened)+". ":"")+"Buckets are allocated from this bank. Right-click an account, or its ⋯, to move money or schedule a payday.</p>";
@@ -600,12 +607,14 @@ function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.to
   var live=by.v3||{},b0=num(live.buckets)===0,none=b0&&!num(live.value_cents)&&!num(live.earned_cents),closed=b0&&!none;
   /* buckets counts LIVE buckets only, so a group whose buckets all ran out still has 0 of them and a real earned figure: that line is drawn normally and says the buckets are closed */
   rows+=compLine("Deployed capital",null,live.value_cents,{sheet:true,buckets:live.buckets,quiet:none,note:COMP_NOTES.v3+(none?" · no buckets yet":closed?" · all buckets closed":"")});
-  objs(h.composition).forEach(function(r){if(r.key==="v3"||r.key==="legacy"||r.key==="money")return;rows+=compLine(r.label||r.key||"—",null,r.value_cents,{sheet:true,buckets:r.buckets})});
+  objs(h.composition).forEach(function(r){if(r.key==="v3"||r.key==="legacy"||r.key==="money"||r.key==="tax")return;rows+=compLine(r.label||r.key||"—",null,r.value_cents,{sheet:true,buckets:r.buckets})});
   /* Cash still held. The gain, including fees paid, is the floating set opened from the earned line.
      Each account carries the rule's rate into it, when a rule is set, and opens its menu: money out, money in, a payday. */
   var m=money,pol=(S.controls||{}).policy||{},ruleOn=ruleSet(pol);
   MONEY.forEach(function(p){var bps=num(pol[p[3]]);
     rows+=compLine(p[0],null,m[p[1]],{sheet:true,quiet:num(m[p[1]])===0,acct:p[2],rate:ruleOn&&bps!=null?pc(bps):""})});
+  /* What the tax reserve holds is owed, not the house's: the account keeps the cash until the bill is paid, and this line takes it off the total */
+  if(by.tax)rows+=compLine("Less taxes owed",null,by.tax.value_cents,{sheet:true,quiet:!num(by.tax.value_cents)});
   rows+='<div class="row sum"><span>Total value</span><span class="f v'+(v<0?" dn":"")+'">'+fig(v,1)+'</span></div><hr class="dbl" style="margin:0">';
   /* The fee has already left the cash, so it is already inside the earned figure. On the whole
      life the two lines are that figure split: the result before the fee, then the fee, and they
@@ -615,7 +624,9 @@ function renderHome(){var h=S.home||{},t=h.total&&typeof h.total==="object"?h.to
     gain+=compLine("Before fees",liveEarn+feesPaid,null,{noValue:true});
     gain+=compLine("Fees paid",-feesPaid,null,{noValue:true});
   }else gain+=compLine("Deployed capital",liveEarn,null,{noValue:true});
-  if(e!=null&&liveEarn!=null&&e!==liveEarn)gain+=compLine("Other",e-liveEarn,null,{noValue:true});
+  var taxEarn=num((by.tax||{}).earned_cents)||0;
+  if(taxEarn)gain+=compLine("Set aside for tax",taxEarn,null,{noValue:true});
+  if(e!=null&&liveEarn!=null&&e!==liveEarn+taxEarn)gain+=compLine("Other",e-liveEarn-taxEarn,null,{noValue:true});
   gain+='<div class="row sum"><span>Earned '+esc(when)+'</span><span class="f e '+c+'">'+fig(e,0,1)+"</span></div>";
   setHTML($("gain"),gain);
   var arch=by.legacy,held=arch&&(num(arch.value_cents)||num(arch.buckets));

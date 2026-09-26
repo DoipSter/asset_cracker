@@ -826,6 +826,10 @@ type MoneyBuckets struct {
 	// External is everything the owners have put in from outside, to date. It is not a bucket, so
 	// it is left out of the status document; the value snapshots use it to tell earning from funding.
 	External int64 `json:"-"`
+	// TaxFromOutside is the part of TaxReserve the owners moved in or out themselves (a tax bill
+	// paid from the reserve is negative). TaxReserve less this is what the house set aside, the
+	// debit the home page counts against its earnings (TaxHistory.SetAside, now).
+	TaxFromOutside int64 `json:"-"`
 }
 
 // MoneyBucketBalances reads them from the ledger.
@@ -864,5 +868,15 @@ func (s *Store) MoneyBucketBalances(ctx context.Context) (MoneyBuckets, error) {
 			m.External = -cents // the outside world's balance goes down as money comes in
 		}
 	}
-	return m, rows.Err()
+	if err := rows.Err(); err != nil {
+		return m, err
+	}
+	// The same test TaxReserveMoves makes of each move: the owners on the other side.
+	err = s.pool.QueryRow(ctx, `
+		select coalesce(sum(e.amount_cents), 0)::bigint
+		  from ledger_entry e
+		  join ledger_account a on a.id = e.account_id and a.kind = 'tax_reserve' and a.mode = 'sim'
+		 where exists (select 1 from ledger_entry x join ledger_account xa on xa.id = x.account_id
+		                where x.transfer_id = e.transfer_id and xa.kind = 'external')`).Scan(&m.TaxFromOutside)
+	return m, err
 }

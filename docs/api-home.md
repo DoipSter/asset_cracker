@@ -17,7 +17,7 @@ The balance sheet. Cheap: served from memory and the once-a-minute value snapsho
   "simulated": true, "release": "87a2100", "as_of": 1790000000.0,
   "healthy": true, "halted": [],
   "total": {
-    "value_cents": 2567890,          // everything: every live bucket marked to market, plus the four money buckets
+    "value_cents": 2567890,          // every live bucket marked to market, plus the four money buckets, less the tax owed (below)
     "earned_cents": -1234,           // value now minus value at the start of the range
     "earned_pct": -0.05,
     "range": "24H",
@@ -27,6 +27,7 @@ The balance sheet. Cheap: served from memory and the once-a-minute value snapsho
     "unrealized_cents": 310          // open bets marked at the bid, minus their cost
   },
   "series": [[1789950000, 2569124], [1789950060, 2569001]],   // total value over the range, oldest first, at most 300 points
+  "deployed_series": [[1789950000, 598000], [1789950060, 597880]],   // deployed capital (the live engine's line) over the same range
   "money": { "deployed_cents": 2560000, "winnings_cents": 0, "replenishment_cents": 0, "tax_reserve_cents": 0, "fee_reserve_cents": 0, "venue_fees_paid_cents": 8389 },
   "composition": [                   // adds up to total.value_cents, in this order; the page rules a line between each
     { "key": "strategies", "label": "Strategies",       "buckets": 6,  "value_cents": 598000,  "earned_cents": -2100 },
@@ -82,8 +83,8 @@ How the figures are made (added when the API was built, 2026-09-21; all additive
   at or before the start of the range. It can therefore be a few minutes older than the range
   asked for, late in a round when a losing side had no bid, and older still if the service was
   down then. `ALL` likewise starts from the first fully priced snapshot.
-- `composition` is five lines, always in the order strategies, anti, v1, v3, money, and always all
-  five: a group with no buckets is sent with `buckets: 0` and zeros, not left out. The third
+- `composition` is four lines, always in the order v3, legacy, money, tax (five before the old
+  engines were archived: strategies, anti, v1, v3, money), and always all of them: a group with no buckets is sent with `buckets: 0` and zeros, not left out. The third
   engine (`v3`, fills limited to what the recorded book displayed) has a group of its own
   because "strategies" against "anti" is a paired comparison of the same six names, and the third
   engine has no twins; inside "strategies" it would break the pairing. A page should render
@@ -129,6 +130,23 @@ How the figures are made (added when the API was built, 2026-09-21; all additive
 - `recording_error` (string) appears when no value snapshot has been written for five minutes (a
   convention: one skipped minute is routine, between a round's close and its settlement), with
   the writer's own reason. The page shows it as a notice; nothing else would say so short of the log.
+- **Tax owed is a debit, not the house's money** (added 2026-09-25, TSK-51, at the owner's word:
+  "taxes are not going to somehow be re-added"). What the tax reserve holds is owed, so
+  `total.value_cents` and every `series` point leave out what the reserve held at that moment,
+  and money the house sets aside in it counts against `earned_cents`, `earned_pct` and
+  `lifetime_earned_cents` when it is set aside. The owners' own moves between the reserve and
+  outside (a tax bill paid from it) change neither: that money had already left. So
+  `contributed_cents` also leaves out those moves. The reserve's cash stays where it is:
+  `money.tax_reserve_cents` and the `money` line still hold it, and the last line of `composition` takes it
+  back off, `{"key": "tax", "label": "Tax owed", "buckets": 0, "value_cents": -reserve,
+  "earned_cents": -(set aside over the range)}`, so the lines still add up to the total in value
+  and in earned. The value snapshots are unchanged and still count the reserve; the page's
+  figures take it off on read, from the reserve's ledger history, so a range that starts before
+  this release is measured the same way as one after it.
+- `deployed_series` (added 2026-09-25, TSK-51) is the live engine's group, `v3`, as `[unix seconds,
+  cents]`: the same snapshots and thinning as `series`, ending with the group's value right now,
+  which is the balance sheet's "Deployed capital". It is value, not earnings: a bucket seeded or
+  closed in the range moves it, as does the sustainment allocation taken out of a bucket.
 - Snapshots are looked up at most once a minute per range, so `earned_cents` moves with the live
   value every poll but its starting point moves once a minute.
 

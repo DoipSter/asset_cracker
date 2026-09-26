@@ -219,8 +219,10 @@ type window struct {
 	have     bool                           // false before any snapshot exists
 	complete bool                           // false when history is shorter than the range
 	groups   map[string]store.ValueSnapshot // the groups, from the same batch as `then`
-	series   [][2]int64
-	realised map[string]int64 // per coin, on rounds settled since `then`; nil if it could not be read
+	series   [][2]int64                     // the total, less the tax owed at each point
+	deployed [][2]int64                     // the live engine's group: deployed capital
+	tax      store.TaxHistory               // the tax reserve's moves, to know what was owed at `then`
+	realised map[string]int64               // per coin, on rounds settled since `then`; nil if it could not be read
 	err      string
 }
 
@@ -229,13 +231,14 @@ type homeReader interface {
 	FirstSnapshot(ctx context.Context, scope, key string) (store.ValueSnapshot, bool, error)
 	SnapshotsTakenAt(ctx context.Context, scope string, keys []string, at time.Time) (map[string]store.ValueSnapshot, error)
 	SnapshotSeries(ctx context.Context, scope, key string, since time.Time, maxPoints int) ([][2]int64, error)
+	TaxReserveMoves(ctx context.Context) (store.TaxHistory, error)
 	RealisedByCoin(ctx context.Context, since time.Time) (map[string]int64, error)
 }
 
 // loadWindow finds the snapshot a range starts from and everything that hangs off it. When the
 // history is shorter than the range it falls back to the earliest snapshot and says so.
 func loadWindow(ctx context.Context, db homeReader, length time.Duration, now time.Time) (window, error) {
-	w := window{fetched: now, series: [][2]int64{}}
+	w := window{fetched: now, series: [][2]int64{}, deployed: [][2]int64{}}
 	var err error
 	if length > 0 {
 		if w.then, w.have, err = db.SnapshotAt(ctx, "total", "all", now.Add(-length)); err != nil {
@@ -259,8 +262,18 @@ func loadWindow(ctx context.Context, db homeReader, length time.Duration, now ti
 	if w.groups, err = db.SnapshotsTakenAt(ctx, "group", keys, w.then.At); err != nil {
 		return w, err
 	}
-	// One point is left for the value right now, which the handler adds.
+	// One point is left for the value right now, which the handler adds. The snapshots count the
+	// tax reserve in the total, as the house's; what it held at each point is taken off here.
+	if w.tax, err = db.TaxReserveMoves(ctx); err != nil {
+		return w, err
+	}
 	if w.series, err = db.SnapshotSeries(ctx, "total", "all", w.then.At, maxPoints-1); err != nil {
+		return w, err
+	}
+	for i, p := range w.series {
+		w.series[i][1] = p[1] - w.tax.Reserve(time.Unix(p[0], 0))
+	}
+	if w.deployed, err = db.SnapshotSeries(ctx, "group", "v3", w.then.At, maxPoints-1); err != nil {
 		return w, err
 	}
 	if w.realised, err = db.RealisedByCoin(ctx, w.then.At); err != nil {
@@ -295,6 +308,9 @@ func (c *windows) get(db homeReader, key string, length time.Duration) window {
 		if w.series == nil {
 			w.series = [][2]int64{}
 		}
+		if w.deployed == nil {
+			w.deployed = [][2]int64{}
+		}
 		w.err, w.fetched = "value history could not be read; earned figures may be out of date", now.Add(-50*time.Second)
 		if !w.have {
 			w.err = "value history could not be read; earned figures are unknown"
@@ -318,7 +334,23 @@ func earned(now runner.Line, then store.ValueSnapshot, have bool) (cents int64, 
 	return cents, pct
 }
 
-var groupLabels = map[string]string{"v3": "Live engine", "legacy": "Archived engines", "money": "Money buckets"}
+// netEarned is earned with the tax reserve taken as owed (store.TaxHistory): the total then and
+// now both leave out what the reserve held, and what the house set aside in it over the range,
+// `debit`, is taken off what was earned. The ledger's side must have been read.
+func netEarned(now runner.Line, m store.MoneyBuckets, w window) (cents int64, pct float64, debit int64) {
+	if !w.have {
+		return 0, 0, 0
+	}
+	debit = (m.TaxReserve - m.TaxFromOutside) - w.tax.SetAside(w.then.At)
+	cents, _ = earned(now, w.then, true)
+	cents -= debit
+	if base := w.then.ValueCents - w.tax.Reserve(w.then.At); base > 0 {
+		pct = float64(cents) / float64(base) * 100
+	}
+	return cents, pct, debit
+}
+
+var groupLabels = map[string]string{"v3": "Live engine", "legacy": "Archived engines", "money": "Money buckets", "tax": "Tax owed"}
 
 // batchAccountsForTotal says whether the group rows found in the `then` batch add up to that
 // batch's total, in value and in contributed. It is the test the zero-baseline rule (groupEarned)
@@ -451,17 +483,22 @@ func homeDoc(src Sources, key string, w window, now time.Time, changes map[strin
 			halted = append(halted, strings.TrimSpace(b.Engine+" "+b.Series)+": "+b.Halted)
 		}
 	}
-	cents, pct := earned(v.Total, w.then, w.have)
+	// What the tax reserve holds is owed, so it is not in the total; the owners' own moves in and
+	// out of it are not money they put into the house either. Before the ledger's side has been
+	// read both are 0, and the total already leaves every money bucket out.
+	m := capital.Money
+	value, contributed := v.Total.ValueCents-m.TaxReserve, v.Total.ContributedCents-m.TaxFromOutside
+	cents, pct, debit := netEarned(v.Total, m, w)
 	since := unixf(now)
 	if w.have {
 		since = unixf(w.then.At)
 	}
-	total := map[string]any{"value_cents": v.Total.ValueCents, "earned_cents": nil, "earned_pct": nil, "range": key, "since": since,
+	total := map[string]any{"value_cents": value, "earned_cents": nil, "earned_pct": nil, "range": key, "since": since,
 		"window_complete": w.complete, "at_risk_cents": v.Total.AtRiskCents,
 		"unrealized_cents": v.Total.ValueCents - v.Total.CashCents - v.Total.AtRiskCents,
 		"unmarked_bets":    v.Total.Unmarked, "contributed_cents": nil, "lifetime_earned_cents": nil}
 	if known {
-		total["contributed_cents"], total["lifetime_earned_cents"] = v.Total.ContributedCents, v.Total.ValueCents-v.Total.ContributedCents
+		total["contributed_cents"], total["lifetime_earned_cents"] = contributed, value-contributed
 	}
 	if known && historyKnown {
 		total["earned_cents"], total["earned_pct"] = cents, pct
@@ -482,6 +519,13 @@ func homeDoc(src Sources, key string, w window, now time.Time, changes map[strin
 		}
 		composition = append(composition, row)
 	}
+	// The debit line: the money group above still holds the reserve's cash, and this takes it
+	// back off, so the lines add up to the total in value and in earned.
+	tax := map[string]any{"key": "tax", "label": groupLabels["tax"], "buckets": 0, "value_cents": -m.TaxReserve, "earned_cents": nil}
+	if known && historyKnown {
+		tax["earned_cents"] = -debit
+	}
+	composition = append(composition, tax)
 
 	byCoin := map[string]runner.Line{}
 	for _, c := range v.Coins {
@@ -513,9 +557,16 @@ func homeDoc(src Sources, key string, w window, now time.Time, changes map[strin
 	}
 
 	series := append([][2]int64{}, w.series...)
-	series = append(series, [2]int64{now.Unix(), v.Total.ValueCents})
+	series = append(series, [2]int64{now.Unix(), value})
+	var live int64
+	for _, g := range v.Groups {
+		if g.Key == "v3" {
+			live = g.ValueCents
+		}
+	}
+	deployed := append(append([][2]int64{}, w.deployed...), [2]int64{now.Unix(), live})
 	doc := map[string]any{"simulated": true, "release": src.Release, "as_of": unixf(now), "healthy": src.Healthy() && capitalOK,
-		"halted": halted, "total": total, "series": series, "money": moneyDoc(capital.Money, deployedCents(v), known),
+		"halted": halted, "total": total, "series": series, "deployed_series": deployed, "money": moneyDoc(capital.Money, deployedCents(v), known),
 		"composition": composition, "assets": list}
 	if w.err != "" {
 		doc["history_error"] = w.err
