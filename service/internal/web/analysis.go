@@ -78,6 +78,7 @@ func AnalysisRoutes(ctx context.Context, mux *http.ServeMux, db *store.Store, ga
 	c := newAnalysisCache()
 	c.ctx, c.gate = ctx, gate
 	mux.HandleFunc("GET /api/analysis", c.handle(db))
+	breakdownRoute(mux, db)
 	if db != nil {
 		go warm(ctx, analysisEvery, func() { c.refreshNow(db) })
 	}

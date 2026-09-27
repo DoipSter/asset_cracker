@@ -314,6 +314,20 @@ summary h2{flex:1}summary .f{font-size:13px;font-weight:600}
 .lb .m{font:11px/1.45 var(--sans);color:var(--mute);margin-left:24px;display:flex;flex-wrap:wrap;gap:0 10px;align-items:baseline}
 .lb .m .f{font-size:10.5px;color:var(--ink)}
 .lb .fl{margin:2px 0 0 24px;font-style:italic;font-size:12.5px;color:var(--warn)}
+/* the breakdown: one version's results, spread and cut */
+.bdpick{display:flex;align-items:center;gap:8px;margin:6px 0 8px;font:600 10px/1.2 var(--sans);letter-spacing:.12em;text-transform:uppercase;color:var(--mute)}
+.bdpick select{font:14px var(--serif);color:var(--ink);background:var(--paper);border:1px solid var(--ink);padding:4px 6px;max-width:100%;min-height:32px}
+.bdm{font:11.5px/1.55 var(--sans);color:var(--mute);display:flex;flex-wrap:wrap;gap:0 12px;margin:2px 0}
+.bdm .f{color:var(--ink);font-size:11.5px}
+.chart .bdh{position:relative;height:150px;border-bottom:1px solid var(--rule);margin:10px 0 22px}
+.bdh svg{display:block;width:100%;height:100%}
+.bdcuts{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,440px),1fr));gap:4px 32px;margin:6px 0 0}
+.bdcuts>*{min-width:0}
+.bdcuts table{width:100%}
+.bdcuts th,.bdcuts td{white-space:nowrap}
+.bdcuts td:first-child{white-space:normal}
+.bdcuts .w{width:112px;padding-left:10px}
+.fp{display:block;width:112px;height:14px;overflow:visible}
 .scroll{overflow-x:auto}
 footer{margin:22px 0 8px;padding-top:6px;border-top:1px solid var(--ink);font:11px/1.4 var(--sans);color:var(--mute)}
 footer a{color:inherit;text-decoration:underline;text-underline-offset:2px}
@@ -1154,6 +1168,54 @@ function scoreTable(title,rows,key){rows=objs(rows);if(!rows.length)return"";
   return'<div class="scroll"><table><thead><tr><th>'+title+"</th><th>Model</th><th>Market</th><th>Diff</th><th>Verdict</th></tr></thead><tbody>"+rows.map(function(r){var z=!num(r.n_windows),res=resolved(r.verdict);
     return"<tr><td>"+esc(str(r[key])||"—")+'</td><td class="f">'+(z?"—":fx(r.brier_model,4))+'</td><td class="f">'+(z?"—":fx(r.brier_market,4))+'</td><td class="f '+(res?(r.diff<0?"up":"dn"):"mu")+'">'+(z?"—"+IP:sdiff(r.diff))+"</td><td>"+vcell(r,NEED_T_CUT)+"</td></tr>"}).join("")+"</tbody></table></div>"}
 function sname(r){return esc(str(r.strategy)||"—")+(r.world==="anti"?" anti":"")+" "+esc(str(r.engine))}
+/* The breakdown: one strategy version's results, spread and cut (api/analysis/breakdown), read when it is shown and
+   at most once a minute. The version shown is the one picked, else the one with the most windows. */
+S.bd={};
+function loadBreakdown(id){if(id==null||busy["bd"+id])return;var c=S.bd[id];if(c&&Date.now()-c.at<60000)return;busy["bd"+id]=1;
+  get("api/analysis/breakdown?version="+encodeURIComponent(id)).then(function(j){busy["bd"+id]=0;S.bd[id]={at:Date.now(),d:j&&typeof j==="object"?j:{}};if(S.pane==="evidence")renderEvidence()})
+    .catch(function(){busy["bd"+id]=0;S.bd[id]={at:Date.now()-45000,d:c?c.d:null,fail:1};if(S.pane==="evidence")renderEvidence()})}
+function bdVersion(lr){var id=S.bdv;if(id!=null&&lr.some(function(r){return r.strategy_version_id===id}))return id;
+  var best=null;lr.forEach(function(r){if(!best||(num(r.windows)||0)>(num(best.windows)||0))best=r});return best?best.strategy_version_id:null}
+/* histBars: the windows' P&L as bars, losses red and gains green, the mean a solid mark and the median a dashed one; an end bar
+   that holds every window beyond it is labelled "or less" / "or more" */
+function histBars(bins,w){bins=objs(bins).filter(function(b){return num(b.lo_cents)!=null&&num(b.hi_cents)!=null&&num(b.n)!=null});if(!bins.length)return"";
+  var W=600,H=150,x0=bins[0].lo_cents,x1=bins[bins.length-1].hi_cents,top=0;bins.forEach(function(b){top=Math.max(top,b.n)});
+  var X=function(v){return(v-x0)/((x1-x0)||1)*W},Y=function(n){return H-n/(top||1)*(H-8)};
+  var bars=bins.map(function(b){var up=b.lo_cents>=0,x=X(b.lo_cents)+.8,bw=Math.max(.5,X(b.hi_cents)-X(b.lo_cents)-1.6);
+    return'<rect x="'+x.toFixed(1)+'" y="'+Y(b.n).toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+(H-Y(b.n)).toFixed(1)+'" fill="var('+(up?"--up":"--dn")+')" fill-opacity="'+(b.open_below||b.open_above?.35:.7)+'"><title>'+esc(dollars(b.lo_cents)+" to "+dollars(b.hi_cents)+": "+b.n+" window"+(b.n===1?"":"s"))+"</title></rect>"}).join("");
+  var mark=function(v,dash){v=num(v);if(v==null||v<x0||v>x1)return"";return'<line x1="'+X(v).toFixed(1)+'" x2="'+X(v).toFixed(1)+'" y1="0" y2="'+H+'" stroke="var(--ink)" stroke-width="1.2"'+(dash?' stroke-dasharray="3 3"':"")+' vector-effect="non-scaling-stroke"/>'};
+  var lab=function(v,text,side){return'<span class="xl" style="'+side+'">'+esc(text)+"</span>"};
+  var first=bins[0],last=bins[bins.length-1];
+  return'<div class="bdh"><svg viewBox="0 0 '+W+" "+H+'" preserveAspectRatio="none" role="img" aria-label="How the windows\u2019 results are spread">'+
+    (x0<0&&x1>0?'<line x1="'+X(0).toFixed(1)+'" x2="'+X(0).toFixed(1)+'" y1="0" y2="'+H+'" stroke="var(--rule)" vector-effect="non-scaling-stroke"/>':"")+bars+mark(w.mean_cents,false)+mark(w.median_cents,true)+"</svg>"+
+    lab(0,dollars(first.lo_cents)+(first.open_below?" or less":""),"left:0")+(x0<0&&x1>0?lab(0,"$0","left:"+(X(0)/W*100).toFixed(1)+"%;transform:translateX(-50%)"):"")+lab(0,dollars(last.hi_cents)+(last.open_above?" or more":""),"right:0")+"</div>"}
+/* cutTable: one cut, each row's return per dollar with a whisker of two standard errors; the axis is shared by every cut (lim) */
+function cutTable(title,rows,lim){rows=objs(rows);if(!rows.length)return"";
+  var fpl=function(r){var v=num(r.per_dollar),se=num(r.per_dollar_se)||0;if(v==null)return"";var X=function(u){return 60+Math.max(-1,Math.min(1,u/lim))*56},lo=v-2*se,hi=v+2*se,clear=se>0&&(lo>0||hi<0);
+    return'<svg class="fp" viewBox="0 0 120 14" aria-hidden="true"><line x1="60" x2="60" y1="0" y2="14" stroke="var(--rule)"/><line x1="'+X(lo).toFixed(1)+'" x2="'+X(hi).toFixed(1)+'" y1="7" y2="7" stroke="var(--mute)" stroke-width="1.4"/>'+
+      '<circle cx="'+X(v).toFixed(1)+'" cy="7" r="3.2" fill="var('+(clear?(v>0?"--up":"--dn"):"--mute")+')"/></svg>'};
+  return'<div class="scroll"><table><thead><tr><th>'+esc(title)+'</th><th>Bets</th><th>Won</th><th>P&amp;L</th><th>¢/$</th><th class="w">± 2 s.e.</th></tr></thead><tbody>'+rows.map(function(r){
+    return"<tr><td>"+esc(str(r.key)||"—")+'</td><td class="f">'+(num(r.bets)!=null?r.bets:"—")+'</td><td class="f">'+(num(r.win_rate)!=null?Math.round(r.win_rate*100)+"%":"—")+'</td><td class="f '+cls(r.pnl_cents)+'">'+fig(r.pnl_cents,0,1)+'</td><td class="f '+cls(r.per_dollar)+'">'+(num(r.per_dollar)!=null?(r.per_dollar>0?"+":"")+fx(r.per_dollar*100,1):"—")+'</td><td class="w">'+fpl(r)+"</td></tr>"}).join("")+"</tbody></table></div>"}
+function bdHTML(lr,vid){var row=null;lr.forEach(function(r){if(r.strategy_version_id===vid)row=r});if(!row)return"";
+  var c=S.bd[vid],d=c&&c.d,out='<div class="sec chart" id="j-breakdown"><span class="k">Breakdown · one strategy at a time</span><h2>How its results are spread</h2>'+
+    '<label class="bdpick">Strategy <select id="bd-pick" aria-label="Strategy to break down">'+lr.map(function(r){return'<option value="'+esc(String(r.strategy_version_id))+'"'+(r.strategy_version_id===vid?" selected":"")+">"+esc(str(r.strategy)||"—")+(r.world==="anti"?" anti":"")+(r.family==="kalshiladder"?" · ladder":"")+"</option>"}).join("")+"</select></label>";
+  if(!d)return out+'<p class="empty">'+(c&&c.fail?"No answer from api/analysis/breakdown yet. Trying again shortly.":"Reading its bets…")+"</p></div>";
+  var w=d.windows&&typeof d.windows==="object"?d.windows:{},b=d.bets&&typeof d.bets==="object"?d.bets:{},k=d.costs&&typeof d.costs==="object"?d.costs:{},n=num(w.n)||0;
+  if(!n)return out+'<p class="empty">No settled bets yet.</p></div>';
+  var sp=function(label,v){return"<span>"+label+' <span class="f">'+v+"</span></span>"};
+  out+='<div class="bdm">'+sp(n+" window"+(n===1?"":"s")+", mean",sgn(w.mean_cents)+" ± "+usd(w.se_cents))+sp("t",fx(w.t,2))+sp("median",sgn(w.median_cents))+sp("SD",usd(w.sd_cents))+sp("skew",fx(w.skew,2))+sp("windows up",Math.round((num(w.share_up)||0)*100)+"%")+"</div>";
+  out+='<div class="bdm">'+sp("middle half",sgn(w.p25_cents)+" to "+sgn(w.p75_cents))+sp("80% within",sgn(w.p10_cents)+" to "+sgn(w.p90_cents))+sp("worst",sgn(w.min_cents))+sp("best",sgn(w.max_cents))+"</div>";
+  out+=histBars(d.histogram,w)+legendHTML([{ink:"var(--ink)",text:"mean"},{ink:"var(--ink)",dashed:true,text:"median"}]);
+  out+='<div class="bdm" style="margin-top:8px">'+sp(num(b.n)+" bets, won",Math.round((num(b.win_rate)||0)*100)+"%")+sp("at",fx((num(b.avg_price)||0)*100,1)+"¢ a contract")+sp("average win",sgn(b.avg_win_cents))+sp("average loss",sgn(b.avg_loss_cents))+sp("per $ staked",((num(b.per_dollar)||0)>0?"+":"")+fx((num(b.per_dollar)||0)*100,1)+"¢")+sp("staked",usd(b.staked_cents))+"</div>";
+  var cuts=[["By roster member",d.by_member],["By entry price",d.by_entry_price],["By coin",d.by_coin],["By time to close",d.by_time_to_close]],lim=.05;
+  /* the shared axis is set by the rows of 20 bets or more, so a row of two cannot squeeze every whisker into a dot; a smaller row runs off the edge */
+  var all=[];cuts.forEach(function(ct){all=all.concat(objs(ct[1]))});var big=all.filter(function(r){return(num(r.bets)||0)>=20});
+  (big.length?big:all).forEach(function(r){var v=Math.abs(num(r.per_dollar)||0)+2*(num(r.per_dollar_se)||0);if(isFinite(v))lim=Math.max(lim,v)});lim=Math.min(lim,1);
+  out+='<div class="bdcuts">'+cuts.map(function(ct){return cutTable(ct[0],ct[1],lim)}).join("")+"</div>";
+  out+='<p class="what" style="margin-top:8px">A dot is coloured only when its whisker clears zero; bets in one window move together, so even a clear one is weaker than it looks, and choosing a rule by looking here is a new version to be judged on windows it has not seen.</p>';
+  var mins=num(k.mean_seconds_to_close);
+  out+='<div class="bdm">'+sp("entry: quoted spread, median",fx((num(k.quoted_spread_median)||0)*100,1)+"¢")+sp("1¢ or less on",Math.round((num(k.share_at_one_cent)||0)*100)+"% of entries")+sp("paid over the mid",fx(k.over_mid_per_contract_cents,2)+"¢ a contract, "+usd(k.over_mid_cents))+sp("fees",fx(k.fee_per_contract_cents,2)+"¢ a contract, "+usd(k.fees_cents))+(mins!=null?sp("before the close, on average",mins>=5400?fx(mins/3600,1)+" h":Math.round(mins/60)+" min"):"")+"</div>";
+  return out+how("How the breakdown is made",d.what)+"</div>"}
 /* how: the method behind a fold. The API's `what` texts are written for the agents reading it; here they are kept, one click away. */
 function how(title,text){text=str(text);return text?'<details class="how"><summary>'+esc(title)+'</summary><p class="what">'+esc(text)+"</p></details>":""}
 /* The evidence pane leads with what happened: the standings and each strategy's P&L drawn over time, then the model against the market
@@ -1182,6 +1244,7 @@ function renderEvidence(){var el=$("p-evidence"),d=S.analysis;
       (num(r.allocated_cents)?"<span>allocated <span class=\"f\">"+usd(r.allocated_cents)+"</span> · kept <span class=\"f "+cls((num(r.lifetime_pnl_cents)||0)-r.allocated_cents)+"\">"+sgn((num(r.lifetime_pnl_cents)||0)-r.allocated_cents)+"</span></span>":"")+"</div>"+
       arr(r.flags).filter(function(fl){return str(fl)&&!/^partial/i.test(fl)}).map(function(fl){return'<div class="fl">⚑ '+esc(fl)+"</div>"}).join("")+"</div>"}).join(""):'<p class="empty">No strategies on the board yet.</p>')+"</div>"+
     how("How the standings are judged",str(lb.what)+(d.conventions&&str(d.conventions.note)?" "+d.conventions.note:""))+"</div>";
+  var vid=bdVersion(lr);if(vid!=null){loadBreakdown(vid);out+=bdHTML(lr,vid)}
   /* the scorecard: the model against the market's own price, and the running mean of each over time */
   out+='<div class="two"><div><div class="sec chart sm" id="j-scorecard"><span class="k">Scorecard · model v. market</span>';
   out+='<div class="verdict"><h3>'+(res?esc(o.verdict.charAt(0).toUpperCase()+o.verdict.slice(1)):"Unresolved, as expected <span>"+(n<NEED_W?n+" of "+NEED_W+" windows":"|t| "+fx(Math.abs(t||0),2)+" of "+NEED_T)+"</span>")+"</h3>"+
@@ -1210,6 +1273,7 @@ function renderEvidence(){var el=$("p-evidence"),d=S.analysis;
 (function(){var w=$("gainwrap"),g=$("gain"),b=$("earn");if(!w||!g||!b)return;
   b.addEventListener("click",function(){g.hidden=!g.hidden;b.setAttribute("aria-expanded",g.hidden?"false":"true")});
   w.addEventListener("mouseleave",function(){g.hidden=true;b.setAttribute("aria-expanded","false")})})();
+$("p-evidence").addEventListener("change",function(e){if(e.target&&e.target.id==="bd-pick"){S.bdv=+e.target.value;renderEvidence()}});
 /* ---------- go ---------- */
 chips($("scale"),SCALES,S.scale,"s");chips($("crange"),CRANGES,S.cr,"c");renderDateline();renderRail();renderBox();route();
 </script>

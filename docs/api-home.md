@@ -458,3 +458,51 @@ displayed on the recorded bid levels when it was made, so it is passed through a
 `stale_reason`. If nothing has been computed yet the answer is **503, still JSON and still this
 shape**: every list empty, `stale` true, `stale_reason` saying why, `computed_at` 0 and
 `coverage.complete` false.
+
+## GET api/analysis/breakdown?version=ID
+
+One strategy version's results cut every way the Evidence page draws them (added 2026-09-27,
+TSK-52). `version` is a `strategy_version_id` from the leaderboard; anything that is not a
+positive integer is a 400, a version that does not exist a 404, and a read that failed a 503.
+Read from the record in a READ ONLY transaction (the ledger, each order's detail, the
+settlements, the recorded book) when asked, and kept a minute per version. It describes; the
+leaderboard's verdict, on windows and corrected for every version tried, is the test.
+
+```json
+{
+  "simulated": true, "strategy_version_id": 25, "family": "kalshi15m", "computed_at": 1790553600.0,
+  "windows": { "n": 241, "mean_cents": 160.4, "sd_cents": 1797.1, "se_cents": 115.8, "t": 1.39,
+               "min_cents": -8253, "p10_cents": -1545, "p25_cents": -369, "median_cents": 165,
+               "p75_cents": 745, "p90_cents": 1485, "max_cents": 8988, "skew": 0.16, "share_up": 0.6515 },
+  "histogram": [ { "lo_cents": -4500, "hi_cents": -4000, "n": 5, "open_below": true }, { "lo_cents": 0, "hi_cents": 500, "n": 76 } ],
+  "bets": { "n": 385, "win_rate": 0.6831, "avg_price": 0.7014, "avg_win_cents": 619.1, "avg_loss_cents": -1017.8,
+            "mean_cents": 100.4, "sd_cents": 1384.1, "pnl_cents": 38654, "staked_cents": 602234, "per_dollar": 0.0642, "fees_cents": 10916 },
+  "by_member": [ { "key": "Favourite (conventions)", "bets": 107, "win_rate": 0.8411, "avg_price": 0.7833, "pnl_cents": 19602,
+                   "staked_cents": 233598, "per_dollar": 0.0839, "per_dollar_se": 0.0536, "sd_cents": 1243.8 } ],
+  "by_entry_price": [], "by_coin": [], "by_time_to_close": [],
+  "costs": { "contracts": 8430, "bets_with_book": 385, "quoted_spread_mean": 0.0118, "quoted_spread_median": 0.01,
+             "share_at_one_cent": 0.8727, "bets_with_mid": 385, "over_mid_per_contract_cents": 0.89, "over_mid_cents": 7519,
+             "fee_per_contract_cents": 1.29, "fees_cents": 10916, "mean_seconds_to_close": 412 },
+  "what": "..."
+}
+```
+
+- A bet is one bucket's money on one settled market, every life of the version together: fills'
+  ledger entries on the bucket's account plus the settlement's payout, fees inside, as the
+  leaderboard counts it. A market counts once every holder's settlement is booked, the rule of
+  `assets[].earned_cents`.
+- `windows` is one figure per window (a close, both coins added), the independent sample:
+  quantiles are percentile_cont's, skew the third moment over the sample sd. The `histogram`'s
+  width is the Freedman-Diaconis rule's rounded to 1, 2 or 5 x 10^n cents, one edge on zero; the
+  first and last bars also hold every window beyond them (`open_below`, `open_above`), so a few
+  far windows do not squeeze the rest into two bars.
+- The cuts count bets. `by_member` is there only for a roster, from the member each order
+  recorded. `by_entry_price` uses the five bands of the 2026-09-23 attribution (strategy_exercise's
+  `by_entry_price`), `by_time_to_close` the scorecard's five bands for the rounds and hours or days
+  for the ladders; a band with no bets is left out. `per_dollar_se` is the ratio estimator's
+  standard error with bets as independent draws, which bets in one window are not: a floor on
+  the noise. The page colours a row only when two of them clear zero.
+- `costs`: `quoted_spread_*` is the recorded book's YES ask less bid in the last snapshot at or
+  before the first buy, up to ten minutes back (dollars); `over_mid_*` is the price paid above the
+  side's mid that the order recorded, per contract and in total; fees are the venue's, per
+  contract and in total. `avg_price` everywhere is weighted by contracts, fees not inside.
