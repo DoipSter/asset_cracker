@@ -19,6 +19,7 @@ func TestImportDirection(t *testing.T) {
 		"config":            {},
 		"health":            {},
 		"coinbase":          {},
+		"spot":              {},
 		"candles":           {"coinbase", "store"},
 		"kalshi":            {"store"},
 		"broker":            {"kalshi"},

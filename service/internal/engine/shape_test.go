@@ -142,7 +142,7 @@ func TestLadderFamily(t *testing.T) {
 	if p.Family != FamilyLadders || p.FamilyOf() != FamilyLadders || (Params{}).FamilyOf() != FamilyRounds || ToShape(p).Family != FamilyLadders {
 		t.Fatalf("family: %+v", p)
 	}
-	if _, err := FromShape(Shape{Name: "x", Exit: "hold", Lambda: 0.5, Family: "spot"}); err == nil {
+	if _, err := FromShape(Shape{Name: "x", Exit: "hold", Lambda: 0.5, Family: "equity"}); err == nil {
 		t.Fatal("an unknown family must be refused")
 	}
 
@@ -175,6 +175,24 @@ func TestLadderFamily(t *testing.T) {
 	}
 	if LongSigmaFromDaily(closes[:5]) != 0 {
 		t.Fatal("fewer than ten closes give no long sigma")
+	}
+}
+
+// Spot is a family with no runner: FromShape accepts it, lambda may be zero, a roster is refused.
+func TestSpotFamily(t *testing.T) {
+	p, err := FromShape(Shape{Name: "Coin", Exit: "hold", Family: FamilySpot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Family != FamilySpot || p.FamilyOf() != FamilySpot || ToShape(p).Family != FamilySpot {
+		t.Fatalf("family: %+v", p)
+	}
+	if p.Lambda != 0 {
+		t.Fatalf("lambda means nothing on spot, got %v", p.Lambda)
+	}
+	if _, err := FromShape(Shape{Name: "Coin", Exit: "hold", Family: FamilySpot,
+		Members: []Member{{Name: "A", Exit: "hold", Lambda: 0.5}}}); err == nil {
+		t.Fatal("a spot roster must be refused")
 	}
 }
 

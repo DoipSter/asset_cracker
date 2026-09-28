@@ -111,8 +111,9 @@ type Params struct {
 
 	// Family is which markets the version trades: "" or "kalshi15m", the 15-minute rounds;
 	// "kalshiladder", the daily and weekly above/below ladders (many legs per coin open at once,
-	// hours to days from their close, priced with the coin's long volatility past an hour). The
-	// family decides which runner holds the version's bucket; the rules above are the same.
+	// hours to days from their close, priced with the coin's long volatility past an hour);
+	// "coinbasespot", Coinbase coins at the last print (no runner yet: a draft cannot be seeded).
+	// The family decides which runner holds the version's bucket when a runner exists.
 	Family string `json:"family,omitempty"`
 
 	Levels     int  `json:"levels"`       // recorded levels an order may walk [FACT: five are recorded]
@@ -173,6 +174,7 @@ const (
 	// The market families. FamilyRounds is the default and the empty string reads as it.
 	FamilyRounds  = "kalshi15m"
 	FamilyLadders = "kalshiladder"
+	FamilySpot    = "coinbasespot"
 )
 
 // FamilyOf is a version's family with the default made explicit.
@@ -414,7 +416,7 @@ func (p Params) validate(plumbing bool) error {
 	if !(p.Lambda >= 0 && p.Lambda <= 1) {
 		fail("lambda %v is outside 0..1", p.Lambda)
 	}
-	if p.Lambda == 0 && !plumbing {
+	if p.Lambda == 0 && !plumbing && p.FamilyOf() != FamilySpot {
 		fail("lambda is 0: the protocol's rule R1 says no version is registered")
 	}
 	// The late window: both numbers or neither, the weight in 0..1 (0 is allowed: inside the
@@ -456,8 +458,14 @@ func (p Params) validate(plumbing bool) error {
 		if p.TauMax <= LongHorizon {
 			fail("a %s version needs tau_max above %v seconds (an hour): its markets close hours to days out", FamilyLadders, LongHorizon)
 		}
+	case FamilySpot:
+		// No close, so no tau_max rule. Lambda is stored if the builder set one and means
+		// nothing: there is no yes/no blend. A roster is a 15-minute clock pick.
+		if len(p.Members) > 0 {
+			fail("a %s version is not a roster", FamilySpot)
+		}
 	default:
-		fail("family %q is not %s or %s", p.Family, FamilyRounds, FamilyLadders)
+		fail("family %q is not %s, %s or %s", p.Family, FamilyRounds, FamilyLadders, FamilySpot)
 	}
 	if !(p.MinVolRatio >= 0 && p.MinVolRatio <= 100) {
 		fail("min_vol_ratio %v is outside 0..100", p.MinVolRatio)

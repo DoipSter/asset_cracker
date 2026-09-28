@@ -324,7 +324,10 @@ tick tables by time and set a retention policy.
    78f5452 on 2026-09-21 at 08:20 PT, with migrations 0010 and 0011. Not yet: the Flutter
    client, anything that writes.
 7. MCP, read-only; then proposals.
-8. More sources and instrument types.
+8. More sources and instrument types. **Started 2026-09-24**: family `coinbasespot` and
+   `service/internal/spot` (paper fill and mark at the last Coinbase print, 60 bps taker
+   convention). No runner, catalogue spot stays `trade: false`, nothing buys. A draft may
+   register; it cannot be seeded until a spot runner exists.
 9. Live broker behind the gates in section 11.
 
 ## 14. Open questions

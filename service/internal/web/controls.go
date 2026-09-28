@@ -119,7 +119,7 @@ type Built struct {
 	Name, Blurb string
 	Params      []byte // engine.Params as JSON
 	Parent      string // "Scalper" or "Value": whose version 2 it descends from
-	Family      string // store.FamilyRounds or store.FamilyLadders: which runner holds its bucket
+	Family      string // store.FamilyRounds, FamilyLadders, or FamilySpot (no runner yet)
 	Control     bool   // a negative control, registered to be caught
 }
 

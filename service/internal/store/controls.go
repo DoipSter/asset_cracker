@@ -57,16 +57,18 @@ type Version3 struct {
 	Status     string `json:"status"`
 	Hypothesis string `json:"hypothesis"`
 	Params     []byte `json:"-"`        // engine.Params as stored; the page's Remix reads a shape from it
-	Family     string `json:"family"`   // kalshi15m (the rounds) or kalshiladder (the daily and weekly ladders)
+	Family     string `json:"family"`   // kalshi15m, kalshiladder, or coinbasespot (no runner yet)
 	Held       bool   `json:"held"`     // a bucket of this version is not frozen: Reap applies
 	Lives      int    `json:"lives"`    // buckets this version has had, frozen ones included: Restake applies when > 0 and not held
 	Archived   bool   `json:"archived"` // taken off the registry's list; everything about it is kept
 }
 
-// The market families a version may belong to. Each has its own runner and bucket prefix.
+// The market families a version may belong to. Rounds and ladders each have a runner.
+// FamilySpot has none yet: a draft may exist, Deploy has no runner to ask.
 const (
 	FamilyRounds  = "kalshi15m"
 	FamilyLadders = "kalshiladder"
+	FamilySpot    = "coinbasespot"
 )
 
 // ListVersion3 is the version-3 rows of both families, archived ones included and marked. An
@@ -79,8 +81,8 @@ func (s *Store) ListVersion3(ctx context.Context) ([]Version3, error) {
 		       v.archived_at is not null
 		  from strategy_version v
 		  join strategy st on st.id = v.strategy_id
-		 where st.family in ($1, $2) and v.version = 3
-		 order by st.name`, FamilyRounds, FamilyLadders)
+		 where st.family in ($1, $2, $3) and v.version = 3
+		 order by st.name`, FamilyRounds, FamilyLadders, FamilySpot)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +136,7 @@ type NewVersion3 struct {
 	Params     []byte // engine.Params as JSON, already validated by the engine
 	Parent     string // the parent strategy's name whose version 2 this descends from ("Scalper" or "Value")
 	CodeRef    string // the release
-	Family     string // FamilyRounds (the default) or FamilyLadders: which runner holds its bucket
+	Family     string // FamilyRounds (the default), FamilyLadders, or FamilySpot (no runner yet)
 }
 
 // CreateVersion3 registers a builder's version as draft and returns its id. One more row in the
@@ -155,9 +157,9 @@ func (s *Store) CreateVersion3(ctx context.Context, v NewVersion3) (int64, error
 	switch v.Family {
 	case "":
 		v.Family = FamilyRounds
-	case FamilyRounds, FamilyLadders:
+	case FamilyRounds, FamilyLadders, FamilySpot:
 	default:
-		return 0, fmt.Errorf("family must be %s or %s", FamilyRounds, FamilyLadders)
+		return 0, fmt.Errorf("family must be %s, %s or %s", FamilyRounds, FamilyLadders, FamilySpot)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

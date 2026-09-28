@@ -22,7 +22,7 @@ type Shape struct {
 	Blurb      string `json:"blurb,omitempty" jsonschema:"one line about it, for the pages; blank takes the parent's"`
 	Hypothesis string `json:"hypothesis,omitempty" jsonschema:"what this version is meant to test; strategy_register requires it, it goes in the trials registry"`
 
-	Family string `json:"family,omitempty" jsonschema:"which markets it trades: kalshi15m (the 15-minute rounds; the default) or kalshiladder (the daily and weekly above/below ladders, many legs per coin at once, hours to days from the close; tau_min and tau_max are then hours-to-days in seconds and tau_max must exceed 3600)"`
+	Family string `json:"family,omitempty" jsonschema:"which markets it trades: kalshi15m (the 15-minute rounds; the default), kalshiladder (the daily and weekly above/below ladders, many legs per coin at once, hours to days from the close; tau_min and tau_max are then hours-to-days in seconds and tau_max must exceed 3600), or coinbasespot (Coinbase coins at the last print; no runner yet, a draft cannot be seeded)"`
 	Exit   string `json:"exit" jsonschema:"hold: every position is held to settlement (parent Value). ev: sells on value or once the bid covers take_capture of the way to a dollar (parent Scalper)"`
 	Side   string `json:"side,omitempty" jsonschema:"which side it may buy: model (whichever the belief favours; the default), favourite (the side priced above one half only), longshot (under one half only)"`
 
@@ -128,12 +128,15 @@ func FromShape(s Shape) (Params, error) {
 		return Params{}, fmt.Errorf("exit must be hold or ev")
 	}
 	switch s.Family {
-	case "", FamilyRounds, FamilyLadders:
+	case "", FamilyRounds, FamilyLadders, FamilySpot:
 	default:
-		return Params{}, fmt.Errorf("family must be %s or %s", FamilyRounds, FamilyLadders)
+		return Params{}, fmt.Errorf("family must be %s, %s or %s", FamilyRounds, FamilyLadders, FamilySpot)
 	}
-	if !(s.Lambda > 0) {
+	if s.Family != FamilySpot && !(s.Lambda > 0) {
 		return Params{}, fmt.Errorf("lambda must be above 0 (the protocol's R1: a version at 0 is not registered)")
+	}
+	if s.Family == FamilySpot && len(s.Members) > 0 {
+		return Params{}, fmt.Errorf("a %s version is not a roster", FamilySpot)
 	}
 	conv := func(v float64, what string) Provenance {
 		return Provenance{Kind: KindConvention, Value: v, Note: "the builder's setting, chosen by the owner: " + what}
@@ -165,6 +168,10 @@ func FromShape(s Shape) (Params, error) {
 	if s.Family == FamilyLadders {
 		p.Family = FamilyLadders
 		p.Blurb += "; trades the daily and weekly ladders"
+	}
+	if s.Family == FamilySpot {
+		p.Family = FamilySpot
+		p.Blurb += "; trades Coinbase spot at the last print; no runner yet, a draft cannot be seeded"
 	}
 	if s.Control {
 		p.Blurb += "; a NEGATIVE CONTROL, registered to be caught"

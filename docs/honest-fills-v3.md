@@ -1274,6 +1274,14 @@ model **615** (+$176.86, r/$ 0.1376, t 0.97). The same-tick roster (records **72
 than Late and than window-only, but lost on return per dollar and t to leaving Late alone.
 Not registered.
 
+**Note of 2026-09-24: spot plumbing, no live buy.** Family `coinbasespot` is accepted by the
+builder and the registry. `service/internal/spot` fills and marks at the last Coinbase print:
+that print is not a book (no bid, no ask, no depth), so a fill there is optimistic against a
+real taker. The fee is a named convention of 60 bps of the USD notional (Coinbase Exchange
+retail taker). Size is a whole number of the product increment; money is integer cents. There
+is no third `Runner3` and catalogue spot stays `trade: false`. A draft cannot get a bucket.
+The next slice is a spot runner and a first hypothesis.
+
 ---
 
 ## 9. File-by-file change list
