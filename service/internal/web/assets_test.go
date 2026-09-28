@@ -96,7 +96,9 @@ func TestCatalogueSearch(t *testing.T) {
 func TestCatalogueSwitch(t *testing.T) {
 	post := func(f *catalogueFake, changed *int, body string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
-		catalogueServer(f, changed).ServeHTTP(rec, httptest.NewRequest("POST", "/api/controls/asset", strings.NewReader(body)))
+		req := httptest.NewRequest("POST", "/api/controls/asset", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		catalogueServer(f, changed).ServeHTTP(rec, req)
 		return rec
 	}
 
@@ -139,6 +141,25 @@ func TestCatalogueSwitch(t *testing.T) {
 	if rec := post(f, &changed, `{"source":"kalshi","code":"KXNOPE","record":true}`); rec.Code != http.StatusNotFound {
 		t.Errorf("not catalogued: %d", rec.Code)
 	}
+
+	// The switch is behind operator() like every other change: another site's page cannot flip it,
+	// and neither can a no-cors text/plain post, whether or not a key is set.
+	f, changed = &catalogueFake{result: store.AssetResult{InstrumentID: 40, Record: true, Changed: true}}, 0
+	req := httptest.NewRequest("POST", "/api/controls/asset", strings.NewReader(`{"source":"kalshi","code":"KXBNB15M","record":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec = httptest.NewRecorder()
+	catalogueServer(f, &changed).ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || changed != 0 || f.change.Code != "" {
+		t.Errorf("cross-site: %d %s, supervisor told %d times, change %+v", rec.Code, rec.Body, changed, f.change)
+	}
+	req = httptest.NewRequest("POST", "/api/controls/asset", strings.NewReader(`{"source":"kalshi","code":"KXBNB15M","record":true}`))
+	req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
+	rec = httptest.NewRecorder()
+	catalogueServer(f, &changed).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnsupportedMediaType || changed != 0 || f.change.Code != "" {
+		t.Errorf("text/plain: %d %s, supervisor told %d times, change %+v", rec.Code, rec.Body, changed, f.change)
+	}
 }
 
 // The assets page became a dialog on the home page: its old address sends the reader there, and
@@ -174,7 +195,9 @@ func TestSeededSwitchSaysWhen(t *testing.T) {
 	post := func(f *catalogueFake, body string) *httptest.ResponseRecorder {
 		changed := 0
 		rec := httptest.NewRecorder()
-		catalogueServer(f, &changed).ServeHTTP(rec, httptest.NewRequest("POST", "/api/controls/asset", strings.NewReader(body)))
+		req := httptest.NewRequest("POST", "/api/controls/asset", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		catalogueServer(f, &changed).ServeHTTP(rec, req)
 		if changed != 0 {
 			t.Error("a seeded row is not the supervisor's")
 		}

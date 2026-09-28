@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -20,20 +21,43 @@ const resetBudget = 5 * time.Minute
 // operatorHeader carries the passphrase for anything that changes the books or the recording.
 const operatorHeader = "X-Operator-Key"
 
-// operator wraps a handler that changes something: with a key set, the request must carry it in
-// operatorHeader, compared in constant time; without one it refuses with 401 and the page asks
-// the reader for the key. An empty key means no passphrase (localhost, a tailnet). Reads are never
-// wrapped: the figures are simulated money and the page is meant to be looked at.
+// operator wraps a handler that changes something. Three locks, in this order, whether or not a
+// key is set:
+//
+//  1. A Sec-Fetch-Site header, when there is one, must be same-origin or none; anything else,
+//     cross-site above all, is 403. Absent is allowed, and is the common case: curl and the Go
+//     clients in proposals never send it, and a browser sends it only to a potentially
+//     trustworthy URL (HTTPS, or localhost), so it arrives over tailscale serve and the SSH
+//     tunnel and NOT over the plain-HTTP house-network road (docs/deployment.md). On that road
+//     the second lock is the only one.
+//  2. The Content-Type must be application/json (parameters like charset are ignored); anything
+//     else is 415. A page on another site can fetch(url, {method: "POST", mode: "no-cors", body})
+//     from the same browser: it arrives as text/plain with no preflight, and readJSON would
+//     decode it. A JSON content type across origins forces a preflight this server never answers,
+//     so this alone stops that path on every road; the site check is a second lock where the
+//     browser gives one.
+//  3. With a key set, the request must carry it in operatorHeader, compared in constant time;
+//     without one it refuses with 401 and the page asks the reader for the key. An empty key
+//     means no passphrase (localhost, a tailnet): the first two locks still hold.
+//
+// Reads are never wrapped: the figures are simulated money and the page is meant to be looked at.
 func operator(key string, h http.HandlerFunc) http.HandlerFunc {
-	if key == "" {
-		return h
-	}
 	want := []byte(key)
 	return func(w http.ResponseWriter, r *http.Request) {
-		got := []byte(strings.TrimSpace(r.Header.Get(operatorHeader)))
-		if len(got) == 0 || subtle.ConstantTimeCompare(got, want) != 1 {
-			writeErr(w, http.StatusUnauthorized, "The operator key is missing or wrong.")
+		if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+			writeErr(w, http.StatusForbidden, "This page does not take requests from other sites.")
 			return
+		}
+		if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+			writeErr(w, http.StatusUnsupportedMediaType, "The request must be JSON: Content-Type application/json.")
+			return
+		}
+		if len(want) > 0 {
+			got := []byte(strings.TrimSpace(r.Header.Get(operatorHeader)))
+			if len(got) == 0 || subtle.ConstantTimeCompare(got, want) != 1 {
+				writeErr(w, http.StatusUnauthorized, "The operator key is missing or wrong.")
+				return
+			}
 		}
 		h(w, r)
 	}
@@ -438,7 +462,8 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 	}))
 
 	// Reap: the operator closes a version's bucket. {id, restake}. Refused (409) while the bucket
-	// has a bet on; 404 when the version holds nothing and no restake was asked for.
+	// has a bet on; 404 when the version holds nothing and no restake was asked for, and for a
+	// version that is not registered (a restake asks the store whose it is first).
 	mux.HandleFunc("POST /api/controls/version/reap", operator(ctl.Key, func(w http.ResponseWriter, r *http.Request) {
 		if ctl.Reap == nil {
 			writeErr(w, http.StatusServiceUnavailable, "No engine runs in this process; reap at the next start's page.")
@@ -461,6 +486,8 @@ func controlRoutes(mux *http.ServeMux, db controlStore, list *bucketList, ctl Co
 				writeErr(w, http.StatusConflict, refused.Why)
 			case errors.Is(err, store.ErrNoBucketEver):
 				writeErr(w, http.StatusNotFound, "That version has never had a bucket; Approve seeds one.")
+			case errors.Is(err, store.ErrVersionNotFound):
+				writeErr(w, http.StatusNotFound, "That version-3 strategy is not registered.")
 			default:
 				slog.Error("controls: reap", "err", err)
 				writeErr(w, http.StatusInternalServerError, "The bucket was not reaped: "+err.Error())

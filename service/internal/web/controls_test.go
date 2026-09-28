@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -186,6 +187,8 @@ func TestReapTransferAndShapes(t *testing.T) {
 				return Reaped{}, ReapRefused{"kalshi15m3 Scalper v3 has 1 open position(s); it is reaped once they settle"}
 			case 21:
 				return Reaped{}, store.ErrNoBucketEver
+			case 23: // a restake asks the store whose the version is first, and this id has no row
+				return Reaped{}, fmt.Errorf("restaking version 23: %w", store.ErrVersionNotFound)
 			}
 			return Reaped{}, errors.New("boom")
 		},
@@ -204,6 +207,9 @@ func TestReapTransferAndShapes(t *testing.T) {
 	}
 	if rec = postJSON(mux, "/api/controls/version/reap", `{"id":21,"restake":true}`); rec.Code != 404 {
 		t.Fatalf("never had a bucket %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = postJSON(mux, "/api/controls/version/reap", `{"id":23,"restake":true}`); rec.Code != 404 || !strings.Contains(rec.Body.String(), "not registered") {
+		t.Fatalf("not a registered version %d %s", rec.Code, rec.Body.String())
 	}
 	if rec = postJSON(mux, "/api/controls/version/reap", `{"id":99}`); rec.Code != 500 {
 		t.Fatalf("engine failure %d %s", rec.Code, rec.Body.String())
@@ -410,9 +416,12 @@ func controlsMux(f *fakeControls, ctl Control) *http.ServeMux {
 	return mux
 }
 
+// postJSON posts as the page's own post() helper does: Content-Type application/json, which
+// operator() insists on, and no Sec-Fetch-Site, as curl and the Go clients send none.
 func postJSON(mux *http.ServeMux, path, body string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	mux.ServeHTTP(rec, req)
 	return rec
 }
@@ -495,6 +504,7 @@ func TestExerciseRecord(t *testing.T) {
 		`not json`,
 	} {
 		req = httptest.NewRequest(http.MethodPost, ExerciseRecordPath, strings.NewReader(bad))
+		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set(operatorHeader, "open-sesame")
 		rec = httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
@@ -584,6 +594,7 @@ func TestOperatorKeyGatesChanges(t *testing.T) {
 		t.Fatalf("no key: %d saved %v", rec.Code, f.ordersSaved)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/controls/orders", strings.NewReader(`{"on":false}`))
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(operatorHeader, "wrong")
 	rec = httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -591,6 +602,7 @@ func TestOperatorKeyGatesChanges(t *testing.T) {
 		t.Fatalf("wrong key: %d saved %v", rec.Code, f.ordersSaved)
 	}
 	req = httptest.NewRequest(http.MethodPost, "/api/controls/orders", strings.NewReader(`{"on":false}`))
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(operatorHeader, " open sesame ")
 	rec = httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -600,6 +612,68 @@ func TestOperatorKeyGatesChanges(t *testing.T) {
 	open := controlsMux(&fakeControls{}, Control{Apply: func(bool) string { return "now" }})
 	if rec := postJSON(open, "/api/controls/orders", `{"on":true}`); rec.Code != 200 {
 		t.Fatalf("no key set means no gate: %d", rec.Code)
+	}
+}
+
+// Every mutating route refuses a request from another site and a request that is not JSON, key
+// or no key: a third-party page in the same browser can fetch() with mode no-cors, which arrives
+// as text/plain with no preflight, and Sec-Fetch-Site names the sender where the browser sends it
+// (HTTPS and localhost, not plain HTTP). Absent Sec-Fetch-Site is allowed (curl, the Go clients,
+// every browser on the plain-HTTP road), and so is same-origin (the page itself). With a key set
+// the two checks run first and the key check still follows.
+func TestOperatorRefusesOtherSitesAndNonJSON(t *testing.T) {
+	post := func(mux *http.ServeMux, headers map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/controls/orders", strings.NewReader(`{"on":false}`))
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+	jsonType := "application/json"
+
+	// No key set: the two locks still hold.
+	f := &fakeControls{}
+	mux := controlsMux(f, Control{Apply: func(bool) string { return "now" }})
+	for _, c := range []struct {
+		name    string
+		headers map[string]string
+		code    int
+		ran     bool
+	}{
+		{"json, no Sec-Fetch-Site", map[string]string{"Content-Type": jsonType}, 200, true},
+		{"json, same-origin", map[string]string{"Content-Type": jsonType, "Sec-Fetch-Site": "same-origin"}, 200, true},
+		{"json, none (typed into the bar)", map[string]string{"Content-Type": jsonType, "Sec-Fetch-Site": "none"}, 200, true},
+		{"json with charset", map[string]string{"Content-Type": "application/json; charset=utf-8"}, 200, true},
+		{"cross-site", map[string]string{"Content-Type": jsonType, "Sec-Fetch-Site": "cross-site"}, 403, false},
+		{"same-site is not same-origin", map[string]string{"Content-Type": jsonType, "Sec-Fetch-Site": "same-site"}, 403, false},
+		{"no-cors text/plain", map[string]string{"Content-Type": "text/plain;charset=UTF-8"}, 415, false},
+		{"no Content-Type at all", map[string]string{}, 415, false},
+		{"a form post", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, 415, false},
+		{"cross-site and text/plain: the site is refused first", map[string]string{"Content-Type": "text/plain", "Sec-Fetch-Site": "cross-site"}, 403, false},
+	} {
+		f.ordersSaved = nil
+		rec := post(mux, c.headers)
+		if rec.Code != c.code || (f.ordersSaved != nil) != c.ran {
+			t.Errorf("%s: %d %s, handler ran %v", c.name, rec.Code, rec.Body.String(), f.ordersSaved != nil)
+		}
+	}
+
+	// Key set: site and type are checked before the key, and the key check still runs after.
+	f = &fakeControls{}
+	mux = controlsMux(f, Control{Key: "open sesame", Apply: func(bool) string { return "now" }})
+	if rec := post(mux, map[string]string{"Content-Type": jsonType, "Sec-Fetch-Site": "cross-site", operatorHeader: "open sesame"}); rec.Code != 403 || f.ordersSaved != nil {
+		t.Errorf("cross-site with the right key: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post(mux, map[string]string{"Content-Type": "text/plain", operatorHeader: "open sesame"}); rec.Code != 415 || f.ordersSaved != nil {
+		t.Errorf("text/plain with the right key: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post(mux, map[string]string{"Content-Type": jsonType}); rec.Code != 401 || f.ordersSaved != nil {
+		t.Errorf("json, same site, no key: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post(mux, map[string]string{"Content-Type": jsonType, "Sec-Fetch-Site": "same-origin", operatorHeader: "open sesame"}); rec.Code != 200 || f.ordersSaved == nil {
+		t.Errorf("json, same-origin, the key: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

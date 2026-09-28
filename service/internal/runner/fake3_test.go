@@ -31,6 +31,7 @@ import (
 
 type fakeVersion struct {
 	store.VersionRow
+	family string // the strategy's market family; "" is the rounds, as a version the rig adds without one is
 }
 
 type fakeBucket struct {
@@ -164,7 +165,7 @@ func (s *fakeStore) landLater() {
 func (s *fakeStore) addVersion(name, status string, params json.RawMessage) int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	v := fakeVersion{store.VersionRow{Name: name, ID: s.id(), Status: status, Params: params}}
+	v := fakeVersion{VersionRow: store.VersionRow{Name: name, ID: s.id(), Status: status, Params: params}}
 	s.versions = append(s.versions, v)
 	return v.ID
 }
@@ -186,6 +187,27 @@ func (s *fakeStore) version(id int64) *fakeVersion {
 		}
 	}
 	return nil
+}
+
+// setFamily puts a version in another market family. A version added without one is of the
+// rounds, store.FamilyRounds, which is what a runner built with no Family option holds.
+func (s *fakeStore) setFamily(name, family string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.versions {
+		if s.versions[i].Name == name {
+			s.versions[i].family = family
+		}
+	}
+}
+
+// familyOf is a version's family as the real store's join to strategy reads it: never empty,
+// because CreateVersion3 writes FamilyRounds for an empty one.
+func familyOf(v *fakeVersion) string {
+	if v.family == "" {
+		return store.FamilyRounds
+	}
+	return v.family
 }
 
 func (s *fakeStore) addMarket(id int64, ticker, coin string, closes time.Time, strike float64) {
@@ -346,8 +368,9 @@ func (s *fakeStore) TradableVersions(ctx context.Context, family string, version
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := []store.VersionRow{}
-	for _, v := range s.versions {
-		if v.Status == "probation" || v.Status == "active" {
+	for i := range s.versions {
+		v := &s.versions[i]
+		if familyOf(v) == family && (v.Status == "probation" || v.Status == "active") {
 			out = append(out, v.VersionRow)
 		}
 	}
@@ -366,6 +389,9 @@ func (s *fakeStore) HeldBuckets(ctx context.Context, family string, version int)
 			continue
 		}
 		v := s.version(b.VersionID)
+		if familyOf(v) != family {
+			continue // the real query joins strategy and takes one family's buckets
+		}
 		h := store.HeldBucket{SimBucket: b.SimBucket, Strategy: b.strategy, VersionStatus: v.Status, Params: v.Params, SeedCents: b.seed, OrdersOn: !b.ordersOff, CloseRequested: b.closeReq}
 		h.CashCents = s.cash(b)
 		out = append(out, h)
@@ -629,12 +655,21 @@ func (s *fakeStore) seedLife(prev *fakeBucket, life int, seedCents int64) store.
 	return sb
 }
 
-func (s *fakeStore) RestakeBucket(ctx context.Context, setup store.SimSetup, versionID int64, seedCents int64) (store.SimBucket, error) {
+// RestakeBucket is the store's: a version of another family is refused before its buckets are
+// looked at, then the next life opens after a frozen one.
+func (s *fakeStore) RestakeBucket(ctx context.Context, setup store.SimSetup, family string, versionID int64, seedCents int64) (store.SimBucket, error) {
 	if hb := s.hook(ctx, "RestakeBucket"); hb.err != nil {
 		return store.SimBucket{}, hb.err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	v := s.version(versionID)
+	if v == nil {
+		return store.SimBucket{}, store.ErrVersionNotFound
+	}
+	if familyOf(v) != family {
+		return store.SimBucket{}, store.ErrOtherFamily
+	}
 	var prev *fakeBucket
 	for _, fb := range s.buckets { // appended in order: the last is the newest
 		if fb.VersionID == versionID {
@@ -650,8 +685,24 @@ func (s *fakeStore) RestakeBucket(ctx context.Context, setup store.SimSetup, ver
 	return s.seedLife(prev, lifeOf(prev.Name)+1, seedCents), nil
 }
 
+// VersionFamily is the store's: a version's family as the join to strategy reads it, never empty,
+// or ErrVersionNotFound.
+func (s *fakeStore) VersionFamily(ctx context.Context, versionID int64) (string, error) {
+	if hb := s.hook(ctx, "VersionFamily"); hb.err != nil {
+		return "", hb.err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := s.version(versionID)
+	if v == nil {
+		return "", store.ErrVersionNotFound
+	}
+	return familyOf(v), nil
+}
+
 // DeployBucket is the store's: the first life named as EnsureSimSetup names it, or the next after
-// a frozen one; a draft or retired version goes on probation with it. The fake has one family.
+// a frozen one; a draft or retired version goes on probation with it. A version of another
+// family is refused as the store refuses it.
 func (s *fakeStore) DeployBucket(ctx context.Context, setup store.SimSetup, prefix, family string, version int, d store.Deploy) (store.SimBucket, error) {
 	if hb := s.hook(ctx, "DeployBucket"); hb.err != nil {
 		return store.SimBucket{}, hb.err
@@ -664,6 +715,9 @@ func (s *fakeStore) DeployBucket(ctx context.Context, setup store.SimSetup, pref
 	v := s.version(d.VersionID)
 	if v == nil {
 		return store.SimBucket{}, store.ErrVersionNotFound
+	}
+	if familyOf(v) != family {
+		return store.SimBucket{}, store.ErrOtherFamily
 	}
 	var prev *fakeBucket
 	for _, fb := range s.buckets {

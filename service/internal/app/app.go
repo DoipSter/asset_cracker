@@ -388,32 +388,47 @@ func Run(version string) error {
 				Shape:   shapeOf,
 				// A version lives in one family, so one runner holds its bucket: Reap asks each in
 				// turn and the one that knows the version answers. Both refusing by name means no
-				// runner holds it and no restake was asked for.
+				// runner holds it and no restake was asked for. A restake for a version a runner
+				// holds nothing of makes that runner ask the store whose the version is, and it
+				// refuses another family's with store.ErrOtherFamily BEFORE suspending itself for
+				// the write (the store's RestakeBucket refuses it again, as DeployBucket does), so
+				// the runners asked first are left running: that answer is "not mine, ask the
+				// next", never the final word, unless every runner gave it, when the version's
+				// family has no runner at all (a spot draft, say) and the page is told so.
 				Drop: dropCapital,
 				Reap: func(rctx context.Context, versionID int64, restake bool) (web.Reaped, error) {
-					var last error
+					var last error // the last refusal about the version itself, not about its family
 					for _, r := range runners {
 						rep, err := r.Reap(rctx, versionID, restake)
 						if err == nil {
 							dropCapital() // a bucket closed or opened: the next snapshot reads the ledger
 							return web.Reaped{Bucket: rep.Bucket, ReapedCents: rep.ReapedCents, Next: rep.Next, Held: rep.Held, Ordering: rep.MayOrder}, nil
 						}
-						last = err
 						var open runner.OpenPositions
 						if errors.As(err, &open) {
 							return web.Reaped{}, web.ReapRefused{Why: err.Error()}
 						}
+						if errors.Is(err, store.ErrOtherFamily) {
+							continue
+						}
+						last = err
 						if !errors.Is(err, runner.ErrNoHeldBucket) && !errors.Is(err, store.ErrNoBucketEver) && !errors.Is(err, store.ErrBucketHeld) {
 							return web.Reaped{}, err
 						}
 					}
-					if errors.Is(last, runner.ErrNoHeldBucket) {
+					switch {
+					case last == nil: // every runner refused by family: none holds that family
+						return web.Reaped{}, web.ReapRefused{Why: fmt.Sprintf("version %d belongs to a market family no runner holds; nothing was restaked", versionID)}
+					case errors.Is(last, runner.ErrNoHeldBucket):
 						return web.Reaped{}, web.ReapRefused{Why: last.Error()}
 					}
 					return web.Reaped{}, last
 				},
 				// CloseWhenFlat asks each runner like Reap does; the one that holds the version
-				// either reaps now or marks the bucket and says so.
+				// either reaps now or marks the bucket and says so. It never restakes, so the
+				// store is never asked for a next life and ErrOtherFamily cannot come out of it:
+				// a runner that holds nothing of the version refuses by name (ErrNoHeldBucket)
+				// before any write.
 				CloseWhenFlat: func(rctx context.Context, versionID int64) (web.Reaped, *web.Closing, error) {
 					var last error
 					for _, r := range runners {

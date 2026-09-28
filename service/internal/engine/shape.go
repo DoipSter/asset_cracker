@@ -57,8 +57,10 @@ type Shape struct {
 	// named shapes plus an assignment. Member is Shape without a nested roster, so the MCP schema
 	// does not cycle. The window owner is chosen from prior settled clocks; that owner gets
 	// first refusal, then a later specialist (smaller tau_max) may reserve an unclaimed ticker.
-	// Sit out if nobody may claim. Results attach to this version, not to a member.
-	Members         []Member `json:"members,omitempty" jsonschema:"a roster of 2 to 8 member shapes; this version assigns a window owner then may reserve leftovers. v1 members all hold, same family. Omit for a single shape"`
+	// Sit out if nobody may claim. Results attach to this version, not to a member. Every member
+	// trades this version's family (blank reads as the rounds, as it does here): the bucket is
+	// routed by this version's family, so a member of another family is refused.
+	Members         []Member `json:"members,omitempty" jsonschema:"a roster of 2 to 8 member shapes; this version assigns a window owner then may reserve leftovers. v1 members all hold, and every member's family is this version's. Omit for a single shape"`
 	LookbackWindows int      `json:"lookback_windows,omitempty" jsonschema:"prior 15-minute clocks the adaptive window owner needs, 1 to 64; default 16 when members are set. 0 with structural_only: owner is always the first member"`
 	StructuralOnly  bool     `json:"structural_only,omitempty" jsonschema:"true: window owner is always the first member, no look at recent clocks. The ablation's dumb owner"`
 	Assign          string   `json:"assign,omitempty" jsonschema:"both (default): window owner first, later specialists may take unclaimed seats. window: only the owner may enter. reserve: no owner; sit until the latest specialist's clock, then they may enter"`
@@ -68,7 +70,7 @@ type Shape struct {
 type Member struct {
 	Name           string  `json:"name" jsonschema:"the member's name, shown on by_member and on the decision"`
 	Blurb          string  `json:"blurb,omitempty"`
-	Family         string  `json:"family,omitempty"`
+	Family         string  `json:"family,omitempty" jsonschema:"the roster's own family, or blank for kalshi15m; a member of another family is refused"`
 	Exit           string  `json:"exit" jsonschema:"hold (v1: every member holds)"`
 	Side           string  `json:"side,omitempty"`
 	Lambda         float64 `json:"lambda"`

@@ -22,7 +22,9 @@ import (
 //     never reassigned. AssignWindow has no leftovers. AssignReserve sits while any member's
 //     window has not started (tau > their tau_max), then the latest specialist who would buy.
 //
-// Eligibility is still "decideOnce would send a buy". No new gate language. v1 members all hold.
+// Eligibility is still "decideOnce would send a buy". No new gate language. v1 members all hold,
+// and every member trades the parent's family: the bucket is routed by the parent's family, so a
+// member of another family is refused, not run on the wrong tape.
 
 const (
 	// DefaultLookback is K: prior 15-minute clocks the adaptive window owner needs.
@@ -599,14 +601,15 @@ func validateComposition(p Params) error {
 		return fmt.Errorf("structural_only does not use lookback_windows")
 	}
 	seen := map[string]bool{}
-	var exit, family string
+	var exit string
+	family := p.FamilyOf()
 	for i, m := range p.Members {
 		mp, err := FromShape(m.asShape())
 		if err != nil {
 			return fmt.Errorf("member %d: %w", i+1, err)
 		}
 		if i == 0 {
-			exit, family = mp.Exit, mp.FamilyOf()
+			exit = mp.Exit
 		}
 		if mp.Exit != "hold" {
 			return fmt.Errorf("member %q exits %s: a roster's members all hold (v1)", mp.Name, mp.Exit)
@@ -614,8 +617,11 @@ func validateComposition(p Params) error {
 		if mp.Exit != exit {
 			return fmt.Errorf("members must share an exit; %q is %s, the first is %s", mp.Name, mp.Exit, exit)
 		}
+		// The bucket is routed by the parent's family (app/builder stamps it), so a member of
+		// another family would run on the wrong tape; and a spot member skips R1, which a rounds
+		// roster may not carry. Each member matching the parent is also how members share a family.
 		if mp.FamilyOf() != family {
-			return fmt.Errorf("members must share a family; %q is %s, the first is %s", mp.Name, mp.FamilyOf(), family)
+			return fmt.Errorf("member %q trades %s but the roster trades %s: a roster's members trade the parent's markets", mp.Name, mp.FamilyOf(), family)
 		}
 		if seen[mp.Name] {
 			return fmt.Errorf("two members are named %q", mp.Name)

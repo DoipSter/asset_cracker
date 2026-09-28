@@ -310,8 +310,9 @@ type DeployRefused struct{ Why string }
 
 func (e DeployRefused) Error() string { return e.Why }
 
-// ErrOtherFamily is a deploy of a version that belongs to another market family, so another
-// runner's. app asks each runner in turn; the one whose family it is answers.
+// ErrOtherFamily is a deploy or a restake of a version that belongs to another market family, so
+// another runner's. app asks each runner in turn; the one whose family it is answers, and every
+// runner answering this way is a version whose family has no runner.
 var ErrOtherFamily = errors.New("that version belongs to another market family")
 
 // DeployBucket opens a bucket for a version by the operator's hand: the first life, named as
@@ -452,24 +453,8 @@ func (s *Store) CloseOutBucket(ctx context.Context, bucketID int64) (ClosedOut, 
 	if b.Status == "frozen" {
 		return ClosedOut{}, ErrAlreadyClosed
 	}
-	var lots int
-	// A scalar subquery: no open side is NULL, and coalesce makes that zero. Summing the outer
-	// query would return no row at all when nothing is open.
-	err = s.pool.QueryRow(ctx, `
-		select coalesce((
-		    select sum(q) from (
-		        select sum(case when o.action = 'buy' then f.qty else -f.qty end) q
-		          from trade_order o join fill f on f.order_id = o.id
-		         where o.bucket_id = $1
-		         group by o.side
-		        having sum(case when o.action = 'buy' then f.qty else -f.qty end) > 0
-		    ) open_sides
-		), 0)::int`, bucketID).Scan(&lots)
-	if err != nil {
+	if err := stillHolds(ctx, s.pool, b); err != nil {
 		return ClosedOut{}, err
-	}
-	if lots > 0 {
-		return ClosedOut{}, OpenContracts{Name: b.Name, Lots: lots}
 	}
 	var actor, pool, ledger, cash int64
 	if err = s.pool.QueryRow(ctx, `select id from actor where handle = 'service'`).Scan(&actor); err != nil {
@@ -491,15 +476,62 @@ func (s *Store) CloseOutBucket(ctx context.Context, bucketID int64) (ClosedOut, 
 	return ClosedOut{Name: b.Name, ReapedCents: cash}, nil
 }
 
+// stillHolds is the close-out's gate: OpenContracts, counting the contracts, while the bucket has
+// a lot that is still open; nil once it is flat. A lot is one (market, side) of the bucket, and it
+// is open when its fills net to more bought than sold AND it has no settlement row, which is the
+// shape bucketFills and RealisedByCoin already use. A settlement writes a settlement row and never
+// a sell fill, so without the exclusion a position held to the close read as open for ever, and a
+// v1/v2 bucket that ever held one bet to settlement could not be closed out however many times
+// the operator pressed. The exclusion is the whole fix: the old gate only ever over-counted, never
+// hid a lot. Grouping by (market, side) rather than by side alone changes no answer the runners
+// can produce (every sell is the exit of a lot bought earlier in the same market, so no lot's net
+// is negative and nothing offsets anything); it is here because a lot IS a (market, side), which
+// is what the count is a sum over.
+//
+// A scalar subquery: no open lot is NULL, and coalesce makes that zero. Summing the outer query
+// would return no row at all when nothing is open. The count is contracts, as OpenContracts
+// reports them.
+func stillHolds(ctx context.Context, q querier, b BucketRef) error {
+	var lots int
+	err := q.QueryRow(ctx, `
+		select coalesce((
+		    select sum(q) from (
+		        select sum(case when o.action = 'buy' then f.qty else -f.qty end) q
+		          from trade_order o join fill f on f.order_id = o.id
+		         where o.bucket_id = $1
+		           and not exists (select 1 from settlement x
+		                            where x.market_id = o.market_id and x.bucket_id = o.bucket_id and x.side = o.side)
+		         group by o.market_id, o.side
+		        having sum(case when o.action = 'buy' then f.qty else -f.qty end) > 0
+		    ) open_lots
+		), 0)::int`, b.ID).Scan(&lots)
+	if err != nil {
+		return err
+	}
+	if lots > 0 {
+		return OpenContracts{Name: b.Name, Lots: lots}
+	}
+	return nil
+}
+
 // RestakeBucket opens the next life of a version whose newest bucket is frozen (reaped by hand,
 // or run out), seeded from the replenishment pool. It is how a version comes back after a Reap
 // without a restake. The bucket trades if the version is approved, else it is held settle-only.
-func (s *Store) RestakeBucket(ctx context.Context, setup SimSetup, versionID int64, seedCents int64) (SimBucket, error) {
+//
+// family is the runner's, and a version of another family is refused with ErrOtherFamily before
+// anything is read about its buckets, as DeployBucket refuses one. Without that gate the first
+// runner asked (the rounds runner, which holds nothing of a ladder version and so sees "nothing
+// held, restake alone") seeded the ladder version's next life in the ledger and then reloaded
+// only its own family, so the new bucket was held by nobody until a restart (2026-09-27).
+func (s *Store) RestakeBucket(ctx context.Context, setup SimSetup, family string, versionID int64, seedCents int64) (SimBucket, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return SimBucket{}, err
 	}
 	defer tx.Rollback(ctx)
+	if err := sameFamily(ctx, tx, versionID, family); err != nil {
+		return SimBucket{}, err
+	}
 	var prev SimBucket
 	err = tx.QueryRow(ctx, `select id, name, ledger_account_id, strategy_version_id, status = 'frozen' from bucket
 	                          where strategy_version_id = $1 and mode = 'sim' order by id desc limit 1`, versionID).
@@ -524,6 +556,44 @@ func (s *Store) RestakeBucket(ctx context.Context, setup SimSetup, versionID int
 		return SimBucket{}, err
 	}
 	return next, tx.Commit(ctx)
+}
+
+// VersionFamily is the market family a version's strategy was registered in, or
+// ErrVersionNotFound. The runner asks it before a restake of a version it holds nothing of, so
+// that another family's version is refused BEFORE the runner suspends itself for the write:
+// reload suspends v3 before between() runs, and a refusal from inside between() left the wrong
+// runner suspended until its next Tick, dropping looks and refusing every Reap that reached it
+// meanwhile (2026-09-27). RestakeBucket keeps its own gate for the write itself.
+func (s *Store) VersionFamily(ctx context.Context, versionID int64) (string, error) {
+	return versionFamily(ctx, s.pool, versionID)
+}
+
+// versionFamily is the join DeployBucket makes, read as stored: strategy.family is written as it
+// was registered (CreateVersion3 writes FamilyRounds for an empty family, and the seed migrations
+// write 'kalshi15m'), so it is never the empty string and nothing is normalised here. It takes a
+// querier so a database test can run it inside a transaction it rolls back.
+func versionFamily(ctx context.Context, q querier, versionID int64) (string, error) {
+	var family string
+	err := q.QueryRow(ctx, `select st.family from strategy_version v join strategy st on st.id = v.strategy_id where v.id = $1`, versionID).Scan(&family)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrVersionNotFound
+	}
+	return family, err
+}
+
+// sameFamily is the restake's family gate: nil when the version's strategy is of that family,
+// ErrOtherFamily when it is of another, ErrVersionNotFound when there is no such version. The
+// runner passes its own family with its default made explicit, so both sides are compared as
+// stored.
+func sameFamily(ctx context.Context, q querier, versionID int64, family string) error {
+	vFamily, err := versionFamily(ctx, q, versionID)
+	if err != nil {
+		return err
+	}
+	if vFamily != family {
+		return ErrOtherFamily
+	}
+	return nil
 }
 
 // DecisionRow is one strategy's conclusion from one look at the market.

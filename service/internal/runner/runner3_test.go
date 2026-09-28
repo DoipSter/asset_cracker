@@ -1637,3 +1637,144 @@ func TestRepeatedSuspensionsDoNotPostponeTheHeal(t *testing.T) {
 	r.Tick(context.Background())
 	g.wantState(stateRunning)
 }
+
+// A restake reaches the store only when the runner holds nothing of the version, and the store
+// refuses a version of another family with store.ErrOtherFamily before it seeds anything. Until
+// 2026-09-27 the rounds runner, asked first by app to restake a ladder version, saw "nothing
+// held, restake alone", seeded the ladder's next life in the ledger, and reloaded only its own
+// family: a bucket held by nobody until a restart. Two runners over one ledger, as main builds
+// them; the loop near the end is app's, where the family refusal means "ask the next runner".
+func TestRestakeRefusesAnotherFamily(t *testing.T) {
+	ctx := context.Background()
+	g := newRig(t)
+	g.s.addVersion("Value", "probation", plumbing(t, "Value"))
+	g.s.setFamily("Value", store.FamilyLadders)
+	rounds := g.start(true)
+	ladders, err := NewRunner3(ctx, g.s, rigCoins, Options3{On: true, DatabaseName: "rig_dev", Now: g.now, Family: store.FamilyLadders, Prefix: "kalshiladder3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scalper, value := g.s.versions[0].ID, g.s.versions[1].ID
+	if len(rounds.BucketIDs()) != 1 || len(ladders.BucketIDs()) != 1 || rounds.BucketIDs()[0] == ladders.BucketIDs()[0] {
+		t.Fatalf("each runner holds its own family's bucket: rounds %v, ladders %v", rounds.BucketIDs(), ladders.BucketIDs())
+	}
+	stateOf := func(r *Runner3) string { _, _, state := g.memory(r); return state }
+
+	// The ladder version's bucket is reaped by its own runner and frozen: what a restake is for.
+	if _, err := ladders.Reap(ctx, value, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(ladders.BucketIDs()) != 0 || stateOf(ladders) != stateRunning {
+		t.Fatalf("ladders after the reap: held %v, state %s", ladders.BucketIDs(), stateOf(ladders))
+	}
+	created, buckets := len(g.s.created), len(g.s.buckets)
+
+	// The defect: the rounds runner holds nothing of the ladder version, so with a restake asked
+	// for it asks the store whose the version is, and refuses by family before anything else is
+	// done. Nothing is seeded; the held set is as it was.
+	_, err = rounds.Reap(ctx, value, true)
+	if !errors.Is(err, store.ErrOtherFamily) {
+		t.Fatalf("the rounds runner restaking a ladder version: %v, want ErrOtherFamily", err)
+	}
+	if n, m := g.s.count("VersionFamily"), g.s.count("RestakeBucket"); n != 1 || m != 0 {
+		t.Fatalf("VersionFamily was asked %d times and RestakeBucket called %d; the refusal comes from the family read, before any write", n, m)
+	}
+	if len(g.s.created) != created || len(g.s.buckets) != buckets {
+		t.Fatalf("the refusal seeded something: created %v, buckets %d (was %d)", g.s.created[created:], len(g.s.buckets), buckets)
+	}
+	if ids := rounds.BucketIDs(); len(ids) != 1 || g.s.version(g.s.buckets[0].VersionID).Name != "Scalper" || ids[0] != g.s.buckets[0].ID {
+		t.Fatalf("the rounds runner holds %v after the refusal, want its own Scalper bucket %d", ids, g.s.buckets[0].ID)
+	}
+	// The refusal came before reload, so the runner never suspended itself: it is running, with
+	// memory equal to the ledger, and no Tick is needed. (Refusing from inside between(), the
+	// store's gate, left it suspended for up to a tick, dropping looks and answering "suspended"
+	// to the next Reap app routed through it, so the runner behind it was never asked.)
+	if stateOf(rounds) != stateRunning {
+		t.Fatalf("after the family refusal the rounds runner is %q, want running: the refusal must come before v3 suspends itself", stateOf(rounds))
+	}
+	g.equalsLedger(rounds)
+
+	// The other way round, with the rounds version's bucket still held and NOT frozen: the family
+	// gate answers before the frozen check does, so this is ErrOtherFamily, not ErrBucketHeld.
+	if _, err := ladders.Reap(ctx, scalper, true); !errors.Is(err, store.ErrOtherFamily) {
+		t.Fatalf("the ladder runner restaking a rounds version: %v, want ErrOtherFamily", err)
+	}
+	if len(g.s.created) != created || len(g.s.buckets) != buckets {
+		t.Fatalf("the reverse refusal seeded something: created %v", g.s.created[created:])
+	}
+	if stateOf(ladders) != stateRunning {
+		t.Fatalf("ladders after the reverse refusal: %s, want running", stateOf(ladders))
+	}
+
+	// app's loop: ErrOtherFamily is "ask the next runner", and the ladder runner opens life 2 and
+	// holds it. The rounds runner's held set is untouched and it stays running.
+	appLoop := func(versionID int64, restake bool) (ReapReport, error) {
+		var rep ReapReport
+		var err error
+		for _, r := range []*Runner3{rounds, ladders} {
+			if rep, err = r.Reap(ctx, versionID, restake); err == nil || !errors.Is(err, store.ErrOtherFamily) {
+				break
+			}
+		}
+		return rep, err
+	}
+	rep, err := appLoop(value, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Bucket != "" || rep.ReapedCents != 0 || rep.Next != "kalshiladder3 Value v3 life 2" || rep.Held != 1 || rep.MayOrder != 1 {
+		t.Fatalf("the ladder restake through app's loop: %+v", rep)
+	}
+	if ids := ladders.BucketIDs(); len(ids) != 1 || g.s.ledgerCash(ids[0]) != seed3Cents || g.s.version(g.s.buckets[len(g.s.buckets)-1].VersionID).Name != "Value" {
+		t.Fatalf("ladders hold %v after the restake; the newest bucket is %q", ids, g.s.buckets[len(g.s.buckets)-1].Name)
+	}
+	if ids := rounds.BucketIDs(); len(ids) != 1 || ids[0] != g.s.buckets[0].ID {
+		t.Fatalf("the rounds runner holds %v after the ladder restake", ids)
+	}
+	if stateOf(rounds) != stateRunning {
+		t.Fatalf("the rounds runner is %q after a ladder restake went past it, want running", stateOf(rounds))
+	}
+
+	// Straight after, with no Tick between: the rounds runner answers "not mine" again, not
+	// "suspended", so the second ladder restake reaches the ladder runner and life 3 replaces
+	// life 2. A rounds runner left suspended by the first would have ended app's loop here with
+	// "v3 is suspended", and the ladder runner would never have been asked.
+	if rep, err = appLoop(value, true); err != nil {
+		t.Fatalf("a second ladder restake straight after the first: %v", err)
+	}
+	if rep.Bucket != "kalshiladder3 Value v3 life 2" || rep.Next != "kalshiladder3 Value v3 life 3" || stateOf(rounds) != stateRunning {
+		t.Fatalf("the second restake: %+v, rounds %s", rep, stateOf(rounds))
+	}
+
+	// A runner that IS suspended, for a reason of its own, still answers by family for another
+	// family's version, because the family read comes before check(): app's loop moves on to the
+	// runner that holds the version instead of ending with the suspended runner's refusal.
+	g.s.on["CloseBucket"] = func(int) behaviour { return behaviour{err: errors.New("the database is away")} }
+	if _, err := rounds.Reap(ctx, scalper, false); err == nil || stateOf(rounds) != stateSuspended {
+		t.Fatalf("a reap whose write failed: err %v, state %s; want an error and a suspended runner", err, stateOf(rounds))
+	}
+	g.s.on["CloseBucket"] = nil
+	if _, err := rounds.Reap(ctx, value, true); !errors.Is(err, store.ErrOtherFamily) {
+		t.Fatalf("the suspended rounds runner asked to restake a ladder version: %v, want ErrOtherFamily", err)
+	}
+	if rep, err = appLoop(value, true); err != nil || rep.Next != "kalshiladder3 Value v3 life 4" {
+		t.Fatalf("a ladder restake past a suspended rounds runner: %+v, %v", rep, err)
+	}
+	rounds.Tick(ctx)
+	g.wantState(stateRunning)
+	g.equalsLedger(rounds)
+
+	// A same-family restake still works, through the runner that holds the version: life 2
+	// replaces the first Scalper bucket at once, the store is not asked whose the version is (the
+	// runner holds it, so it knows), and the ladder runner is not asked.
+	before, asked := g.s.count("RestakeBucket"), g.s.count("VersionFamily")
+	rep, err = rounds.Reap(ctx, scalper, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Bucket != "kalshi15m3 Scalper v3" || rep.Next != "kalshi15m3 Scalper v3 life 2" || rep.Held != 1 || rep.MayOrder != 1 || g.s.count("RestakeBucket") != before || g.s.count("VersionFamily") != asked {
+		t.Fatalf("the same-family reap and restake: %+v, restake calls %d (was %d), family reads %d (was %d)", rep, g.s.count("RestakeBucket"), before, g.s.count("VersionFamily"), asked)
+	}
+	g.equalsLedger(rounds)
+	g.equalsLedger(ladders)
+}

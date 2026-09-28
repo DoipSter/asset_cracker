@@ -413,3 +413,93 @@ func TestOldRosterMemoryStillRecords(t *testing.T) {
 		t.Fatalf("%+v", recs)
 	}
 }
+
+// A roster's members trade the parent's markets: app/builder stamps the bucket with the parent's
+// family and that family's runner holds it, so a member of another family would run on the
+// wrong tape. Every member's family must be the parent's, through both doors (FromShape and a
+// stored Params re-validated); a blank member family reads as the rounds, like the parent's.
+func TestRosterMembersShareParentFamily(t *testing.T) {
+	rounds := func(name string) Member {
+		return Member{Name: name, Exit: "hold", Lambda: 0.5, StaleCost: 0.0012, TauMax: 600}
+	}
+	ladder := func(name string) Member {
+		return Member{Name: name, Exit: "hold", Lambda: 0.5, StaleCost: 0.0012, Family: FamilyLadders, TauMin: 10800, TauMax: 108000}
+	}
+	spot := func(name string) Member {
+		return Member{Name: name, Exit: "hold", Family: FamilySpot}
+	}
+	refuse := func(s Shape, member, family, parent string) {
+		t.Helper()
+		_, err := FromShape(s)
+		if err == nil {
+			t.Fatalf("must refuse %+v", s)
+		}
+		for _, want := range []string{member, family, parent} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("the refusal names the member, its family and the roster's; %q is missing from: %v", want, err)
+			}
+		}
+	}
+	roundsParent := Shape{Name: "Mixed", Exit: "hold", Lambda: 0.5, StaleCost: 0.0012}
+	ladderParent := Shape{Name: "Mixed", Exit: "hold", Lambda: 0.5, StaleCost: 0.0012, Family: FamilyLadders, TauMin: 10800, TauMax: 108000}
+
+	// A rounds parent with spot members. Each member alone passes FromShape (spot skips R1, so
+	// its lambda is 0); without this check the bucket would go to the rounds runner carrying two
+	// lambda-0 members, which R1 forbids.
+	s := roundsParent
+	s.Members = []Member{spot("Coin A"), spot("Coin B")}
+	refuse(s, "Coin A", FamilySpot, FamilyRounds)
+	// A rounds parent with ladder members.
+	s = roundsParent
+	s.Members = []Member{ladder("Day A"), ladder("Day B")}
+	refuse(s, "Day A", FamilyLadders, FamilyRounds)
+	// One stray member is enough, in either direction.
+	s = roundsParent
+	s.Members = []Member{rounds("Round A"), ladder("Day B")}
+	refuse(s, "Day B", FamilyLadders, FamilyRounds)
+	s = ladderParent
+	s.Members = []Member{ladder("Day A"), rounds("Round B")}
+	refuse(s, "Round B", FamilyRounds, FamilyLadders)
+
+	// A ladder parent with ladder members is a roster, and it round-trips through the builder.
+	s = ladderParent
+	s.Name = "Day dance"
+	s.Members = []Member{ladder("Day A"), func() Member { m := ladder("Day B"); m.TauMax = 43200; return m }()}
+	lad, err := FromShape(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !lad.HasComposition() || lad.FamilyOf() != FamilyLadders || lad.Members[1].Family != FamilyLadders {
+		t.Fatalf("ladder roster: %+v", lad)
+	}
+	back := ToShape(lad)
+	if back.Family != FamilyLadders || len(back.Members) != 2 || back.Members[0].Family != FamilyLadders || back.Members[1].TauMax != 43200 {
+		t.Fatalf("ToShape: %+v", back)
+	}
+	if q, err := FromShape(back); err != nil || q.FamilyOf() != FamilyLadders || q.Members[1].TauMax != 43200 {
+		t.Fatalf("round-trip: %v %+v", err, q)
+	}
+
+	// An all-rounds roster is still one whether a member says kalshi15m or leaves it blank.
+	explicit := rounds("Round A")
+	explicit.Family = FamilyRounds
+	s = roundsParent
+	s.Name = "Dance"
+	s.Members = []Member{explicit, rounds("Round B")}
+	rnd, err := FromShape(s)
+	if err != nil || rnd.FamilyOf() != FamilyRounds || !rnd.HasComposition() {
+		t.Fatalf("rounds roster: %v %+v", err, rnd)
+	}
+	// The store's door: a Params re-validated on its own, not through FromShape. A stored
+	// roster whose member has drifted to another family is refused the same way.
+	if err := rnd.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	drift := rnd
+	drift.Members = append([]Member(nil), rnd.Members...)
+	drift.Members[1].Family, drift.Members[1].TauMin, drift.Members[1].TauMax = FamilyLadders, 10800, 108000
+	err = drift.Validate()
+	if err == nil || !strings.Contains(err.Error(), "Round B") || !strings.Contains(err.Error(), FamilyLadders) || !strings.Contains(err.Error(), FamilyRounds) {
+		t.Fatalf("a stored roster with a stray member must be refused, naming it: %v", err)
+	}
+}

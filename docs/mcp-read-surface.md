@@ -202,7 +202,7 @@ this writing) are counted (`snapshots_unpriced`) and not read, since nothing can
 **Input.** The shape, exactly as `strategy_build` takes it (`lambda_late` and `lambda_late_tau`
 included), plus `from` (required: markets CLOSING from this time), `to` (default now; only
 settled markets are replayed), `step_s` and `seed_cents`. A roster is the same shape with
-`members` (2 to 8, each a member shape; v1 all hold, same family): one version that picks among
+`members` (2 to 8, each a member shape; v1 all hold, and every member's family is this version's; blank reads as kalshi15m): one version that picks among
 them. `assign` is `both` (default: window owner first, later specialists may take unclaimed
 seats), `window` (owner only) or `reserve` (sit until the latest specialist's clock). The window
 owner is chosen from prior settled clocks (`lookback_windows`, default 16); `structural_only`

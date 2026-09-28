@@ -33,8 +33,11 @@ type Store3 interface {
 	RecordOrders(ctx context.Context, setup store.SimSetup, r store.StepRecord3) error
 	RecordSettlements(ctx context.Context, setup store.SimSetup, marketID int64, at time.Time, rows []store.SettlementRow) error
 	CloseBucket(ctx context.Context, setup store.SimSetup, b store.SimBucket, reason string, restake bool, life int, seedCents int64) (store.SimBucket, error)
-	RequestClose(ctx context.Context, bucketID int64) error                                                             // × pressed with a position open: closed the first time it holds nothing
-	RestakeBucket(ctx context.Context, setup store.SimSetup, versionID int64, seedCents int64) (store.SimBucket, error) // the next life of a version whose bucket is frozen
+	RequestClose(ctx context.Context, bucketID int64) error                                                                            // × pressed with a position open: closed the first time it holds nothing
+	RestakeBucket(ctx context.Context, setup store.SimSetup, family string, versionID int64, seedCents int64) (store.SimBucket, error) // the next life of a version whose bucket is frozen; store.ErrOtherFamily for another family's version
+	// VersionFamily is whose a version is, asked before a restake of a version this runner holds
+	// nothing of, so another family's version is refused before v3 suspends itself for the write.
+	VersionFamily(ctx context.Context, versionID int64) (string, error)
 	// DeployBucket is the operator's own seeding: a version's first or next life, with the amount
 	// and the source chosen on the page; a draft or retired version is put on probation with it.
 	DeployBucket(ctx context.Context, setup store.SimSetup, prefix, family string, version int, d store.Deploy) (store.SimBucket, error)

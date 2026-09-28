@@ -562,9 +562,27 @@ func (e OpenPositions) Error() string {
 // seeded from the pool in its place ("<name> life N"), trading if its version is approved and
 // held settle-only if not. It is refused while the bucket has an open position, because
 // CloseBucket does not look for one and a settlement into a frozen bucket has nowhere to go.
-// With restake and NO held bucket (reaped earlier, or run out) it opens the next life alone.
-// The writes happen while v3 is suspended and the load that follows reads them back.
+// With restake and NO held bucket (reaped earlier, or run out) it opens the next life alone. A
+// version of another family is refused there with store.ErrOtherFamily, as a Deploy is, so app
+// can ask the next runner rather than this one seeding a life it would never hold. The store is
+// asked whose the version is BEFORE reload suspends v3: reload suspends before between() runs,
+// and refusing from inside between() (the store's own gate) left this runner suspended until its
+// next Tick, ten seconds of dropped looks and a check() that answered "suspended" to every Reap
+// app routed through it meanwhile, so the runner behind it was never asked (2026-09-27). The
+// writes happen while v3 is suspended and the load that follows reads them back; RestakeBucket
+// keeps its own gate for the write itself.
 func (r *Runner3) Reap(ctx context.Context, versionID int64, restake bool) (ReapReport, error) {
+	if restake && !r.holds(versionID) {
+		qctx, cancel := context.WithTimeout(ctx, r.writeBudget)
+		family, err := r.db.VersionFamily(qctx, versionID)
+		cancel()
+		if err != nil {
+			return ReapReport{}, fmt.Errorf("restaking version %d: %w", versionID, err)
+		}
+		if family != r.opts.family() {
+			return ReapReport{}, fmt.Errorf("restaking version %d: %w", versionID, store.ErrOtherFamily)
+		}
+	}
 	var target *bucket3
 	var life int
 	var cash int64
@@ -599,7 +617,7 @@ func (r *Runner3) Reap(ctx context.Context, versionID int64, restake bool) (Reap
 		defer cancel()
 		var err error
 		if target == nil {
-			next, err = r.db.RestakeBucket(wctx, r.setup, versionID, seed3Cents)
+			next, err = r.db.RestakeBucket(wctx, r.setup, r.opts.family(), versionID, seed3Cents)
 			if err != nil {
 				return fmt.Errorf("restaking version %d: %w", versionID, err)
 			}
@@ -723,6 +741,20 @@ func (r *Runner3) Deploy(ctx context.Context, d store.Deploy) (DeployReport, err
 	out := DeployReport{Bucket: next.Name, SeedCents: d.SeedCents, Held: rep.Held, MayOrder: rep.MayOrder}
 	slog.Info("v3 bucket deployed by the operator", "bucket", out.Bucket, "seed_cents", out.SeedCents, "source", d.Source, "version", d.VersionID)
 	return out, nil
+}
+
+// holds says whether a bucket of that version is in the held set. The held set is one family's
+// (HeldBuckets is asked by family), so a version this runner holds is of its family.
+func (r *Runner3) holds(versionID int64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.absorbLocked()
+	for i := range r.buckets {
+		if r.buckets[i].VersionID == versionID {
+			return true
+		}
+	}
+	return false
 }
 
 // lifeOf reads N from "<name> life N"; a first life has no suffix and is 1.
