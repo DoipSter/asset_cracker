@@ -47,6 +47,10 @@ type Store3 interface {
 
 	SaveEngineState(ctx context.Context, series string, state any) error
 	LoadEngineState(ctx context.Context, series string, into any) (bool, error)
+
+	// InsertRosterShadows records the rosters' scored shadows (roster_shadow): no money, and a
+	// row the table already has is passed over, so a retry adds nothing.
+	InsertRosterShadows(ctx context.Context, rows []store.RosterShadow) error
 }
 
 var _ Store3 = (*store.Store)(nil)

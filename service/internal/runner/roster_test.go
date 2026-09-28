@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -189,6 +190,67 @@ func TestRosterMemoryIsSavedWhenRunStops(t *testing.T) {
 	for _, mem := range saved.Rosters {
 		if len(mem.Pending) != 1 || mem.Pending[0].MarketID != mktB {
 			t.Fatalf("saved %+v", mem)
+		}
+	}
+}
+
+// Every member's shadow reaches the record once it is scored: who would have bought what, when,
+// under which clock owner, and what it came to. A write whose answer was lost is kept and tried
+// again, and the retry adds no second row.
+func TestRosterShadowsReachTheRecord(t *testing.T) {
+	g := rosterRig(t)
+	r := g.start(true)
+	earlySeen := g.now()
+	g.look(mktA, above, up("100")) // 590 s out: Early's shadow and bet; the clock is Early's (warmup)
+	g.advance(8*time.Minute + 10*time.Second)
+	lateSeen := g.now()
+	g.look(mktA, above, up("100")) // Late's shadow on A
+	g.look(mktB, above, up("100")) // Late's shadow on B, a market no bucket holds
+	g.advance(2 * time.Minute)
+	g.s.setResult(mktA, "yes")
+	g.s.setResult(mktB, "yes")
+	g.settle(mktA, "yes")
+	g.settle(mktB, "yes")
+
+	g.s.on["InsertRosterShadows"] = func(n int) behaviour {
+		if n == 1 {
+			return behaviour{err: errors.New("the answer was lost"), land: true}
+		}
+		return behaviour{}
+	}
+	g.advance(sweepEvery3)
+	r.Tick(context.Background()) // written, but the runner is told it failed: given back
+	for _, mem := range rostersOf(r) {
+		if len(mem.Unrecorded) != 3 || mem.Unrecorded[0].Tries != 1 {
+			t.Fatalf("after the lost answer: %+v", mem.Unrecorded)
+		}
+	}
+	g.advance(sweepEvery3)
+	r.Tick(context.Background()) // tried again: the rows are there already and nothing is added
+	for _, mem := range rostersOf(r) {
+		if len(mem.Unrecorded) != 0 {
+			t.Fatalf("still queued: %+v", mem.Unrecorded)
+		}
+	}
+	if n := g.s.count("InsertRosterShadows"); n != 2 {
+		t.Fatalf("%d writes", n)
+	}
+	g.s.mu.Lock()
+	defer g.s.mu.Unlock()
+	if len(g.s.shadows) != 3 {
+		t.Fatalf("%d rows: %+v", len(g.s.shadows), g.s.shadows)
+	}
+	closes := t0.Add(15 * time.Minute)
+	for key, row := range g.s.shadows {
+		seen := lateSeen
+		if row.Member == "Early (conventions)" {
+			seen = earlySeen
+		}
+		if row.Owner != "Early (conventions)" || row.OwnerHow != k3.PickWarmup || !row.Closes.Equal(closes) || row.Seen.Sub(seen).Abs() > time.Second || row.Result != "yes" || row.CostCents <= 0 {
+			t.Errorf("%s: %+v", key, row)
+		}
+		if want := int64(100) - row.CostCents; (row.Side == "yes" && row.PnLCents != want) || (row.Side == "no" && row.PnLCents != -row.CostCents) {
+			t.Errorf("%s: P&L %d for a %s at %d", key, row.PnLCents, row.Side, row.CostCents)
 		}
 	}
 }

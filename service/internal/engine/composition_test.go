@@ -344,3 +344,72 @@ func TestShadowWaitsOnAResultThatIsNotYesOrNo(t *testing.T) {
 		t.Fatalf("pending %+v settled %+v", c.pending, c.settled)
 	}
 }
+
+// A shadow is queued for the record as it is scored, with when it was first seen and who owned
+// the clock then; one dropped unscored is queued too, with no result. The queue rides in the
+// memory until the runner takes it, and a record whose writes keep failing is given up.
+func TestShadowsAreQueuedForTheRecord(t *testing.T) {
+	c := rosterAB(t, AssignBoth, 1, false)
+	a, b := c.Members[0].Name, c.Members[1].Name
+	c.ObserveAt(a, Market{Ticker: "T1", MarketID: 7, Close: 900}, "yes", 72, b, PickWindow, 500)
+	c.ObserveAt(b, Market{Ticker: "T1", MarketID: 7, Close: 900}, "no", 30, b, PickWindow, 510)
+	c.ObserveAt(a, Market{Ticker: "T2", MarketID: 8, Close: 900}, "yes", 60, b, PickWindow, 520)
+	c.Settle("T1", "yes")
+	c.Prune(900 + shadowGiveUp + 1) // T2 never had a result
+	want := []ShadowRecord{
+		{Member: a, MarketID: 7, Ticker: "T1", Side: "yes", Close: 900, Seen: 500, Owner: b, OwnerHow: PickWindow, Cost: 72, Result: "yes", PnL: 28},
+		{Member: b, MarketID: 7, Ticker: "T1", Side: "no", Close: 900, Seen: 510, Owner: b, OwnerHow: PickWindow, Cost: 30, Result: "yes", PnL: -30},
+		{Member: a, MarketID: 8, Ticker: "T2", Side: "yes", Close: 900, Seen: 520, Owner: b, OwnerHow: PickWindow, Cost: 60},
+	}
+	mem := c.Memory()
+	if !reflect.DeepEqual(mem.Unrecorded, want) {
+		t.Fatalf("queued\n %+v\nwant\n %+v", mem.Unrecorded, want)
+	}
+	// Saved and restored, the queue comes back; a record naming no member of this roster does not.
+	blob, _ := json.Marshal(mem)
+	var back RosterMemory
+	if err := json.Unmarshal(blob, &back); err != nil {
+		t.Fatal(err)
+	}
+	back.Unrecorded = append(back.Unrecorded, ShadowRecord{Member: "Z", MarketID: 9, Side: "yes", Cost: 50})
+	d := rosterAB(t, AssignBoth, 1, false)
+	d.Restore(back)
+	if !reflect.DeepEqual(d.Memory().Unrecorded, want) {
+		t.Fatalf("restored %+v", d.Memory().Unrecorded)
+	}
+	// Taken, the queue is empty and the memory is marked changed, so the save drops them too.
+	c.TakeDirty()
+	recs := c.TakeRecords()
+	if len(recs) != 3 || len(c.TakeRecords()) != 0 || !c.TakeDirty() {
+		t.Fatalf("took %d", len(recs))
+	}
+	// Given back after each failed write, then given up.
+	for try := 1; try < maxRecordTries; try++ {
+		if dropped := c.GiveBack(recs); dropped != 0 {
+			t.Fatalf("try %d dropped %d", try, dropped)
+		}
+		recs = c.TakeRecords()
+		if len(recs) != 3 || recs[0].Tries != try {
+			t.Fatalf("try %d: %+v", try, recs)
+		}
+	}
+	if dropped := c.GiveBack(recs); dropped != 3 || len(c.TakeRecords()) != 0 {
+		t.Fatalf("after %d tries dropped %d", maxRecordTries, dropped)
+	}
+}
+
+// Memory saved before the shadows were recorded has no time seen and no owner: it still restores,
+// and its shadows are recorded without them.
+func TestOldRosterMemoryStillRecords(t *testing.T) {
+	c := rosterAB(t, AssignBoth, 1, false)
+	var old RosterMemory
+	if err := json.Unmarshal([]byte(`{"pending":[{"member":"`+c.Members[0].Name+`","ticker":"T","market_id":3,"side":"yes","close":900,"cost":50}]}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	c.Restore(old)
+	c.Settle("T", "no")
+	recs := c.TakeRecords()
+	if len(recs) != 1 || recs[0].Seen != 0 || recs[0].Owner != "" || recs[0].Result != "no" || recs[0].PnL != -50 || recs[0].MarketID != 3 {
+		t.Fatalf("%+v", recs)
+	}
+}

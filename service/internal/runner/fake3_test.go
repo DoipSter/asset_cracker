@@ -90,6 +90,7 @@ type fakeStore struct {
 	policy      store.SkimPolicy
 	decisions   int
 	state       map[string][]byte
+	shadows     map[string]store.RosterShadow // roster_shadow, by its unique key
 	calls       map[string]int
 	created     []string // every bucket row, deposit, seed and event EnsureSimSetup made
 	setupNames  [][]string
@@ -973,4 +974,23 @@ func within(t *testing.T, what string, fn func()) {
 	case <-time.After(time.Second):
 		t.Fatalf("%s did not return: it is waiting on a lock held across a database call", what)
 	}
+}
+
+func (s *fakeStore) InsertRosterShadows(ctx context.Context, rows []store.RosterShadow) error {
+	b := s.hook(ctx, "InsertRosterShadows")
+	if b.err != nil && !b.land {
+		return b.err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range rows {
+		key := fmt.Sprintf("%d|%s|%d", r.BucketID, r.Member, r.MarketID)
+		if s.shadows == nil {
+			s.shadows = map[string]store.RosterShadow{}
+		}
+		if _, ok := s.shadows[key]; !ok { // the table's unique key: a row it has is passed over
+			s.shadows[key] = r
+		}
+	}
+	return b.err // with land set, the rows committed and the answer was lost
 }

@@ -52,3 +52,9 @@ grant execute on function reset_sim(text) to assetcracker;
 -- or when its bank closes. The service writes those two columns. Opening the next bank is
 -- inside reset_sim, which runs as its owner.
 grant update (next_at, enabled) on bank_event to assetcracker;
+
+-- roster_shadow (0023) is appended to by the third engine's runner, once a minute, and read by the
+-- evidence. Spelled out, like value_snapshot: the measurement of a roster's picks reads it
+-- through the read-only role.
+grant select, insert on roster_shadow to assetcracker;
+grant select on roster_shadow to assetcracker_ro;

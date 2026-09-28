@@ -57,6 +57,9 @@ type Composition struct {
 	settled  []ShadowSettled
 	reserved map[string]reservation
 	dirty    bool // the memory changed since the last TakeDirty
+	// unrecorded is every shadow scored or dropped and not yet written to the record
+	// (roster_shadow): the runner takes them (TakeRecords) and gives back what it could not write.
+	unrecorded []ShadowRecord
 }
 
 type reservation struct {
@@ -72,8 +75,36 @@ type ShadowPending struct {
 	MarketID int64   `json:"market_id"` // the sweep reads the result by it
 	Side     string  `json:"side"`
 	Close    float64 `json:"close"`
-	Cost     int64   `json:"cost"` // cents for one contract
+	Cost     int64   `json:"cost"`                // cents for one contract
+	Seen     float64 `json:"seen,omitempty"`      // unix seconds it was first seen; 0 in memory saved before this was kept
+	Owner    string  `json:"owner,omitempty"`     // the clock's owner when it was seen; "" under assign=reserve, or saved before
+	OwnerHow string  `json:"owner_how,omitempty"` // how that owner was chosen: window (elected) or warmup (the first member, too few clocks yet)
 }
+
+// ShadowRecord is a shadow on its way to the record (the roster_shadow table): scored against
+// its market's result, or dropped unscored (Result ""), and not yet written. It is carried in the
+// roster's memory until it is, so a restart does not lose it.
+type ShadowRecord struct {
+	Member   string  `json:"member"`
+	MarketID int64   `json:"market_id"`
+	Ticker   string  `json:"ticker"`
+	Side     string  `json:"side"`
+	Close    float64 `json:"close"`
+	Seen     float64 `json:"seen,omitempty"`
+	Owner    string  `json:"owner,omitempty"`
+	OwnerHow string  `json:"owner_how,omitempty"`
+	Cost     int64   `json:"cost"`
+	Result   string  `json:"result,omitempty"` // yes or no; "" when dropped unscored
+	PnL      int64   `json:"pnl"`              // 100 or 0, less Cost; 0 when dropped
+	Tries    int     `json:"tries,omitempty"`  // writes that failed so far
+}
+
+// Records waiting to be written are capped, and a record whose writes keep failing is given up:
+// [CONVENTION] a fortnight of three members on two coins, and ten minutes of failed writes.
+const (
+	maxUnrecorded  = 10000
+	maxRecordTries = 10
+)
 
 // ShadowSettled is a scored shadow: what a member's unit entry on one clock cost and made.
 type ShadowSettled struct {
@@ -93,9 +124,10 @@ type RosterClaim struct {
 // RosterMemory is a composition's memory in the form it is saved and handed on. Members are by
 // name, so memory restored into a roster keeps only what names one of its members.
 type RosterMemory struct {
-	Pending  []ShadowPending        `json:"pending,omitempty"`
-	Settled  []ShadowSettled        `json:"settled,omitempty"`
-	Reserved map[string]RosterClaim `json:"reserved,omitempty"` // by ticker
+	Pending    []ShadowPending        `json:"pending,omitempty"`
+	Settled    []ShadowSettled        `json:"settled,omitempty"`
+	Reserved   map[string]RosterClaim `json:"reserved,omitempty"`   // by ticker
+	Unrecorded []ShadowRecord         `json:"unrecorded,omitempty"` // scored or dropped, not yet written to the record
 }
 
 // shadowGiveUp is how long after its close a shadow may wait for its result before Prune drops
@@ -269,6 +301,13 @@ func containsIdx(idxs []int, want int) bool {
 
 // Observe notes a member's would-be unit entry on market m, once. Pending until Settle.
 func (c *Composition) Observe(member string, m Market, side string, costCents int64) {
+	c.ObserveAt(member, m, side, costCents, "", "", 0)
+}
+
+// ObserveAt is Observe that also keeps when the shadow was first seen (unix seconds), who owned
+// the clock then and how (WindowOwner's how), for the record: what the roster's pick can be
+// measured against.
+func (c *Composition) ObserveAt(member string, m Market, side string, costCents int64, owner, ownerHow string, now float64) {
 	if member == "" || m.Ticker == "" || costCents <= 0 {
 		return
 	}
@@ -282,7 +321,8 @@ func (c *Composition) Observe(member string, m Market, side string, costCents in
 			return
 		}
 	}
-	c.pending = append(c.pending, ShadowPending{Member: member, Ticker: m.Ticker, MarketID: m.MarketID, Side: side, Close: m.Close, Cost: costCents})
+	c.pending = append(c.pending, ShadowPending{Member: member, Ticker: m.Ticker, MarketID: m.MarketID, Side: side, Close: m.Close, Cost: costCents,
+		Seen: now, Owner: owner, OwnerHow: ownerHow})
 	c.dirty = true
 }
 
@@ -304,14 +344,54 @@ func (c *Composition) Settle(ticker, result string) {
 			payout = 100
 		}
 		c.settled = append(c.settled, ShadowSettled{Member: p.Member, Close: p.Close, Cost: p.Cost, PnL: payout - p.Cost})
+		c.record(p, result, payout-p.Cost)
 		c.dirty = true
 	}
 	c.pending = kept
 }
 
+// record queues a shadow for the record: scored (result yes or no) or dropped (result "").
+func (c *Composition) record(p ShadowPending, result string, pnl int64) {
+	if len(c.unrecorded) >= maxUnrecorded {
+		c.unrecorded = c.unrecorded[1:] // the oldest goes: the record keeps what it can, the picker loses nothing
+	}
+	c.unrecorded = append(c.unrecorded, ShadowRecord{Member: p.Member, MarketID: p.MarketID, Ticker: p.Ticker, Side: p.Side,
+		Close: p.Close, Seen: p.Seen, Owner: p.Owner, OwnerHow: p.OwnerHow, Cost: p.Cost, Result: result, PnL: pnl})
+}
+
+// TakeRecords hands over every shadow waiting for the record, and forgets them.
+func (c *Composition) TakeRecords() []ShadowRecord {
+	out := c.unrecorded
+	c.unrecorded = nil
+	if len(out) > 0 {
+		c.dirty = true
+	}
+	return out
+}
+
+// GiveBack returns records the runner could not write, to be tried again. One that has failed
+// maxRecordTries times is given up; dropped counts those.
+func (c *Composition) GiveBack(recs []ShadowRecord) (dropped int) {
+	for _, r := range recs {
+		r.Tries++
+		if r.Tries >= maxRecordTries {
+			dropped++
+			continue
+		}
+		if len(c.unrecorded) >= maxUnrecorded {
+			dropped++
+			continue
+		}
+		c.unrecorded = append(c.unrecorded, r)
+	}
+	c.dirty = true
+	return dropped
+}
+
 // Memory is a copy of what the composition remembers.
 func (c *Composition) Memory() RosterMemory {
-	m := RosterMemory{Pending: append([]ShadowPending(nil), c.pending...), Settled: append([]ShadowSettled(nil), c.settled...)}
+	m := RosterMemory{Pending: append([]ShadowPending(nil), c.pending...), Settled: append([]ShadowSettled(nil), c.settled...),
+		Unrecorded: append([]ShadowRecord(nil), c.unrecorded...)}
 	for ticker, r := range c.reserved {
 		if r.idx < 0 || r.idx >= len(c.Members) {
 			continue
@@ -331,7 +411,12 @@ func (c *Composition) Restore(m RosterMemory) {
 	for i, mp := range c.Members {
 		idx[mp.Name] = i
 	}
-	c.pending, c.settled = nil, nil
+	c.pending, c.settled, c.unrecorded = nil, nil, nil
+	for _, r := range m.Unrecorded {
+		if _, ok := idx[r.Member]; ok {
+			c.unrecorded = append(c.unrecorded, r)
+		}
+	}
 	for _, p := range m.Pending {
 		if _, ok := idx[p.Member]; ok {
 			c.pending = append(c.pending, p)
@@ -375,6 +460,7 @@ func (c *Composition) Prune(now float64) (dropped int) {
 	for _, p := range c.pending {
 		if p.Close+shadowGiveUp < now {
 			dropped++
+			c.record(p, "", 0)
 			continue
 		}
 		keptPending = append(keptPending, p)

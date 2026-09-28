@@ -1567,6 +1567,7 @@ func (r *Runner3) Tick(ctx context.Context) {
 		r.sweep(sctx)
 		r.cashCheck(sctx)
 		r.prune()
+		r.recordShadows(sctx)
 	}
 	if r.stateDirty.Swap(false) {
 		r.saveState(ctx)
@@ -1763,6 +1764,56 @@ func (r *Runner3) prune() {
 			r.forgetLocked(ticker) // the Paper's market and orders, the quotes, the entry prices
 		}
 	}
+}
+
+// recordShadows writes the rosters' scored shadows to the record (roster_shadow), outside the
+// lock, once a minute. What it cannot write goes back to the engine and is tried at the next
+// minute; the table passes over a row it already has, so a write whose answer was lost adds
+// nothing when it is tried again. No money and no decision depends on it.
+func (r *Runner3) recordShadows(ctx context.Context) {
+	r.mu.Lock()
+	recs := r.engine.TakeShadowRecords()
+	r.mu.Unlock()
+	rows, skipped := shadowRows(recs)
+	if skipped > 0 {
+		slog.Warn("v3 left roster shadows out of the record: no market id, side or cost to write", "shadows", skipped)
+	}
+	if len(rows) == 0 {
+		return
+	}
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeBudget3)
+	defer cancel()
+	if err := r.db.InsertRosterShadows(wctx, rows); err != nil {
+		r.mu.Lock()
+		dropped := r.engine.GiveBackShadowRecords(recs)
+		r.mu.Unlock()
+		r.stateDirty.Store(true)
+		slog.Warn("v3 could not record roster shadows; they are kept and tried again next minute", "shadows", len(rows), "given_up", dropped, "err", err)
+		return
+	}
+	r.stateDirty.Store(true) // the saved memory no longer needs to carry them
+}
+
+// shadowRows is the engine's records as rows for the record. One with nothing to identify its
+// market or no side or cost could never be written, and is counted instead of sent.
+func shadowRows(recs map[int64][]k3.ShadowRecord) (rows []store.RosterShadow, skipped int) {
+	unix := func(v float64) time.Time {
+		if v <= 0 {
+			return time.Time{}
+		}
+		return time.Unix(0, int64(v*1e9)).UTC()
+	}
+	for bucket, list := range recs {
+		for _, rec := range list {
+			if rec.MarketID <= 0 || rec.Cost <= 0 || (rec.Side != "yes" && rec.Side != "no") {
+				skipped++
+				continue
+			}
+			rows = append(rows, store.RosterShadow{BucketID: bucket, Member: rec.Member, MarketID: rec.MarketID, Side: rec.Side,
+				Seen: unix(rec.Seen), Closes: unix(rec.Close), Owner: rec.Owner, OwnerHow: rec.OwnerHow, CostCents: rec.Cost, Result: rec.Result, PnLCents: rec.PnL})
+		}
+	}
+	return rows, skipped
 }
 
 // saveOnStop is Run's last write, only if something changed: a load that failed at the start left

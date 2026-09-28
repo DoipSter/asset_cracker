@@ -335,10 +335,19 @@ func (a *Account) decide(coin string, m Market, sides broker.Sides, v View, now 
 // decideOnce with the assigned member's params. Sit out if nobody may claim.
 func (a *Account) decideRoster(coin string, m Market, sides broker.Sides, v View, now float64) ([]Decision, []Intent) {
 	c := a.Composition
+	// The clock's owner reads only settled shadows, so it is the same before and after the members
+	// are observed and the ticker picked; taken first, it goes on each shadow for the record.
+	ownerIdx, ownerHow := c.WindowOwner(m.Close, now)
+	ownerName := ""
+	if ownerIdx >= 0 && ownerIdx < len(c.Members) {
+		ownerName = c.Members[ownerIdx].Name
+	} else {
+		ownerHow = ""
+	}
 	var eligible []int
 	for i, mp := range c.Members {
 		if side, cost, ok := shadowEntry(mp, coin, m, sides, v, now); ok {
-			c.Observe(mp.Name, m, side, cost)
+			c.ObserveAt(mp.Name, m, side, cost, ownerName, ownerHow, now)
 		}
 		saved := a.Params
 		a.Params = mp
@@ -349,11 +358,6 @@ func (a *Account) decideRoster(coin string, m Market, sides broker.Sides, v View
 		}
 	}
 	idx, how := c.Pick(m.Ticker, m.Close, now, m.Close-now, eligible)
-	ownerIdx, _ := c.WindowOwner(m.Close, now)
-	ownerName := ""
-	if ownerIdx >= 0 && ownerIdx < len(c.Members) {
-		ownerName = c.Members[ownerIdx].Name
-	}
 	if idx < 0 {
 		d := Decision{BucketID: a.BucketID, Strategy: a.Params.Name, Action: "none", Intent: -1, BlockedBy: BlockedNoMember, Why: BlockedNoMember, Pick: how, Owner: ownerName}
 		if v.OK {
@@ -1237,6 +1241,41 @@ func (e *Engine) RestoreRosters(m map[int64]RosterMemory) {
 			a.Composition.Restore(mem)
 		}
 	}
+}
+
+// TakeShadowRecords hands over every roster's shadows waiting for the record, by bucket, and
+// forgets them: the runner writes them (roster_shadow) and gives back what it could not.
+func (e *Engine) TakeShadowRecords() map[int64][]ShadowRecord {
+	out := map[int64][]ShadowRecord{}
+	for _, a := range e.Accounts {
+		if a.Composition == nil {
+			continue
+		}
+		if recs := a.Composition.TakeRecords(); len(recs) > 0 {
+			out[a.BucketID] = append(out[a.BucketID], recs...)
+		}
+	}
+	return out
+}
+
+// GiveBackShadowRecords returns records that could not be written to their bucket's roster. A
+// bucket no engine account holds any more cannot take them back; they are counted as dropped,
+// with those that failed too often.
+func (e *Engine) GiveBackShadowRecords(m map[int64][]ShadowRecord) (dropped int) {
+	for id, recs := range m {
+		taken := false
+		for _, a := range e.Accounts {
+			if a.BucketID == id && a.Composition != nil {
+				dropped += a.Composition.GiveBack(recs)
+				taken = true
+				break
+			}
+		}
+		if !taken {
+			dropped += len(recs)
+		}
+	}
+	return dropped
 }
 
 // RostersChanged reports whether any roster's memory changed since the last call.

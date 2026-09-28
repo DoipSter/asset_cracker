@@ -82,7 +82,9 @@ the longshot only), time gates, price band, bets per round, the Kelly fraction a
 volatility trigger, a late window for the model's weight (`lambda_late` inside `lambda_late_tau`
 seconds of the close; 2026-09-23), a roster (`members`, 2 to 8 shapes plus an assignment: window owner from prior clocks, then
 later specialists on unclaimed seats; one version, not a bucket that rewrites its
-`strategy_version_id`; 2026-09-24), and the sizing (Kelly, or a bounded martingale registered as a
+`strategy_version_id`; 2026-09-24; since 2026-09-27 every member's shadow, the one-contract entry
+it would have made on each market, is written to `roster_shadow` once scored, with the clock's owner
+when it was seen, so the roster's picks can be measured against what it passed over), and the sizing (Kelly, or a bounded martingale registered as a
 negative control). Eleven presets fill the form: Value, Late, Favourite, Model, Scalper, Calm
 Scalper, Tail, Martingale control, and three ladder shapes. Every number set is a `convention` the owner chose, every one left blank is
 `inherited` from the parent, the name carries "(conventions)", and `engine.Params.Validate` is
