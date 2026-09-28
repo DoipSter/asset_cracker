@@ -502,6 +502,21 @@ leaderboard's verdict, on windows and corrected for every version tried, is the 
   for the ladders; a band with no bets is left out. `per_dollar_se` is the ratio estimator's
   standard error with bets as independent draws, which bets in one window are not: a floor on
   the noise. The page colours a row only when two of them clear zero.
+- `roster` is true for a version whose params carry two or more members. For one, `dancer`
+  (added 2026-09-27, TSK-54) measures its owner election on its members' recorded shadows
+  (`roster_shadow`, migration 0023; absent until a shadow has been scored). A choice clock is one
+  where the owner the roster elected from prior clocks (`owner_how` window; warmup clocks and
+  shadows recorded before the owner was kept are left out) and at least one other member would
+  both have bought. `owner_vs_field` is the owner's return per dollar that clock less the others'
+  mean, `owner_vs_split` less an even split of every member with a shadow, each over choice
+  clocks as the independent sample with `n`, `mean`, `se`, `t` and a `verdict` (`owner better`,
+  `owner worse`, `unresolved`: at least 30 clocks and |t| of 2, one question per roster stated in
+  advance). `owner_best_share` is how often the owner's shadow was the best of its clock, against
+  `chance_best_share` for a member picked at random. `members` is each member's shadows (clocks,
+  shadows, win rate, return per dollar with a ratio-estimator standard error over clocks, clocks
+  owned and the return in them); `series` is `[close, following the owner, splitting evenly]`
+  cumulative over choice clocks at $1 a clock, and `member_series` each member's alone. Shadows
+  are one contract each: this judges the picking, not the sizing.
 - `costs`: `quoted_spread_*` is the recorded book's YES ask less bid in the last snapshot at or
   before the first buy, up to ten minutes back (dollars); `over_mid_*` is the price paid above the
   side's mid that the order recorded, per contract and in total; fees are the venue's, per

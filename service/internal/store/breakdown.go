@@ -36,13 +36,14 @@ type VersionBet struct {
 // version that held contracts in it to the end has its settlement booked, the rule
 // RealisedByCoin uses, so no bet appears with its stake paid and its winnings still to come.
 // The money is each fill's own ledger entry on the bucket's account plus the settlement's
-// payout: the same figures as the ledger and the leaderboard, fees inside. family is the
-// version's strategy family (FamilyRounds or FamilyLadders); found is false when there is no such
-// version.
-func (s *Store) VersionBets(ctx context.Context, versionID int64) (family string, found bool, bets []VersionBet, err error) {
+// payout: the same figures as the ledger and the leaderboard, fees inside. info says what the
+// version is; found is false when there is no such version.
+func (s *Store) VersionBets(ctx context.Context, versionID int64) (info VersionInfo, found bool, bets []VersionBet, err error) {
 	bets = []VersionBet{}
 	err = s.ReadOnly(ctx, 20*time.Second, func(q Querier) error {
-		err := q.QueryRow(ctx, `select s.family from strategy_version v join strategy s on s.id = v.strategy_id where v.id = $1`, versionID).Scan(&family)
+		err := q.QueryRow(ctx, `
+			select s.family, (case when jsonb_typeof(v.params->'members') = 'array' then jsonb_array_length(v.params->'members') else 0 end) >= 2
+			  from strategy_version v join strategy s on s.id = v.strategy_id where v.id = $1`, versionID).Scan(&info.Family, &info.Roster)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -116,5 +117,52 @@ func (s *Store) VersionBets(ctx context.Context, versionID int64) (family string
 		}
 		return rows.Err()
 	})
-	return family, found, bets, err
+	return info, found, bets, err
+}
+
+// VersionInfo is what a version is, as the breakdown needs it.
+type VersionInfo struct {
+	Family string // FamilyRounds or FamilyLadders
+	Roster bool   // its params carry two or more members: it picks among them, and its shadows are recorded
+}
+
+// ShadowRow is one scored member shadow (roster_shadow), as the dancer's measurement reads it.
+type ShadowRow struct {
+	Member   string
+	Close    time.Time
+	Seen     time.Time // zero when it was not kept
+	Owner    string
+	OwnerHow string
+	Cost     int64
+	PnL      int64
+}
+
+// VersionShadows reads a roster version's scored shadows, every bucket of it, oldest clock first.
+// A shadow dropped unscored has no result to measure and is left out.
+func (s *Store) VersionShadows(ctx context.Context, versionID int64) ([]ShadowRow, error) {
+	out := []ShadowRow{}
+	err := s.ReadOnly(ctx, 20*time.Second, func(q Querier) error {
+		rows, err := q.Query(ctx, `
+			select member, closes_at, seen_at, owner, owner_how, cost_cents, pnl_cents
+			  from roster_shadow
+			 where strategy_version_id = $1 and result is not null
+			 order by closes_at, member, market_id`, versionID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r ShadowRow
+			var seen *time.Time
+			if err := rows.Scan(&r.Member, &r.Close, &seen, &r.Owner, &r.OwnerHow, &r.Cost, &r.PnL); err != nil {
+				return err
+			}
+			if seen != nil {
+				r.Seen = *seen
+			}
+			out = append(out, r)
+		}
+		return rows.Err()
+	})
+	return out, err
 }

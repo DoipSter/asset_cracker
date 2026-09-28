@@ -22,8 +22,12 @@ type breakdownDoc struct {
 	Simulated  bool    `json:"simulated"`
 	Version    int64   `json:"strategy_version_id"`
 	Family     string  `json:"family"`
+	Roster     bool    `json:"roster"`
 	ComputedAt float64 `json:"computed_at"`
 	analysis.Breakdown
+	// Dancer is a roster's owner election measured on its members' recorded shadows; absent for a
+	// version that is not a roster, and for a roster with no shadow scored yet.
+	Dancer *analysis.Dancer `json:"dancer,omitempty"`
 }
 
 type breakdowns struct {
@@ -67,7 +71,7 @@ func (c *breakdowns) get(db *store.Store, id int64) (breakdownDoc, bool, error) 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	family, found, rows, err := db.VersionBets(ctx, id)
+	info, found, rows, err := db.VersionBets(ctx, id)
 	if err != nil {
 		slog.Warn("analysis: breakdown read failed", "version", id, "err", err)
 		return breakdownDoc{}, false, err
@@ -75,10 +79,31 @@ func (c *breakdowns) get(db *store.Store, id int64) (breakdownDoc, bool, error) 
 	if !found {
 		return breakdownDoc{}, false, nil
 	}
-	d := breakdownDoc{Simulated: true, Version: id, Family: family, ComputedAt: unixf(time.Now()),
-		Breakdown: analysis.Break(betsOf(rows), family == store.FamilyLadders)}
+	d := breakdownDoc{Simulated: true, Version: id, Family: info.Family, Roster: info.Roster, ComputedAt: unixf(time.Now()),
+		Breakdown: analysis.Break(betsOf(rows), info.Family == store.FamilyLadders)}
+	if info.Roster {
+		shadows, err := db.VersionShadows(ctx, id)
+		if err != nil {
+			slog.Warn("analysis: roster shadows read failed", "version", id, "err", err)
+			return breakdownDoc{}, false, err
+		}
+		d.Dancer = analysis.Dance(shadowsOf(shadows))
+	}
 	c.by[id] = d
 	return d, true, nil
+}
+
+// shadowsOf turns the record's shadows into the analysis's.
+func shadowsOf(rows []store.ShadowRow) []analysis.Shadow {
+	out := make([]analysis.Shadow, len(rows))
+	for i, r := range rows {
+		seen := 0.0
+		if !r.Seen.IsZero() {
+			seen = unixf(r.Seen)
+		}
+		out[i] = analysis.Shadow{Member: r.Member, Close: r.Close.Unix(), Seen: seen, Owner: r.Owner, OwnerHow: r.OwnerHow, Cost: r.Cost, PnL: r.PnL}
+	}
+	return out
 }
 
 // betsOf turns the record's rows into the analysis's bets.

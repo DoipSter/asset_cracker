@@ -328,6 +328,8 @@ summary h2{flex:1}summary .f{font-size:13px;font-weight:600}
 .bdcuts td:first-child{white-space:normal}
 .bdcuts .w{width:112px;padding-left:10px}
 .fp{display:block;width:112px;height:14px;overflow:visible}
+.bddance{margin-top:16px;padding-top:8px;border-top:1px solid var(--rule)}
+.bddance h3{font:700 16px/1.2 var(--serif);margin:2px 0 4px}
 .scroll{overflow-x:auto}
 footer{margin:22px 0 8px;padding-top:6px;border-top:1px solid var(--ink);font:11px/1.4 var(--sans);color:var(--mute)}
 footer a{color:inherit;text-decoration:underline;text-underline-offset:2px}
@@ -1197,7 +1199,7 @@ function cutTable(title,rows,lim){rows=objs(rows);if(!rows.length)return"";
   return'<div class="scroll"><table><thead><tr><th>'+esc(title)+'</th><th>Bets</th><th>Won</th><th>P&amp;L</th><th>¢/$</th><th class="w">± 2 s.e.</th></tr></thead><tbody>'+rows.map(function(r){
     return"<tr><td>"+esc(str(r.key)||"—")+'</td><td class="f">'+(num(r.bets)!=null?r.bets:"—")+'</td><td class="f">'+(num(r.win_rate)!=null?Math.round(r.win_rate*100)+"%":"—")+'</td><td class="f '+cls(r.pnl_cents)+'">'+fig(r.pnl_cents,0,1)+'</td><td class="f '+cls(r.per_dollar)+'">'+(num(r.per_dollar)!=null?(r.per_dollar>0?"+":"")+fx(r.per_dollar*100,1):"—")+'</td><td class="w">'+fpl(r)+"</td></tr>"}).join("")+"</tbody></table></div>"}
 function bdHTML(lr,vid){var row=null;lr.forEach(function(r){if(r.strategy_version_id===vid)row=r});if(!row)return"";
-  var c=S.bd[vid],d=c&&c.d,out='<div class="sec chart" id="j-breakdown"><span class="k">Breakdown · one strategy at a time</span><h2>How its results are spread</h2>'+
+  var c=S.bd[vid],d=c&&c.d,out='<div class="sec chart sm" id="j-breakdown"><span class="k">Breakdown · one strategy at a time</span><h2>How its results are spread</h2>'+
     '<label class="bdpick">Strategy <select id="bd-pick" aria-label="Strategy to break down">'+lr.map(function(r){return'<option value="'+esc(String(r.strategy_version_id))+'"'+(r.strategy_version_id===vid?" selected":"")+">"+esc(str(r.strategy)||"—")+(r.world==="anti"?" anti":"")+(r.family==="kalshiladder"?" · ladder":"")+"</option>"}).join("")+"</select></label>";
   if(!d)return out+'<p class="empty">'+(c&&c.fail?"No answer from api/analysis/breakdown yet. Trying again shortly.":"Reading its bets…")+"</p></div>";
   var w=d.windows&&typeof d.windows==="object"?d.windows:{},b=d.bets&&typeof d.bets==="object"?d.bets:{},k=d.costs&&typeof d.costs==="object"?d.costs:{},n=num(w.n)||0;
@@ -1215,7 +1217,27 @@ function bdHTML(lr,vid){var row=null;lr.forEach(function(r){if(r.strategy_versio
   out+='<p class="what" style="margin-top:8px">A dot is coloured only when its whisker clears zero; bets in one window move together, so even a clear one is weaker than it looks, and choosing a rule by looking here is a new version to be judged on windows it has not seen.</p>';
   var mins=num(k.mean_seconds_to_close);
   out+='<div class="bdm">'+sp("entry: quoted spread, median",fx((num(k.quoted_spread_median)||0)*100,1)+"¢")+sp("1¢ or less on",Math.round((num(k.share_at_one_cent)||0)*100)+"% of entries")+sp("paid over the mid",fx(k.over_mid_per_contract_cents,2)+"¢ a contract, "+usd(k.over_mid_cents))+sp("fees",fx(k.fee_per_contract_cents,2)+"¢ a contract, "+usd(k.fees_cents))+(mins!=null?sp("before the close, on average",mins>=5400?fx(mins/3600,1)+" h":Math.round(mins/60)+" min"):"")+"</div>";
+  if(d.roster)out+=dancerHTML(d.dancer);
   return out+how("How the breakdown is made",d.what)+"</div>"}
+/* The dancer: a roster's owner election set against its own members' shadows (roster_shadow). A choice clock is one where
+   the elected owner and another member would both have bought; the owner's return there less the others' is one draw. */
+function dancerHTML(dn){var out='<div class="bddance"><span class="k">The dancer · does the elected owner beat the others?</span>';
+  if(!dn||typeof dn!=="object")return out+'<p class="empty">No member shadows scored yet. Every member\u2019s would-be bet is recorded from 27 September; the first land a minute after a close.</p></div>';
+  var f=dn.owner_vs_field&&typeof dn.owner_vs_field==="object"?dn.owner_vs_field:{},sp=dn.owner_vs_split&&typeof dn.owner_vs_split==="object"?dn.owner_vs_split:{},n=num(dn.choice_clocks)||0,res=resolved(f.verdict);
+  var c=function(v){v=num(v);return v==null?"—":(v>0?"+":"")+fx(v*100,1)+"¢"},kv=function(label,v){return"<span>"+label+' <span class="f">'+v+"</span></span>"};
+  out+="<h3>"+(res?esc(f.verdict.charAt(0).toUpperCase()+f.verdict.slice(1)):"Unresolved <span class=\"n\" style=\"font-weight:400\">"+(n<NEED_W?n+" of "+NEED_W+" choice clocks":"|t| "+fx(Math.abs(num(f.t)||0),2)+" of 2")+"</span>")+"</h3>";
+  out+='<div class="bdm">'+kv("owner v. the others, per $",c(f.mean)+" ± "+c(f.se).replace("+",""))+kv("t",fx(f.t,2))+kv("owner v. an even split",c(sp.mean)+" ± "+c(sp.se).replace("+",""))+"</div>";
+  out+='<div class="bdm">'+kv("owner was the best member",Math.round((num(dn.owner_best_share)||0)*100)+"%")+kv("a random pick",Math.round((num(dn.chance_best_share)||0)*100)+"%")+kv("clocks recorded",num(dn.clocks)||0)+kv("elected",num(dn.elected_clocks)||0)+kv("with a choice",n)+(num(dn.since)?kv("since",sinceText(dn.since)):"")+"</div>";
+  var se=arr(dn.series).filter(function(p){return Array.isArray(p)&&num(p[0])!=null&&num(p[1])!=null&&num(p[2])!=null});
+  var fmt=function(v){return(v>0?"+":"")+fx(v,2)};
+  if(se.length>=2)out+='<span class="k" style="display:block;margin-top:8px">On the choice clocks, $1 a clock</span>'+linesSVG([{pts:se.map(function(p){return[p[0],p[1]]}),ink:histColour(0)},{pts:se.map(function(p){return[p[0],p[2]]}),ink:histColour(1),dashed:true}],{zero:true,unit:.1,fmt:fmt,label:"Following the elected owner against splitting evenly, cumulative"})+
+    legendHTML([{ink:histColour(0),text:"follow the owner",figure:fmt(se[se.length-1][1])},{ink:histColour(1),dashed:true,text:"split evenly",figure:fmt(se[se.length-1][2])}]);
+  var ms=objs(dn.members),lines=[];ms.forEach(function(m,i){var pts=arr((dn.member_series||{})[m.member]).filter(function(p){return Array.isArray(p)&&num(p[0])!=null&&num(p[1])!=null});if(pts.length>=2)lines.push({m:m,i:i,pts:pts})});
+  if(lines.length)out+='<span class="k" style="display:block;margin-top:14px">Each member\u2019s shadows alone, $1 a clock it would have bought in</span>'+linesSVG(lines.map(function(l){return{pts:l.pts,ink:histColour(l.i+2)}}),{zero:true,unit:.1,fmt:fmt,label:"Each member's shadows, cumulative"})+
+    legendHTML(lines.map(function(l){return{ink:histColour(l.i+2),text:esc(str(l.m.member)),figure:fmt(l.pts[l.pts.length-1][1])}}));
+  if(ms.length)out+='<div class="scroll" style="margin-top:8px"><table><thead><tr><th>Member</th><th>Clocks</th><th>Won</th><th>¢/$</th><th>± 2 s.e.</th><th>Owned</th><th>¢/$ owned</th></tr></thead><tbody>'+ms.map(function(m){
+    return"<tr><td>"+esc(str(m.member)||"—")+'</td><td class="f">'+(num(m.clocks)||0)+'</td><td class="f">'+Math.round((num(m.win_rate)||0)*100)+'%</td><td class="f '+cls(m.per_dollar)+'">'+c(m.per_dollar)+'</td><td class="f">'+c(2*(num(m.per_dollar_se)||0)).replace("+","")+'</td><td class="f">'+(num(m.owned)||0)+'</td><td class="f '+cls(m.owned_per_dollar)+'">'+(num(m.owned)?c(m.owned_per_dollar):"—")+"</td></tr>"}).join("")+"</tbody></table></div>";
+  return out+how("How the dancer is measured",dn.what)+"</div>"}
 /* how: the method behind a fold. The API's `what` texts are written for the agents reading it; here they are kept, one click away. */
 function how(title,text){text=str(text);return text?'<details class="how"><summary>'+esc(title)+'</summary><p class="what">'+esc(text)+"</p></details>":""}
 /* The evidence pane leads with what happened: the standings and each strategy's P&L drawn over time, then the model against the market
