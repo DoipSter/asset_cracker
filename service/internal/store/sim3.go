@@ -112,6 +112,9 @@ type HeldBucket struct {
 	OrdersOn       bool  // the bucket's own new-orders switch (bucket.orders_on); false is held settle-only
 	CloseRequested bool  // × was pressed with a position open: closed the first time it holds nothing
 	BetCapBps      int64 // bucket.limits.bet_cap_bps: the most one position may cost, in bps of the window cap's base; 0 is none
+	// NoOwner is bucket.limits.no_owner: the roster members the election may not make a clock's
+	// owner. They still take what an owner leaves. Empty when the bucket's limits name none.
+	NoOwner []string
 }
 
 // BucketFill is one recorded fill with everything the rebuild folds it with (plan 5.4).
@@ -648,7 +651,8 @@ func (s *Store) HeldBuckets(ctx context.Context, family string, version int) ([]
 		                  where e.account_id = b.ledger_account_id and t.reason = 'seed'), 0)::bigint,
 		       b.orders_on, b.close_requested_at is not null,
 		       -- a limit that is not a number is no limit, rather than a load that fails
-		       (case when jsonb_typeof(b.limits->'bet_cap_bps') = 'number' then (b.limits->>'bet_cap_bps')::numeric else 0 end)::bigint
+		       (case when jsonb_typeof(b.limits->'bet_cap_bps') = 'number' then (b.limits->>'bet_cap_bps')::numeric else 0 end)::bigint,
+		       (case when jsonb_typeof(b.limits->'no_owner') = 'array' then array(select jsonb_array_elements_text(b.limits->'no_owner')) else '{}'::text[] end)
 		  from bucket b
 		  join strategy_version v on v.id = b.strategy_version_id
 		  join strategy st        on st.id = v.strategy_id
@@ -662,7 +666,7 @@ func (s *Store) HeldBuckets(ctx context.Context, family string, version int) ([]
 	for rows.Next() {
 		var h HeldBucket
 		var params []byte
-		if err := rows.Scan(&h.ID, &h.Name, &h.LedgerAccountID, &h.VersionID, &h.Strategy, &h.VersionStatus, &params, &h.CashCents, &h.SeedCents, &h.OrdersOn, &h.CloseRequested, &h.BetCapBps); err != nil {
+		if err := rows.Scan(&h.ID, &h.Name, &h.LedgerAccountID, &h.VersionID, &h.Strategy, &h.VersionStatus, &params, &h.CashCents, &h.SeedCents, &h.OrdersOn, &h.CloseRequested, &h.BetCapBps, &h.NoOwner); err != nil {
 			return nil, err
 		}
 		h.Params = params

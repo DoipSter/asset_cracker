@@ -80,7 +80,11 @@ counting what it already cost; the engine sizes under it whichever roster member
 order's detail carries `bet_cap_cents` and binding `bet_cap`. Every roster bucket has 5%
 (`store.RosterBetCapBps`, the owner's choice), a new roster bucket is created with it and a next
 life keeps its last life's limits; it belongs to the bucket, so the version and the trials count
-are unchanged. Replays (`strategy_exercise`) do not apply it.
+are unchanged. Replays (`strategy_exercise`) do not apply it. A roster bucket's `limits` may also carry
+`no_owner` (migration 0025, 2026-09-28): members its election passes over (`engine.Composition.PassOver`),
+never a clock's owner, warmup included, still free to take the seats an owner leaves. Dance both's
+bucket passes over Late model, its latest member: owning, it closed every clock it held to the
+other two.
 
 **The strategy builder** (buckets page, "New strategy") makes a version-3 row from a shape:
 the exit rule (`hold` or `ev`), a side filter (whichever the belief favours, the favourite only,

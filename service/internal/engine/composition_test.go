@@ -503,3 +503,41 @@ func TestRosterMembersShareParentFamily(t *testing.T) {
 		t.Fatalf("a stored roster with a stray member must be refused, naming it: %v", err)
 	}
 }
+
+// A member the bucket's limits keep from owning (no_owner) is passed over by the election even with
+// the best score, and in warmup; it still takes a seat the owner leaves. A name fits with or
+// without " (conventions)"; one that fits nobody is reported; a list leaving nobody to own is refused.
+func TestPassOverKeepsAMemberFromOwning(t *testing.T) {
+	c := rosterAB(t, AssignBoth, 2, false) // A plays 300-600 s out; B, the later specialist, the last 150 s
+	fillClocks(c, 3, -10, 30)              // B has the better score
+	now := float64(1000 + 3*900)
+	if idx, how := c.WindowOwner(now+900, now); idx != 1 || how != PickWindow {
+		t.Fatalf("B's score elects it: %d %s", idx, how)
+	}
+	unknown, applied := c.PassOver([]string{"B", "Nobody"})
+	if !applied || len(unknown) != 1 || unknown[0] != "Nobody" {
+		t.Fatalf("applied %v unknown %v", applied, unknown)
+	}
+	if idx, how := c.WindowOwner(now+900, now); idx != 0 || how != PickWindow {
+		t.Fatalf("B passed over, A is elected: %d %s", idx, how)
+	}
+	// A does not claim the ticker; B, later than A, takes the seat.
+	if idx, how := c.Pick("T9", now+900, now+800, 100, []int{1}); idx != 1 || how != PickReserve {
+		t.Fatalf("B lost its leftovers: %d %s", idx, how)
+	}
+	// Warmup goes to the first member the limits let own.
+	w := rosterAB(t, AssignBoth, 5, false)
+	if _, applied := w.PassOver([]string{c.Members[0].Name}); !applied {
+		t.Fatal("A by its full name was refused")
+	}
+	if idx, how := w.WindowOwner(5000, 4000); idx != 1 || how != PickWarmup {
+		t.Fatalf("warmup with A passed over: %d %s", idx, how)
+	}
+	// Nobody left to own: refused, and what was set stays.
+	if _, applied := c.PassOver([]string{"A", "B"}); applied {
+		t.Fatal("passing over every member was applied")
+	}
+	if idx, _ := c.WindowOwner(now+900, now); idx != 0 {
+		t.Fatalf("a refused list changed the election: %d", idx)
+	}
+}

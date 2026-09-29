@@ -290,3 +290,31 @@ func TestTheBucketsBetCapReachesItsAccount(t *testing.T) {
 		t.Fatalf("after a restart: %v", caps)
 	}
 }
+
+// A bucket's no_owner limit reaches its roster at every load: the member is passed over by the
+// election, warmup included.
+func TestTheBucketsNoOwnerReachesItsRoster(t *testing.T) {
+	g := rosterRig(t)
+	r := g.start(true)
+	if idx, how := ownerOf(r, g.now()); idx != 0 || how != k3.PickWarmup {
+		t.Fatalf("before the limit: %d %s", idx, how)
+	}
+	g.s.mu.Lock()
+	for _, b := range g.s.buckets {
+		b.noOwner = []string{"Early"}
+	}
+	g.s.mu.Unlock()
+	if _, err := r.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if idx, how := ownerOf(r, g.now()); idx != 1 || how != k3.PickWarmup {
+		t.Fatalf("after a reload Early should be passed over: %d %s", idx, how)
+	}
+	again, err := NewRunner3(context.Background(), g.s, rigCoins, g.options(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx, _ := ownerOf(again, g.now()); idx != 1 {
+		t.Fatalf("after a restart: %d", idx)
+	}
+}

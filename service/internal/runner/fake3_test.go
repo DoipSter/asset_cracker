@@ -40,9 +40,10 @@ type fakeBucket struct {
 	seed      int64
 	adjust    int64 // money moved under the engine, for the cash-check tests
 	reaped    int64
-	ordersOff bool  // bucket.orders_on = false: held settle-only
-	closeReq  bool  // bucket.close_requested_at set: closed the first time it holds nothing
-	betCap    int64 // bucket.limits.bet_cap_bps
+	ordersOff bool     // bucket.orders_on = false: held settle-only
+	closeReq  bool     // bucket.close_requested_at set: closed the first time it holds nothing
+	betCap    int64    // bucket.limits.bet_cap_bps
+	noOwner   []string // bucket.limits.no_owner
 }
 
 type fakeMarket struct {
@@ -394,7 +395,7 @@ func (s *fakeStore) HeldBuckets(ctx context.Context, family string, version int)
 			continue // the real query joins strategy and takes one family's buckets
 		}
 		h := store.HeldBucket{SimBucket: b.SimBucket, Strategy: b.strategy, VersionStatus: v.Status, Params: v.Params, SeedCents: b.seed, OrdersOn: !b.ordersOff, CloseRequested: b.closeReq,
-			BetCapBps: b.betCap}
+			BetCapBps: b.betCap, NoOwner: b.noOwner}
 		h.CashCents = s.cash(b)
 		out = append(out, h)
 	}

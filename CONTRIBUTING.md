@@ -96,7 +96,8 @@ the leaderboard had lost money after fees, and none could be told from zero. Unt
   switches or history views until a version passes the promotion gate. Fixes to what exists are
   welcome. The owner excepted two on 2026-09-25 (TSK-51): deployed capital drawn on the home
   page's value chart, and the tax reserve counted as a debit against the total. And on 2026-09-28
-  (TSK-55) a per-bet cap in a bucket's limits, set on the roster buckets.
+  (TSK-55) a per-bet cap in a bucket's limits, set on the roster buckets, and (TSK-56) a member
+  a roster's bucket keeps from owning its clocks.
 - **Batch releases.** A prod release restarts the service. In the 48 hours to 2026-09-24 there
   were 34 restarts, and all 416 of Kalshi's 429 replies in that time came within three minutes of
   one, while the engine rebuilt its books. Release when a change needs to be live, and carry

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 )
 
 // A composition is one version: a roster of named shapes plus an assignment. Results attach to
@@ -62,6 +63,10 @@ type Composition struct {
 	// unrecorded is every shadow scored or dropped and not yet written to the record
 	// (roster_shadow): the runner takes them (TakeRecords) and gives back what it could not write.
 	unrecorded []ShadowRecord
+	// passOver is the members the bucket's limits keep from owning a clock (bucket.limits
+	// no_owner), by index: the election passes over them, and they still take what an owner leaves.
+	// Set at each load (PassOver); not memory.
+	passOver map[int]bool
 }
 
 type reservation struct {
@@ -178,13 +183,16 @@ func (c *Composition) WindowOwner(windowClose, now float64) (idx int, how string
 		return -1, ""
 	}
 	if c.StructuralOnly || c.Lookback <= 0 {
-		return 0, PickWindow
+		return c.firstOwner(), PickWindow
 	}
 	if c.clocksSettled(windowClose, now) < c.Lookback {
-		return 0, PickWarmup
+		return c.firstOwner(), PickWarmup
 	}
 	best, bestR := -1, math.Inf(-1)
 	for i, m := range c.Members {
+		if c.passOver[i] {
+			continue
+		}
 		r, n := c.windowScore(m.Name, windowClose, now)
 		if n == 0 {
 			continue
@@ -194,9 +202,44 @@ func (c *Composition) WindowOwner(windowClose, now float64) (idx int, how string
 		}
 	}
 	if best < 0 {
-		return 0, PickWarmup
+		return c.firstOwner(), PickWarmup
 	}
 	return best, PickWindow
+}
+
+// firstOwner is the member that owns a clock when none is elected: the first the limits let own.
+func (c *Composition) firstOwner() int {
+	for i := range c.Members {
+		if !c.passOver[i] {
+			return i
+		}
+	}
+	return 0
+}
+
+// PassOver keeps the named members from owning a clock (bucket.limits no_owner): the election,
+// warmup included, passes over them, and they still take the seats an owner leaves. A name is
+// matched with or without the " (conventions)" a shape's name is given. It returns the names that
+// match no member, and applies nothing when the list would leave no member to own.
+func (c *Composition) PassOver(names []string) (unknown []string, applied bool) {
+	base := func(s string) string { return strings.TrimSuffix(strings.TrimSpace(s), " (conventions)") }
+	pass := map[int]bool{}
+	for _, n := range names {
+		found := false
+		for i, m := range c.Members {
+			if base(m.Name) == base(n) {
+				pass[i], found = true, true
+			}
+		}
+		if !found {
+			unknown = append(unknown, n)
+		}
+	}
+	if len(pass) >= len(c.Members) {
+		return unknown, false
+	}
+	c.passOver = pass
+	return unknown, true
 }
 
 // Pick chooses who may claim this ticker among eligible member indexes (those who would

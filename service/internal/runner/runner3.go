@@ -1990,6 +1990,13 @@ func (r *Runner3) read(ctx context.Context, pending []string, ids []int64, bucke
 		a := k3.NewAccount(b.params, b.ID, cash[b.ID], b.mayOrder)
 		a.SeedCents = b.SeedCents // the ledger's: a bucket deployed at its own figure sizes off that figure, not the convention
 		a.BetCapBps = b.BetCapBps // the bucket's own limit, not the version's
+		if a.Composition != nil && len(b.NoOwner) > 0 {
+			// Members the bucket's limits keep from owning a clock. A name that fits no member, or a
+			// list that would leave nobody to own, is reported and not applied: the roster keeps an owner.
+			if unknown, applied := a.Composition.PassOver(b.NoOwner); !applied || len(unknown) > 0 {
+				slog.Warn("v3: a bucket's no_owner limit was not wholly applied", "bucket", b.ID, "names", b.NoOwner, "unknown", unknown, "applied", applied)
+			}
+		}
 		if b.params.Sizing == k3.SizingMartingale && b.mayOrder {
 			// The martingale's state is the ledger's, like everything else in this rebuild.
 			streak, err := r.db.SettledStreak(ctx, b.ID)
