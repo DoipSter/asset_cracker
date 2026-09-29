@@ -1095,3 +1095,49 @@ func TestSettleOnlyAccountIsHeldWhateverItsParams(t *testing.T) {
 		}
 	}
 }
+
+// The bucket's per-bet cap (bucket.limits.bet_cap_bps) bounds what one position may cost, on the
+// window cap's base, and counts what the position already cost. The case is the roster bet of
+// 2026-09-27 21:57 PT: a belief of about 0.90 against an ask of 0.73, quarter-Kelly on $1,165.06.
+func TestBetCapBoundsOnePosition(t *testing.T) {
+	in := SizeInput{PSide: 0.8955, Asks: []broker.Price{7300, 7400}, StaleUnits: 12, Kappa: 0.25, CapBps: 2500, SeedCents: 100000,
+		EquityCents: 116506, CashCents: 116506}
+	free := Size(in)
+	if free.BlockedBy != "" || free.StakeCents <= 5000 || free.Binding != "kelly" || free.BetCapCents != 0 {
+		t.Fatalf("no cap: %+v", free)
+	}
+	in.BetCapBps = 500 // 5% of min(equity, seed) = $50
+	capped := Size(in)
+	if capped.BlockedBy != "" || capped.StakeCents != 5000 || capped.Binding != "bet_cap" || capped.BetCapCents != 5000 {
+		t.Fatalf("capped: %+v", capped)
+	}
+	for _, st := range capped.Steps {
+		if st.MaxCostCents > 5000 {
+			t.Errorf("a step's ceiling passes the cap: %+v", st)
+		}
+	}
+	in.HeldCents = 4000 // the position already cost $40: $10 of room is left
+	if again := Size(in); again.StakeCents != 1000 || again.Binding != "bet_cap" {
+		t.Fatalf("with $40 held: %+v", again)
+	}
+	in.HeldCents = 5000
+	if full := Size(in); full.BlockedBy != BlockedBetCapReached || full.Qty != 0 {
+		t.Fatalf("at the cap: %+v", full)
+	}
+}
+
+// The account carries the cap into every order it sizes, and the order says so.
+func TestBetCapReachesTheOrder(t *testing.T) {
+	a := NewAccount(testScalper(t, 1, 0.007, 0.006), 31, 100000, true)
+	a.BetCapBps = 20 // 0.2% of $1,000: $2
+	h := newHarness(t, a)
+	thin := book(dogeBook.YesBids, [][2]string{{"0.8800", "20"}, {"0.8700", "23.62"}, {"0.8600", "28.28"}, {"0.8500", "210.84"}, {"0.8400", "54.92"}})
+	_, intents, _, _ := h.step("DOGE", doge, thin, view("DOGE", 0.16), 500)
+	if len(intents) == 0 {
+		t.Fatal("no order: the test proves nothing")
+	}
+	in := intents[0]
+	if in.Order.MaxCostCents > 200 || in.Detail["bet_cap_cents"] != int64(200) || in.Detail["binding"] != "bet_cap" {
+		t.Fatalf("order %+v, detail bet_cap_cents %v binding %v", in.Order, in.Detail["bet_cap_cents"], in.Detail["binding"])
+	}
+}

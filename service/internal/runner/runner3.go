@@ -1989,6 +1989,7 @@ func (r *Runner3) read(ctx context.Context, pending []string, ids []int64, bucke
 	for _, b := range buckets {
 		a := k3.NewAccount(b.params, b.ID, cash[b.ID], b.mayOrder)
 		a.SeedCents = b.SeedCents // the ledger's: a bucket deployed at its own figure sizes off that figure, not the convention
+		a.BetCapBps = b.BetCapBps // the bucket's own limit, not the version's
 		if b.params.Sizing == k3.SizingMartingale && b.mayOrder {
 			// The martingale's state is the ledger's, like everything else in this rebuild.
 			streak, err := r.db.SettledStreak(ctx, b.ID)

@@ -254,3 +254,39 @@ func TestRosterShadowsReachTheRecord(t *testing.T) {
 		}
 	}
 }
+
+// A bucket's per-bet cap, read with the bucket, reaches its account at every load: the first,
+// a rebuild and a restart.
+func TestTheBucketsBetCapReachesItsAccount(t *testing.T) {
+	g := rosterRig(t)
+	r := g.start(true)
+	g.s.mu.Lock()
+	for _, b := range g.s.buckets {
+		b.betCap = 500
+	}
+	g.s.mu.Unlock()
+	capOf := func(r *Runner3) (caps []int64) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for _, a := range r.engine.Accounts {
+			caps = append(caps, a.BetCapBps)
+		}
+		return caps
+	}
+	if caps := capOf(r); len(caps) != 1 || caps[0] != 0 {
+		t.Fatalf("before the limit was set: %v", caps)
+	}
+	if _, err := r.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if caps := capOf(r); len(caps) != 1 || caps[0] != 500 {
+		t.Fatalf("after a reload: %v", caps)
+	}
+	again, err := NewRunner3(context.Background(), g.s, rigCoins, g.options(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if caps := capOf(again); len(caps) != 1 || caps[0] != 500 {
+		t.Fatalf("after a restart: %v", caps)
+	}
+}

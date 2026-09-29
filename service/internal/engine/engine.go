@@ -33,6 +33,10 @@ type Account struct {
 	// params' convention; a bucket the operator deploys at another figure sizes off its own.
 	// Zero means unknown, and the params' figure stands.
 	SeedCents int64
+	// BetCapBps is the bucket's per-bet cap from its limits (bucket.limits.bet_cap_bps), set by the
+	// rebuild: what one position may cost, on the window cap's base. 0 is none. It belongs to the
+	// bucket, not the version, so a roster's member bets under it whichever member fires.
+	BetCapBps int64
 	Positions map[posKey]*Position
 	Windows   map[int64]*Window // by close, unix seconds; pruned once over and empty
 	// MayOrder: AC_V3 on AND the version was probation/active at start. False = settle-only: held,
@@ -547,7 +551,7 @@ func (a *Account) decideOnce(coin string, m Market, sides broker.Sides, v View, 
 			}
 		}
 		w := a.windowOrFresh(m.Close)
-		in := SizeInput{PSide: pSide, Asks: asks, StaleUnits: staleUnits, Kappa: prm.Kappa, CapBps: prm.WindowCapBps,
+		in := SizeInput{PSide: pSide, Asks: asks, StaleUnits: staleUnits, Kappa: prm.Kappa, CapBps: prm.WindowCapBps, BetCapBps: a.BetCapBps,
 			SeedCents: a.Seed(), EquityCents: w.EquityCents, KMax: w.KMax, UsedCents: w.Used(), CashCents: a.CashCents,
 			FixedStakeCents: a.FixedStake()}
 		if held != nil { // the same side: the loop above lets the account add only to the side it holds
@@ -575,6 +579,9 @@ func (a *Account) decideOnce(coin string, m Market, sides broker.Sides, v View, 
 	in.Detail["kelly"], in.Detail["binding"], in.Detail["cost_steps"] = sz.Kelly, sz.Binding, steps
 	in.Detail["budget_cents"], in.Detail["cap_cents"], in.Detail["room_cents"] = sz.BudgetCents, sz.CapCents, sz.RoomCents
 	in.Detail["held_cents"] = heldCents // what the ceilings counted as already spent in this market
+	if sz.BetCapCents > 0 {
+		in.Detail["bet_cap_cents"] = sz.BetCapCents
+	}
 	if fixed := a.FixedStake(); fixed > 0 {
 		in.Detail["martingale"] = map[string]any{"stake_cents": fixed, "loss_streak": a.LossStreak}
 	}

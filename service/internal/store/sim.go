@@ -42,6 +42,18 @@ type SimSetup struct {
 // EnsureSimSetup creates, once, the sim ledger accounts, the paper venue account, and one
 // bucket per strategy seeded with seedCents from the common pool. It is safe to call on every
 // start: what exists is left alone. A bucket is never topped up here.
+// RosterBetCapBps is the per-bet cap a roster version's bucket is created with (bucket.limits
+// bet_cap_bps): one position may cost at most 5% of the smaller of the bucket's equity and seed.
+// The owner's choice of 2026-09-28, after one late bet of 15% of a roster's bucket lost $178.52 on
+// a single round; a risk preference, not a measurement. A single shape's bucket gets none.
+const RosterBetCapBps = 500
+
+// rosterLimits is a new bucket's limits: the roster cap ($5) when the version ($4) carries two or
+// more members, else none.
+const rosterLimits = `(select case when jsonb_typeof(v.params->'members') = 'array' and jsonb_array_length(v.params->'members') >= 2
+	                                    then jsonb_build_object('bet_cap_bps', $5::integer) else '{}'::jsonb end
+	                               from strategy_version v where v.id = $4)`
+
 func (s *Store) EnsureSimSetup(ctx context.Context, prefix, family string, version int, strategies []string, seedCents int64) (SimSetup, error) {
 	out := SimSetup{Buckets: map[string]SimBucket{}}
 	tx, err := s.pool.Begin(ctx)
@@ -131,8 +143,8 @@ func (s *Store) EnsureSimSetup(ctx context.Context, prefix, family string, versi
 				return out, err
 			}
 			if err = tx.QueryRow(ctx, `insert into bucket (name, mode, venue_account_id, ledger_account_id, strategy_version_id, limits, tax_rate_bps)
-			                           values ($1, 'sim', $2, $3, $4, '{}', 0) returning id`,
-				bucketName, venueAccount, b.LedgerAccountID, b.VersionID).Scan(&b.ID); err != nil {
+			                           values ($1, 'sim', $2, $3, $4, `+rosterLimits+`, 0) returning id`,
+				bucketName, venueAccount, b.LedgerAccountID, b.VersionID, RosterBetCapBps).Scan(&b.ID); err != nil {
 				return out, err
 			}
 			if err = transfer("deposit", "sim funds for "+bucketName, owners, pool, seedCents); err != nil {
@@ -280,8 +292,10 @@ func seedLife(ctx context.Context, tx pgx.Tx, setup SimSetup, prev SimBucket, li
 	if err := tx.QueryRow(ctx, `insert into ledger_account (kind, mode, name) values ('bucket', 'sim', $1) returning id`, next.Name+" cash").Scan(&next.LedgerAccountID); err != nil {
 		return next, err
 	}
+	// The next life keeps what its last life's limits said, over the roster default.
 	if err := tx.QueryRow(ctx, `insert into bucket (name, mode, venue_account_id, ledger_account_id, strategy_version_id, limits, tax_rate_bps)
-	                           values ($1, 'sim', $2, $3, $4, '{}', 0) returning id`, next.Name, setup.venueAccountID, next.LedgerAccountID, next.VersionID).Scan(&next.ID); err != nil {
+	                           values ($1, 'sim', $2, $3, $4, `+rosterLimits+` || coalesce((select limits from bucket where id = $6), '{}'), 0) returning id`,
+		next.Name, setup.venueAccountID, next.LedgerAccountID, next.VersionID, RosterBetCapBps, prev.ID).Scan(&next.ID); err != nil {
 		return next, err
 	}
 	if err := fundSeed(ctx, tx, setup, next.Name, next.LedgerAccountID, seedCents, source); err != nil {
@@ -370,7 +384,8 @@ func (s *Store) DeployBucket(ctx context.Context, setup SimSetup, prefix, family
 			return SimBucket{}, err
 		}
 		if err = tx.QueryRow(ctx, `insert into bucket (name, mode, venue_account_id, ledger_account_id, strategy_version_id, limits, tax_rate_bps)
-		                           values ($1, 'sim', $2, $3, $4, '{}', 0) returning id`, next.Name, setup.venueAccountID, next.LedgerAccountID, next.VersionID).Scan(&next.ID); err != nil {
+		                           values ($1, 'sim', $2, $3, $4, `+rosterLimits+`, 0) returning id`,
+			next.Name, setup.venueAccountID, next.LedgerAccountID, next.VersionID, RosterBetCapBps).Scan(&next.ID); err != nil {
 			return SimBucket{}, err
 		}
 		if err = fundSeed(ctx, tx, setup, next.Name, next.LedgerAccountID, d.SeedCents, d.Source); err != nil {

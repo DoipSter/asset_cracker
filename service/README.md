@@ -74,7 +74,13 @@ bucket's own seed, from the ledger, is the figure the engine measures it against
 mark until its first high, the window cap (`window_cap_bps` of the lesser of equity and seed) and
 the martingale ceiling (`engine.Account.Seed`), so a bucket deployed at $500 is sized as a $500
 bucket and not asked to reach $1,000 first. The version's `seed_cents` stays the convention the
-engine seeds at when nobody chose.
+engine seeds at when nobody chose. A bucket's own `limits` may carry `bet_cap_bps` (migration 0024,
+2026-09-28): the most one position, one market and side, may cost, on the window cap's base,
+counting what it already cost; the engine sizes under it whichever roster member fires, and the
+order's detail carries `bet_cap_cents` and binding `bet_cap`. Every roster bucket has 5%
+(`store.RosterBetCapBps`, the owner's choice), a new roster bucket is created with it and a next
+life keeps its last life's limits; it belongs to the bucket, so the version and the trials count
+are unchanged. Replays (`strategy_exercise`) do not apply it.
 
 **The strategy builder** (buckets page, "New strategy") makes a version-3 row from a shape:
 the exit rule (`hold` or `ev`), a side filter (whichever the belief favours, the favourite only,

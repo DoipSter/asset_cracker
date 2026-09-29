@@ -14,6 +14,7 @@ const (
 	BlockedNoSize               = "less than one whole contract displayed"
 	BlockedBudgetSpent          = "window budget spent"
 	BlockedCapReached           = "window cap reached"
+	BlockedBetCapReached        = "bet cap reached"
 	BlockedNoCash               = "no cash"
 	BlockedUnderOne             = "the stake buys less than one contract"
 	BlockedDrift                = "model drift"
@@ -34,6 +35,7 @@ const (
 	bindingMartingale           = "martingale"
 	bindingWindow               = "window"
 	bindingCap                  = "cap"
+	bindingBetCap               = "bet_cap"
 	bindingCash                 = "cash"
 	maxOrderQty           int64 = broker.MaxQty
 )
@@ -49,7 +51,10 @@ type SizeInput struct {
 	StaleUnits int64   // the staleness cost of buying, in price units
 	Kappa      float64 // the Kelly fraction staked
 	CapBps     int64   // window_cap_bps
-	SeedCents  int64
+	// BetCapBps is the bucket's per-bet cap (bucket.limits.bet_cap_bps): what one position, this
+	// market and side, may cost at most, on the window cap's base. 0 is no cap.
+	BetCapBps int64
+	SeedCents int64
 
 	EquityCents int64   // E_w: frozen for the window, or the bucket's cash if this would be its first buy
 	KMax        float64 // the window's best Kelly fraction so far
@@ -75,7 +80,8 @@ type Sizing struct {
 	Kelly                            float64           // k at the best ask (Asks[0])
 	KWindow                          float64           // max(the window's best so far, k)
 	BudgetCents, CapCents, RoomCents int64
-	Binding                          string // what set the size: kelly | window | cap | cash
+	BetCapCents                      int64  // the position's cap when the bucket has one; 0 when not
+	Binding                          string // what set the size: kelly | window | cap | bet_cap | cash
 	BlockedBy                        string // why nothing is bought; empty when Qty >= 1
 }
 
@@ -95,7 +101,8 @@ func floorCents(kappa, k float64, equityCents int64) int64 {
 //
 //	budget = floor(kappa * max(KMax, k) * E_w)      quarter-Kelly of the window's single best bet
 //	cap    = window_cap_bps * min(E_w, seed) / 10000
-//	room   = min(budget - used, cap - used, cash)
+//	bet    = bet_cap_bps * min(E_w, seed) / 10000, when the bucket has one: what the position may cost
+//	room   = min(budget - used, cap - used, bet - held, cash)
 //	stake  = min(floor(kappa * k * E_w) - held, room)
 //	qty    = the most whole contracts whose BOOKED cost at the best ask (premium rounded up, plus
 //	         the order's fee rounded up) stays within the stake; staleness is not a ledger cost
@@ -151,15 +158,22 @@ func Size(in SizeInput) Sizing {
 	if r := s.CapCents - in.UsedCents; r < s.RoomCents {
 		s.RoomCents, s.Binding = r, bindingCap
 	}
+	held := max(0, in.HeldCents)
+	if in.BetCapBps > 0 {
+		// The owner's per-bet cap: like every ceiling here it counts what the position already cost.
+		s.BetCapCents = in.BetCapBps * min(in.EquityCents, in.SeedCents) / 10000
+		if r := s.BetCapCents - held; r < s.RoomCents {
+			s.RoomCents, s.Binding = r, bindingBetCap
+		}
+	}
 	if in.CashCents < s.RoomCents {
 		s.RoomCents, s.Binding = in.CashCents, bindingCash
 	}
 	if s.RoomCents <= 0 {
 		s.RoomCents = 0
-		s.BlockedBy = map[string]string{bindingWindow: BlockedBudgetSpent, bindingCap: BlockedCapReached, bindingCash: BlockedNoCash}[s.Binding]
+		s.BlockedBy = map[string]string{bindingWindow: BlockedBudgetSpent, bindingCap: BlockedCapReached, bindingBetCap: BlockedBetCapReached, bindingCash: BlockedNoCash}[s.Binding]
 		return s
 	}
-	held := max(0, in.HeldCents)
 	wanted, binding := floorCents(in.Kappa, s.Kelly, in.EquityCents), bindingKelly
 	if in.FixedStakeCents > 0 {
 		wanted, binding = in.FixedStakeCents, bindingMartingale
